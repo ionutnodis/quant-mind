@@ -64,6 +64,12 @@ def rolling_alpha(
     return daily_alpha * periods_per_year
 
 
+def annualized_vol(returns: pd.Series, periods_per_year: int = 252) -> float:
+    """Annualized volatility: sample std of period returns scaled by sqrt(periods_per_year)."""
+    _require(len(returns) >= 2, f"{len(returns)} observations cannot estimate volatility")
+    return float(returns.std() * math.sqrt(periods_per_year))
+
+
 def historical_es(returns: pd.Series, confidence: float = 0.975) -> float:
     """Historical Expected Shortfall: mean of the worst floor(n*(1-confidence))
     observations, reported as a positive loss magnitude."""

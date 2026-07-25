@@ -19,7 +19,14 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from quantmind.risk.montecarlo import simulate_terminal_returns
-from quantmind.risk.returns import InsufficientDataError, historical_es, rolling_alpha, rolling_beta, simple_returns
+from quantmind.risk.returns import (
+    InsufficientDataError,
+    annualized_vol,
+    historical_es,
+    rolling_alpha,
+    rolling_beta,
+    simple_returns,
+)
 
 router = APIRouter()
 
@@ -48,7 +55,11 @@ def _price_series(request: Request, symbol: str, years: int) -> pd.Series:
     symbol_map = store.read_symbol_map()
     if symbol not in symbol_map:
         raise HTTPException(422, detail=f"symbol {symbol!r} not in cache")
-    bars, _ = store.read_bars(con_id=symbol_map[symbol], bar_size="1d")
+    try:
+        bars, _ = store.read_bars(con_id=symbol_map[symbol], bar_size="1d")
+    except FileNotFoundError:
+        # Mapped but never synced: missing data is a structured 422, never a 500.
+        raise HTTPException(422, detail=f"symbol {symbol!r} has no cached bars")
     series = bars["close"]
     if years > 0:
         series = series.iloc[-(years * 252):]
@@ -143,7 +154,10 @@ def risk(
     except InsufficientDataError:
         es = None
 
-    ann_vol = _clean(asset_returns.std() * math.sqrt(252)) if len(asset_returns) > 1 else None
+    try:
+        ann_vol = _clean(annualized_vol(asset_returns))
+    except InsufficientDataError:
+        ann_vol = None
 
     return RiskResponse(
         symbol=symbol,

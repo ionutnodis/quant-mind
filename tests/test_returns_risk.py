@@ -4,6 +4,7 @@ import pytest
 
 from quantmind.risk.returns import (
     InsufficientDataError,
+    annualized_vol,
     historical_es,
     rolling_alpha,
     rolling_beta,
@@ -60,3 +61,22 @@ def test_rolling_beta_window_larger_than_data_is_explicit_error():
     bench = _rand_returns(30, seed=3)
     with pytest.raises(InsufficientDataError):
         rolling_beta(bench, bench, window=60)
+
+
+def test_annualized_vol_hand_computed_case():
+    # Alternating +/-1% with zero mean: sample std = sqrt(sum(r^2)/(n-1))
+    # = sqrt(4 * 0.0001 / 3) daily; annualized by sqrt(252).
+    r = pd.Series([0.01, -0.01, 0.01, -0.01], index=pd.bdate_range("2026-01-05", periods=4))
+    expected_daily = np.sqrt(4 * 0.01**2 / 3)
+    assert annualized_vol(r) == pytest.approx(expected_daily * np.sqrt(252))
+
+
+def test_annualized_vol_respects_periods_per_year():
+    r = _rand_returns(100, seed=5)
+    assert annualized_vol(r, periods_per_year=52) == pytest.approx(float(r.std()) * np.sqrt(52))
+
+
+def test_annualized_vol_requires_two_observations():
+    r = pd.Series([0.01], index=pd.bdate_range("2026-01-05", periods=1))
+    with pytest.raises(InsufficientDataError):
+        annualized_vol(r)

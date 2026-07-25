@@ -69,6 +69,31 @@ def test_risk_unknown_symbol_is_422_not_500(client):
     assert "detail" in r.json()
 
 
+@pytest.fixture
+def client_with_mapped_but_barless_symbol(tmp_path):
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)
+    # GHOST is in the symbol map but has no cached bars at any bar size.
+    store.write_symbol_map({"SPY": 1, "GHOST": 99})
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+
+
+def test_risk_mapped_symbol_without_bars_is_422_not_500(client_with_mapped_but_barless_symbol):
+    r = client_with_mapped_but_barless_symbol.get("/api/risk/GHOST")
+    assert r.status_code == 422
+    assert "detail" in r.json()
+
+
+def test_montecarlo_mapped_symbol_without_bars_is_422_not_500(client_with_mapped_but_barless_symbol):
+    r = client_with_mapped_but_barless_symbol.post(
+        "/api/risk/montecarlo", json={"symbol": "GHOST", "horizon": 21, "n_paths": 1000}
+    )
+    assert r.status_code == 422
+    assert "detail" in r.json()
+
+
 def test_risk_window_bounds_reject_out_of_range(client):
     r = client.get("/api/risk/SPY", params={"window": 0})
     assert r.status_code == 422
