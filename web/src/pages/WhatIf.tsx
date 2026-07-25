@@ -4,14 +4,26 @@
 // precedent): the risk/MC results panels render in amber, benchmark
 // comparisons render in steel/market. Scenarios save/load/delete in
 // localStorage only — server persistence is deferred (noted in the panel).
+//
+// Book builder (wave-3 Task A1's book-flow spine): the shared BookBuilder
+// component replaces WhatIf's bespoke row builder — "Load current book"
+// pulls GET /api/book/current and submits by `book_ref` so the backend
+// reads the authoritative pinned snapshot directly; editing any row after a
+// load reverts to submitting the edited `positions` inline (see
+// `handleRowsChange` below).
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { BookBuilder, newBookRow, rowsToPositions, snapshotToRows, type BookRow } from "../components/BookBuilder";
 import { Panel, Skeleton } from "../components/Panel";
 import { api, request } from "../lib/api";
+import type { BookSnapshotOut } from "../lib/book";
 
-interface PositionRow {
-  symbol: string;
-  qty: number;
+interface Scenario {
+  positions: { symbol: string; qty: string }[];
+  years: number;
+  horizon: number;
+  n_paths: number;
+  seed?: number;
 }
 
 interface WeightOut {
@@ -49,14 +61,6 @@ interface WhatIfResponse {
   as_of: string | null;
 }
 
-interface Scenario {
-  positions: PositionRow[];
-  years: number;
-  horizon: number;
-  n_paths: number;
-  seed?: number;
-}
-
 const SCENARIOS_KEY = "quantmind.whatif.scenarios";
 const YEARS_BOUNDS = { min: 1, max: 25 };
 const HORIZON_BOUNDS = { min: 1, max: 2520 };
@@ -80,7 +84,8 @@ function persistScenarios(scenarios: Record<string, Scenario>) {
 }
 
 function postWhatIf(body: {
-  positions: PositionRow[];
+  positions?: { symbol: string; qty: number }[];
+  book_ref?: string;
   years: number;
   mc: { horizon: number; n_paths: number; seed?: number };
 }): Promise<WhatIfResponse> {
@@ -100,7 +105,12 @@ function num(x: number | null, digits = 4): string {
 export function WhatIf() {
   const brief = useQuery({ queryKey: ["brief"], queryFn: api.brief, staleTime: 60 * 60 * 1000 });
 
-  const [positions, setPositions] = useState<PositionRow[]>([{ symbol: "SPY", qty: 100 }]);
+  const [rows, setRows] = useState<BookRow[]>([newBookRow({ symbol: "SPY", qty: "100" })]);
+  // book_ref (wave-3 Task A1's book-flow spine): set when "Load current
+  // book" resolves, cleared as soon as the user edits any row — an edited
+  // book is no longer the exact pinned snapshot, so it submits by the
+  // (now-inline) positions instead.
+  const [bookRef, setBookRef] = useState<string | null>(null);
   const [years, setYears] = useState(5);
   const [horizon, setHorizon] = useState(126);
   const [nPaths, setNPaths] = useState(10_000);
@@ -109,30 +119,35 @@ export function WhatIf() {
   const [scenarios, setScenarios] = useState<Record<string, Scenario>>(() => loadScenarios());
 
   const compute = useMutation({
-    mutationFn: () =>
-      postWhatIf({
-        positions: positions.map((p) => ({ symbol: p.symbol.trim().toUpperCase(), qty: Number(p.qty) })),
-        years,
-        mc: { horizon, n_paths: nPaths, seed },
-      }),
+    mutationFn: () => {
+      if (bookRef) {
+        return postWhatIf({ book_ref: bookRef, years, mc: { horizon, n_paths: nPaths, seed } });
+      }
+      const positions = rowsToPositions(rows);
+      if (positions.length === 0) {
+        throw new Error("add at least one book position (symbol + nonzero qty)");
+      }
+      return postWhatIf({ positions, years, mc: { horizon, n_paths: nPaths, seed } });
+    },
   });
 
-  function updateRow(i: number, patch: Partial<PositionRow>) {
-    setPositions((rows) => rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  function handleRowsChange(next: BookRow[]) {
+    setRows(next);
+    setBookRef(null);
   }
 
-  function addRow() {
-    setPositions((rows) => [...rows, { symbol: "", qty: 1 }]);
-  }
-
-  function removeRow(i: number) {
-    setPositions((rows) => rows.filter((_, idx) => idx !== i));
+  function handleUseCurrentBook(snapshot: BookSnapshotOut) {
+    setRows(snapshotToRows(snapshot));
+    setBookRef(snapshot.snapshot_id);
   }
 
   function saveScenario() {
     const name = scenarioName.trim();
     if (!name) return;
-    const next = { ...scenarios, [name]: { positions, years, horizon, n_paths: nPaths, seed } };
+    const next = {
+      ...scenarios,
+      [name]: { positions: rows.map((r) => ({ symbol: r.symbol, qty: r.qty })), years, horizon, n_paths: nPaths, seed },
+    };
     setScenarios(next);
     persistScenarios(next);
     setScenarioName("");
@@ -141,7 +156,8 @@ export function WhatIf() {
   function loadScenario(name: string) {
     const s = scenarios[name];
     if (!s) return;
-    setPositions(s.positions);
+    setRows(s.positions.length ? s.positions.map((p) => newBookRow(p)) : [newBookRow()]);
+    setBookRef(null);
     setYears(s.years);
     setHorizon(s.horizon);
     setNPaths(s.n_paths);
@@ -157,7 +173,6 @@ export function WhatIf() {
     });
   }
 
-  const hasValidBook = positions.length > 0 && positions.every((p) => p.symbol.trim() !== "" && Number(p.qty) !== 0);
   const data = compute.data;
   const errorMessage = compute.isError ? String((compute.error as Error)?.message ?? compute.error) : null;
 
@@ -171,46 +186,12 @@ export function WhatIf() {
 
       <Panel title="Book builder" note="clone the book, modify, watch risk recompute">
         <div className="space-y-2">
-          {positions.map((p, i) => (
-            <div key={i} className="flex items-end gap-2">
-              <label className="flex flex-col gap-1 text-[10px] tracking-wider uppercase text-muted">
-                {`Symbol ${i + 1}`}
-                <input
-                  aria-label={`Symbol ${i + 1}`}
-                  list="whatif-symbols"
-                  className="num bg-elevated border border-hairline px-2 py-1 text-ink text-[12px] w-28"
-                  value={p.symbol}
-                  onChange={(e) => updateRow(i, { symbol: e.target.value.toUpperCase() })}
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-[10px] tracking-wider uppercase text-muted">
-                {`Qty ${i + 1}`}
-                <input
-                  aria-label={`Qty ${i + 1}`}
-                  type="number"
-                  className="num bg-elevated border border-hairline px-2 py-1 text-ink text-[12px] w-24"
-                  value={p.qty}
-                  onChange={(e) => updateRow(i, { qty: Number(e.target.value) })}
-                />
-              </label>
-              <button
-                type="button"
-                aria-label={`Remove position ${i + 1}`}
-                className="border border-hairline bg-elevated hover:bg-hairline text-[12px] px-2 py-1 disabled:opacity-40"
-                disabled={positions.length <= 1}
-                onClick={() => removeRow(i)}
-              >
-                Remove
-              </button>
-            </div>
-          ))}
-          <button
-            type="button"
-            className="border border-hairline bg-elevated hover:bg-hairline text-[12px] px-3 py-1.5"
-            onClick={addRow}
-          >
-            Add position
-          </button>
+          <BookBuilder
+            rows={rows}
+            onRowsChange={handleRowsChange}
+            onUseCurrentBook={handleUseCurrentBook}
+            datalistId="whatif-symbols"
+          />
 
           <div className="flex items-end gap-4 flex-wrap pt-2 border-t border-hairline">
             <label className="flex flex-col gap-1 text-[10px] tracking-wider uppercase text-muted">
@@ -262,7 +243,7 @@ export function WhatIf() {
             <button
               type="button"
               className="border border-you/60 bg-you/10 hover:bg-you/20 text-you text-[12px] px-3 py-1.5 disabled:opacity-40 disabled:text-muted disabled:border-hairline disabled:bg-transparent"
-              disabled={!hasValidBook || compute.isPending}
+              disabled={compute.isPending}
               onClick={() => compute.mutate()}
             >
               {compute.isPending ? "Computing…" : "Compute"}

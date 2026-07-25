@@ -1,9 +1,11 @@
 /**
- * Hedge Lab page tests (Task 3, wave-2 plan): "decisions, not analytics" —
- * objective + book builder -> Run -> ranked candidates table. Protection is
- * the ranking key (amber, per the wave-2 Global Constraints addendum:
- * hypothetical/hedge results ARE the user's book for color purposes);
- * cointegration is a labeled diagnostic column only, never the rank.
+ * Hedge Lab page tests (Task 3, wave-2 plan; book builder swap + book_ref,
+ * wave-3 Task A1): objective + book builder -> Run -> ranked candidates
+ * table. Protection is the ranking key (amber, per the wave-2 Global
+ * Constraints addendum: hypothetical/hedge results ARE the user's book for
+ * color purposes); corr stability is a labeled diagnostic column only,
+ * never the rank (cointegration was removed from this response/page —
+ * pre-wave-3 consolidation pass, TODOS.md; its home is Lab's pair pipeline).
  * No @testing-library/user-event dependency in this repo — fireEvent only
  * (pattern: src/test/lab.test.tsx).
  */
@@ -54,7 +56,6 @@ const HEDGE_RESPONSE = {
       protection: 0.0141,
       residual_beta: 0.05,
       corr_stability: 0.04,
-      coint_pvalue: 0.031,
     },
     {
       symbol: "IWM",
@@ -67,7 +68,6 @@ const HEDGE_RESPONSE = {
       protection: 0.0081,
       residual_beta: 0.1,
       corr_stability: 0.09,
-      coint_pvalue: 0.4,
     },
     {
       symbol: "FLAT",
@@ -80,7 +80,6 @@ const HEDGE_RESPONSE = {
       protection: null,
       residual_beta: null,
       corr_stability: 0.5,
-      coint_pvalue: null,
     },
   ],
 };
@@ -129,8 +128,10 @@ test("build a book, run, and render the ranked candidates table in amber", async
   // Unusable candidate is flagged, not silently dropped.
   expect(within(bodyRows[2]).getByText(/unusable/i)).toBeInTheDocument();
 
-  // Cointegration is labeled a diagnostic, never presented as the rank.
+  // Corr stability is labeled a diagnostic, never presented as the rank;
+  // there is no cointegration column (removed, pre-wave-3 consolidation).
   expect(screen.getByText(/diagnostic/i)).toBeInTheDocument();
+  expect(screen.queryByText(/coint/i)).not.toBeInTheDocument();
 });
 
 test("symbol input uppercases and add/remove row controls manage the book", async () => {
@@ -158,4 +159,59 @@ test("422 detail surfaces instead of crashing", async () => {
   fireEvent.change(symbolInput, { target: { value: "nope" } });
   fireEvent.click(screen.getByRole("button", { name: /^run$/i }));
   expect(await screen.findByText(/unknown symbols/i)).toBeInTheDocument();
+});
+
+// --- book_ref (wave-3 Task A1's book-flow spine): "Load current book" ---
+// Generous findBy timeout below: resolving GET /api/book/current through
+// MSW's fetch interceptor can take longer than testing-library's 1000ms
+// default in this environment, unlike a same-tick state update.
+const BOOK_FETCH_TIMEOUT = { timeout: 5000 };
+
+const CURRENT_BOOK = {
+  snapshot_id: "snap-abc123",
+  valuation_ts: "2026-07-24T00:00:00Z",
+  base_currency: "USD",
+  positions: [{ symbol: "SPY", qty: 25, con_id: 1, sec_type: "STK", multiplier: 1 }],
+};
+
+test("load current book populates rows and runs by book_ref", async () => {
+  server.use(
+    http.get("/api/book/current", () => HttpResponse.json(CURRENT_BOOK)),
+    http.post("/api/hedge", async ({ request }) => {
+      const body = (await request.json()) as { book_ref?: string; book?: unknown };
+      expect(body.book_ref).toBe("snap-abc123");
+      expect(body.book).toBeUndefined();
+      return HttpResponse.json(HEDGE_RESPONSE);
+    })
+  );
+  renderHedge();
+
+  fireEvent.click(await screen.findByRole("button", { name: /load current book/i }));
+  // qty "25" is unambiguous proof the row came from the fetched book, not
+  // the page's default blank row.
+  await screen.findByDisplayValue("25", {}, BOOK_FETCH_TIMEOUT);
+  expect(screen.getByDisplayValue("SPY")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: /^run$/i }));
+  await screen.findByRole("table");
+});
+
+test("editing a row after loading the current book reverts to inline positions", async () => {
+  server.use(
+    http.get("/api/book/current", () => HttpResponse.json(CURRENT_BOOK)),
+    http.post("/api/hedge", async ({ request }) => {
+      const body = (await request.json()) as { book_ref?: string; book?: { symbol: string; qty: number }[] };
+      expect(body.book_ref).toBeUndefined();
+      expect(body.book).toEqual([{ symbol: "QQQ", qty: 25 }]);
+      return HttpResponse.json(HEDGE_RESPONSE);
+    })
+  );
+  renderHedge();
+
+  fireEvent.click(await screen.findByRole("button", { name: /load current book/i }));
+  await screen.findByDisplayValue("25", {}, BOOK_FETCH_TIMEOUT);
+  fireEvent.change(screen.getByDisplayValue("SPY"), { target: { value: "qqq" } });
+
+  fireEvent.click(screen.getByRole("button", { name: /^run$/i }));
+  await screen.findByRole("table");
 });

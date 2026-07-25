@@ -1,22 +1,25 @@
 // Hedge Lab (DESIGN.md IA #4): "decisions, not analytics" — an objective
 // picker (beta_target only for now) and a book builder feed POST /api/hedge,
 // which returns candidates ranked by protection (ES reduction), sized to
-// move the book's beta to target. Cointegration p-value is a labeled
-// DIAGNOSTIC column only (Engineering Constraint 12) — it never drives the
-// rank, and the UI says so.
+// move the book's beta to target.
+//
+// Cointegration column removed (pre-wave-3 consolidation pass, TODOS.md):
+// its home is Lab's pair pipeline now, never the Hedge Lab response/page.
 //
 // Hypothetical books ARE the user's book for color purposes (wave-2 Global
 // Constraints addendum, Lab's Apply-to-Book precedent): protection and the
 // book-level stats render in amber, exactly like Lab's Apply-to-Book zone.
+//
+// Book builder (wave-3 Task A1's book-flow spine): the shared BookBuilder
+// component (this page's own row builder was its base) adds "Load current
+// book" (GET /api/book/current) and book_ref submission — see WhatIf.tsx's
+// identical pattern.
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
+import { BookBuilder, newBookRow, rowsToPositions, snapshotToRows, type BookRow } from "../components/BookBuilder";
 import { Panel } from "../components/Panel";
 import { request } from "../lib/api";
-
-interface BookRow {
-  symbol: string;
-  qty: string; // kept as text while editing; parsed to number on submit
-}
+import type { BookSnapshotOut } from "../lib/book";
 
 interface HedgeCandidate {
   symbol: string;
@@ -29,7 +32,6 @@ interface HedgeCandidate {
   protection: number | null;
   residual_beta: number | null;
   corr_stability: number | null;
-  coint_pvalue: number | null;
 }
 
 interface HedgeResponse {
@@ -44,7 +46,8 @@ interface HedgeResponse {
 }
 
 function runHedge(body: {
-  book: { symbol: string; qty: number }[];
+  book?: { symbol: string; qty: number }[];
+  book_ref?: string;
   objective: { kind: string; value: number };
   years: number;
 }) {
@@ -64,38 +67,34 @@ function pct(x: number | null | undefined): string {
   return `${(x * 100).toFixed(2)}%`;
 }
 
-let rowKeySeq = 0;
-function newRow(): BookRow & { key: number } {
-  rowKeySeq += 1;
-  return { key: rowKeySeq, symbol: "", qty: "1" };
-}
-
 export function Hedge() {
-  const [rows, setRows] = useState<(BookRow & { key: number })[]>([newRow()]);
+  const [rows, setRows] = useState<BookRow[]>([newBookRow()]);
+  // book_ref (wave-3 Task A1's book-flow spine): set when "Load current
+  // book" resolves, cleared on any row edit (see WhatIf.tsx's identical
+  // pattern) — an edited book submits its (now-inline) positions instead.
+  const [bookRef, setBookRef] = useState<string | null>(null);
   const [targetBeta, setTargetBeta] = useState(0);
   const [years, setYears] = useState(5);
 
   const run = useMutation({
     mutationFn: () => {
-      const book = rows
-        .filter((r) => r.symbol.trim() !== "")
-        .map((r) => ({ symbol: r.symbol.trim(), qty: Number(r.qty) || 0 }))
-        .filter((p) => p.qty !== 0);
+      if (bookRef) {
+        return runHedge({ book_ref: bookRef, objective: { kind: "beta_target", value: targetBeta }, years });
+      }
+      const book = rowsToPositions(rows);
       if (book.length === 0) throw new Error("add at least one book position (symbol + nonzero qty)");
       return runHedge({ book, objective: { kind: "beta_target", value: targetBeta }, years });
     },
   });
 
-  function updateRow(key: number, patch: Partial<BookRow>) {
-    setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+  function handleRowsChange(next: BookRow[]) {
+    setRows(next);
+    setBookRef(null);
   }
 
-  function addRow() {
-    setRows((prev) => [...prev, newRow()]);
-  }
-
-  function removeRow(key: number) {
-    setRows((prev) => (prev.length > 1 ? prev.filter((r) => r.key !== key) : prev));
+  function handleUseCurrentBook(snapshot: BookSnapshotOut) {
+    setRows(snapshotToRows(snapshot));
+    setBookRef(snapshot.snapshot_id);
   }
 
   return (
@@ -151,53 +150,12 @@ export function Hedge() {
         </Panel>
 
         <Panel title="Book" note={`${rows.length} row${rows.length === 1 ? "" : "s"}`}>
-          <div className="space-y-2">
-            {rows.map((row, i) => (
-              <div key={row.key} className="flex items-end gap-2">
-                <div className="flex-1">
-                  <label htmlFor={`hedge-symbol-${row.key}`} className="text-[10px] tracking-wider uppercase text-muted block mb-1">
-                    Symbol
-                  </label>
-                  <input
-                    id={`hedge-symbol-${row.key}`}
-                    aria-label={`symbol row ${i + 1}`}
-                    className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
-                    value={row.symbol}
-                    onChange={(e) => updateRow(row.key, { symbol: e.target.value.toUpperCase() })}
-                  />
-                </div>
-                <div className="w-24">
-                  <label htmlFor={`hedge-qty-${row.key}`} className="text-[10px] tracking-wider uppercase text-muted block mb-1">
-                    Qty
-                  </label>
-                  <input
-                    id={`hedge-qty-${row.key}`}
-                    aria-label={`qty row ${i + 1}`}
-                    type="number"
-                    className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
-                    value={row.qty}
-                    onChange={(e) => updateRow(row.key, { qty: e.target.value })}
-                  />
-                </div>
-                <button
-                  type="button"
-                  aria-label="remove row"
-                  className="border border-hairline bg-elevated hover:bg-hairline text-[12px] px-2 py-1.5 disabled:opacity-40"
-                  disabled={rows.length <= 1}
-                  onClick={() => removeRow(row.key)}
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-            <button
-              type="button"
-              className="w-full border border-hairline bg-elevated hover:bg-hairline text-[12px] py-1.5"
-              onClick={addRow}
-            >
-              + Add row
-            </button>
-          </div>
+          <BookBuilder
+            rows={rows}
+            onRowsChange={handleRowsChange}
+            onUseCurrentBook={handleUseCurrentBook}
+            label="Positions"
+          />
         </Panel>
 
         <button
@@ -245,8 +203,7 @@ export function Hedge() {
                   <th className="py-1.5 pr-2 text-right">Size (qty / notional)</th>
                   <th className="py-1.5 pr-2 text-right">Protection (ES before → after)</th>
                   <th className="py-1.5 pr-2 text-right">Residual β</th>
-                  <th className="py-1.5 pr-2 text-right">Corr stability</th>
-                  <th className="py-1.5 pr-2 text-right">Coint p (diagnostic)</th>
+                  <th className="py-1.5 pr-2 text-right">Corr stability (diagnostic)</th>
                 </tr>
               </thead>
               <tbody>
@@ -284,7 +241,6 @@ export function Hedge() {
                     </td>
                     <td className="num py-1.5 pr-2 text-right">{num(c.residual_beta, 2)}</td>
                     <td className="num py-1.5 pr-2 text-right text-muted">{num(c.corr_stability, 3)}</td>
-                    <td className="num py-1.5 pr-2 text-right text-muted">{num(c.coint_pvalue, 3)}</td>
                   </tr>
                 ))}
               </tbody>

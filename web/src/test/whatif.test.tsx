@@ -1,11 +1,12 @@
 /**
- * WhatIf page tests (Task 2, wave-2 plan): position builder posts a
- * hypothetical book to POST /api/whatif; results render in amber (Lab's
- * Apply-to-Book precedent — hypothetical books ARE the user's book for color
- * purposes); 422 detail surfaces honestly, never a crash; named scenarios
- * round-trip through localStorage (server persistence deferred — noted in
- * the panel). No @testing-library/user-event dependency in this repo —
- * fireEvent only (pattern: lab.test.tsx).
+ * WhatIf page tests (Task 2, wave-2 plan; book builder swap + book_ref,
+ * wave-3 Task A1): position builder posts a hypothetical book to
+ * POST /api/whatif; results render in amber (Lab's Apply-to-Book precedent
+ * — hypothetical books ARE the user's book for color purposes); 422 detail
+ * surfaces honestly, never a crash; named scenarios round-trip through
+ * localStorage (server persistence deferred — noted in the panel).
+ * No @testing-library/user-event dependency in this repo — fireEvent only
+ * (pattern: lab.test.tsx).
  */
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -66,30 +67,30 @@ const WHATIF_RESPONSE = {
 };
 
 function fillFirstRow() {
-  fireEvent.change(screen.getByLabelText(/symbol 1/i), { target: { value: "SPY" } });
-  fireEvent.change(screen.getByLabelText(/qty 1/i), { target: { value: "60" } });
+  fireEvent.change(screen.getByLabelText(/symbol row 1/i), { target: { value: "SPY" } });
+  fireEvent.change(screen.getByLabelText(/qty row 1/i), { target: { value: "60" } });
 }
 
 function addSecondRow() {
-  fireEvent.click(screen.getByRole("button", { name: /add position/i }));
-  fireEvent.change(screen.getByLabelText(/symbol 2/i), { target: { value: "QQQ" } });
-  fireEvent.change(screen.getByLabelText(/qty 2/i), { target: { value: "40" } });
+  fireEvent.click(screen.getByRole("button", { name: /add row/i }));
+  fireEvent.change(screen.getByLabelText(/symbol row 2/i), { target: { value: "QQQ" } });
+  fireEvent.change(screen.getByLabelText(/qty row 2/i), { target: { value: "40" } });
 }
 
 test("position builder renders with honest awaiting states before compute", async () => {
   renderWhatIf();
   expect(await screen.findByRole("button", { name: /^compute$/i })).toBeInTheDocument();
-  expect(screen.getByLabelText(/symbol 1/i)).toBeInTheDocument();
-  expect(screen.getByLabelText(/qty 1/i)).toBeInTheDocument();
+  expect(screen.getByLabelText(/symbol row 1/i)).toBeInTheDocument();
+  expect(screen.getByLabelText(/qty row 1/i)).toBeInTheDocument();
   expect(screen.getAllByText(/awaiting compute/i).length).toBeGreaterThan(0);
 });
 
 test("add/remove position rows", async () => {
   renderWhatIf();
-  fireEvent.click(await screen.findByRole("button", { name: /add position/i }));
-  expect(screen.getByLabelText(/symbol 2/i)).toBeInTheDocument();
-  fireEvent.click(screen.getByLabelText(/remove position 2/i));
-  expect(screen.queryByLabelText(/symbol 2/i)).not.toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: /add row/i }));
+  expect(screen.getByLabelText(/symbol row 2/i)).toBeInTheDocument();
+  fireEvent.click(screen.getByLabelText(/remove row 2/i));
+  expect(screen.queryByLabelText(/symbol row 2/i)).not.toBeInTheDocument();
 });
 
 test("build book -> compute -> amber results render", async () => {
@@ -178,14 +179,71 @@ test("scenario save/load round-trip through localStorage", async () => {
   expect(localStorage.getItem("quantmind.whatif.scenarios")).toContain("my-scenario");
 
   // mutate the book after saving
-  fireEvent.change(screen.getByLabelText(/qty 1/i), { target: { value: "999" } });
-  expect(screen.getByLabelText(/qty 1/i)).toHaveValue(999);
+  fireEvent.change(screen.getByLabelText(/qty row 1/i), { target: { value: "999" } });
+  expect(screen.getByLabelText(/qty row 1/i)).toHaveValue(999);
 
   // loading the saved scenario restores the original book
   fireEvent.click(screen.getByRole("button", { name: "my-scenario" }));
-  expect(screen.getByLabelText(/qty 1/i)).toHaveValue(60);
-  expect(screen.getByLabelText(/symbol 2/i)).toHaveValue("QQQ");
+  expect(screen.getByLabelText(/qty row 1/i)).toHaveValue(60);
+  expect(screen.getByLabelText(/symbol row 2/i)).toHaveValue("QQQ");
 
   fireEvent.click(screen.getByLabelText(/delete scenario my-scenario/i));
   expect(screen.queryByRole("button", { name: "my-scenario" })).not.toBeInTheDocument();
+});
+
+// --- book_ref (wave-3 Task A1's book-flow spine): "Load current book" ---
+// Generous findBy timeout below: resolving GET /api/book/current through
+// MSW's fetch interceptor can take longer than testing-library's 1000ms
+// default in this environment, unlike a same-tick state update.
+const BOOK_FETCH_TIMEOUT = { timeout: 5000 };
+
+const CURRENT_BOOK = {
+  snapshot_id: "snap-abc123",
+  valuation_ts: "2026-07-24T00:00:00Z",
+  base_currency: "USD",
+  positions: [{ symbol: "SPY", qty: 25, con_id: 1, sec_type: "STK", multiplier: 1 }],
+};
+
+test("load current book populates rows and computes by book_ref", async () => {
+  server.use(
+    http.get("/api/book/current", () => HttpResponse.json(CURRENT_BOOK)),
+    http.post("/api/whatif", async ({ request }) => {
+      const body = (await request.json()) as { book_ref?: string; positions?: unknown };
+      expect(body.book_ref).toBe("snap-abc123");
+      expect(body.positions).toBeUndefined();
+      return HttpResponse.json(WHATIF_RESPONSE);
+    })
+  );
+  renderWhatIf();
+
+  fireEvent.click(await screen.findByRole("button", { name: /load current book/i }));
+  // Replaced the default row (qty 100) with the loaded book's own qty (25),
+  // proving the row came from GET /api/book/current, not the page default.
+  await screen.findByDisplayValue("25", {}, BOOK_FETCH_TIMEOUT);
+
+  fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
+  await screen.findByTestId("whatif-weights");
+});
+
+test("editing a row after loading the current book reverts to inline positions", async () => {
+  server.use(
+    http.get("/api/book/current", () => HttpResponse.json(CURRENT_BOOK)),
+    http.post("/api/whatif", async ({ request }) => {
+      const body = (await request.json()) as {
+        book_ref?: string;
+        positions?: { symbol: string; qty: number }[];
+      };
+      expect(body.book_ref).toBeUndefined();
+      expect(body.positions).toEqual([{ symbol: "QQQ", qty: 25 }]);
+      return HttpResponse.json(WHATIF_RESPONSE);
+    })
+  );
+  renderWhatIf();
+
+  fireEvent.click(await screen.findByRole("button", { name: /load current book/i }));
+  await screen.findByDisplayValue("25", {}, BOOK_FETCH_TIMEOUT);
+  fireEvent.change(screen.getByLabelText(/symbol row 1/i), { target: { value: "qqq" } });
+
+  fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
+  await screen.findByTestId("whatif-weights");
 });
