@@ -8,5 +8,8 @@ from quantmind.api.routers.macro import router as macro_router
 from quantmind.api.routers.whatif import router as whatif_router
 from quantmind.api.routers.hedge import router as hedge_router
 from quantmind.api.routers.sync import router as sync_router
+from quantmind.api.routers.book import router as book_router
+from quantmind.api.routers.instruments import router as instruments_router
+from quantmind.api.routers.options import router as options_router
 
-ROUTERS = [portfolio_router, risk_router, lab_router, macro_router, whatif_router, hedge_router, sync_router]
+ROUTERS = [portfolio_router, risk_router, lab_router, macro_router, whatif_router, hedge_router, sync_router, book_router, instruments_router, options_router]
