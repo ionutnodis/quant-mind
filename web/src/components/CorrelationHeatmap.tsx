@@ -22,10 +22,12 @@ export function CorrelationHeatmap({
           z: data.matrix,
           zmin: -1,
           zmax: 1,
+          // Amber law: amber marks the book, never market data. Inverse
+          // correlation = muted gray, positive = market steel.
           colorscale: [
-            [0, tokens.market],
+            [0, tokens.muted],
             [0.5, tokens.ground],
-            [1, tokens.you],
+            [1, tokens.market],
           ],
           showscale: false,
         },
