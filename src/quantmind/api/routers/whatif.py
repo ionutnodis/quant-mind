@@ -15,13 +15,13 @@ or insufficient overlap -> structured 422, never a 500 (pattern: routers/risk.py
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, model_validator
 
+from quantmind.api.routers._shared import PositionIn, clean, iso, read_close_series, weighted_portfolio_returns
+from quantmind.api.routers.book import read_book_positions
 from quantmind.risk.montecarlo import simulate_terminal_returns
 from quantmind.risk.returns import (
     InsufficientDataError,
@@ -34,34 +34,7 @@ router = APIRouter()
 
 _BETA_WINDOW = 60
 _MAX_HIST_BINS = 60
-
-
-def _clean(x: float | None) -> float | None:
-    if x is None:
-        return None
-    try:
-        xf = float(x)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(xf):
-        return None
-    return xf
-
-
-def _iso(ts: pd.Timestamp) -> str:
-    return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-class PositionIn(BaseModel):
-    symbol: str = Field(..., min_length=1)
-    qty: float
-
-    @field_validator("qty")
-    @classmethod
-    def _qty_nonzero(cls, v: float) -> float:
-        if v == 0:
-            raise ValueError("qty must be nonzero")
-        return v
+_MAX_POSITIONS = 50
 
 
 class MonteCarloParams(BaseModel):
@@ -71,9 +44,23 @@ class MonteCarloParams(BaseModel):
 
 
 class WhatIfRequest(BaseModel):
-    positions: list[PositionIn] = Field(..., min_length=1, max_length=50)
+    # Exactly one of `positions` (inline book) or `book_ref` (a pinned
+    # snapshot id from POST /api/book/pin or GET /api/book/current, wave-3
+    # Task A1's book-flow spine) must be given — see `_positions_xor_book_ref`
+    # below. Bounds on `positions` (1..50) are enforced here when given
+    # inline; a book_ref-resolved book is bounds-checked in the handler
+    # instead, since Field validators don't run on values assembled after
+    # request parsing.
+    positions: list[PositionIn] | None = Field(None, min_length=1, max_length=50)
+    book_ref: str | None = None
     years: int = Field(5, ge=1, le=25)
     mc: MonteCarloParams = Field(default_factory=MonteCarloParams)
+
+    @model_validator(mode="after")
+    def _positions_xor_book_ref(self) -> "WhatIfRequest":
+        if bool(self.positions) == bool(self.book_ref):
+            raise ValueError("provide exactly one of positions or book_ref")
+        return self
 
 
 class Histogram(BaseModel):
@@ -125,27 +112,23 @@ class WhatIfResponse(BaseModel):
     as_of: str | None
 
 
-def _read_close_series(request: Request, con_id: int, symbol: str, years: int) -> pd.Series:
-    store = request.app.state.store
-    try:
-        bars, _ = store.read_bars(con_id=con_id, bar_size="1d")
-    except FileNotFoundError:
-        raise HTTPException(422, detail=f"symbol {symbol!r} has no cached bars")
-    series = bars["close"]
-    if years > 0:
-        series = series.iloc[-(years * 252) :]
-    if series.empty:
-        raise HTTPException(422, detail=f"symbol {symbol!r} has no cached history")
-    return series
-
-
 @router.post("/whatif", response_model=WhatIfResponse)
 def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
     store = request.app.state.store
     benchmark = request.app.state.benchmark
     symbol_map = store.read_symbol_map()
 
-    requested = [p.symbol for p in req.positions]
+    # book_ref resolves to the same PositionIn shape as an inline book
+    # (read_book_positions 422s naming the ref if it's unknown); Field's
+    # min_length/max_length=1..50 only runs on an inline `positions` body, so
+    # a book_ref-resolved list gets the same bounds check by hand here.
+    positions = req.positions if req.positions is not None else read_book_positions(store, req.book_ref)
+    if not positions:
+        raise HTTPException(422, detail="book_ref resolved to an empty book")
+    if len(positions) > _MAX_POSITIONS:
+        raise HTTPException(422, detail=f"book has {len(positions)} positions; max {_MAX_POSITIONS}")
+
+    requested = [p.symbol for p in positions]
     unique_needed = list(dict.fromkeys(requested))
     unknown = sorted(s for s in unique_needed if s not in symbol_map)
     if unknown:
@@ -160,13 +143,13 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
     for sym in [*unique_needed, benchmark]:
         if sym in series_map:
             continue
-        series_map[sym] = _read_close_series(request, symbol_map[sym], sym, req.years)
+        series_map[sym] = read_close_series(store, symbol_map[sym], sym, req.years)
 
     # NaN/Inf last close (corrupted/partial sync data) makes a leg
     # unpriceable, and every downstream number (weights -> beta/ES/vol/MC)
     # keys off these prices. Reject with a named 422 rather than letting a
     # NaN propagate (never-crash / NaN-never-serialized policy).
-    last_close = {sym: _clean(float(s.iloc[-1])) for sym, s in series_map.items()}
+    last_close = {sym: clean(float(s.iloc[-1])) for sym, s in series_map.items()}
     unpriceable = sorted(sym for sym in unique_needed if last_close[sym] is None)
     if unpriceable:
         raise HTTPException(
@@ -177,7 +160,7 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
             ),
         )
 
-    market_values = [p.qty * last_close[p.symbol] for p in req.positions]
+    market_values = [p.qty * last_close[p.symbol] for p in positions]
     gross = sum(abs(mv) for mv in market_values)
     if gross <= 0:
         raise HTTPException(422, detail="portfolio has zero gross market value")
@@ -198,35 +181,35 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
 
     # Portfolio daily returns = weighted sum of each position's aligned
     # simple return (duplicate symbols across positions reuse the same
-    # aligned column, which is correct — their weights simply add).
-    position_returns = np.column_stack([returns[p.symbol].to_numpy() for p in req.positions])
+    # aligned column, which is correct — their weights simply add; see
+    # _shared.weighted_portfolio_returns).
     weights_arr = np.array(weight_values)
-    portfolio_returns = pd.Series(position_returns @ weights_arr, index=returns.index)
+    portfolio_returns = weighted_portfolio_returns(returns, [p.symbol for p in positions], weights_arr)
 
     try:
         beta_series = rolling_beta(portfolio_returns, bench_returns, window=_BETA_WINDOW, rf=0.0)
         beta_valid = beta_series.dropna()
-        beta = _clean(float(beta_valid.iloc[-1])) if len(beta_valid) else None
+        beta = clean(float(beta_valid.iloc[-1])) if len(beta_valid) else None
     except InsufficientDataError:
         beta = None
 
     try:
-        es = _clean(historical_es(portfolio_returns, confidence=0.975))
+        es = clean(historical_es(portfolio_returns, confidence=0.975))
     except InsufficientDataError:
         es = None
 
     try:
-        vol = _clean(annualized_vol(portfolio_returns))
+        vol = clean(annualized_vol(portfolio_returns))
     except InsufficientDataError:
         vol = None
 
     try:
-        bench_es = _clean(historical_es(bench_returns, confidence=0.975))
+        bench_es = clean(historical_es(bench_returns, confidence=0.975))
     except InsufficientDataError:
         bench_es = None
 
     try:
-        bench_vol = _clean(annualized_vol(bench_returns))
+        bench_vol = clean(annualized_vol(bench_returns))
     except InsufficientDataError:
         bench_vol = None
 
@@ -234,7 +217,7 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
     # + weights (block bootstrap preserves cross-asset correlation), same
     # finite-guard shape as routers/risk.py and routers/lab.py.
     mc_returns_df = pd.DataFrame(
-        {f"pos{i}": returns[p.symbol] for i, p in enumerate(req.positions)}, index=returns.index
+        {f"pos{i}": returns[p.symbol] for i, p in enumerate(positions)}, index=returns.index
     )
     terminal = simulate_terminal_returns(
         mc_returns_df,
@@ -262,11 +245,11 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
         WeightOut(
             symbol=p.symbol,
             qty=p.qty,
-            price=_clean(last_close[p.symbol]),
-            market_value=_clean(market_values[i]),
-            weight=_clean(weight_values[i]),
+            price=clean(last_close[p.symbol]),
+            market_value=clean(market_values[i]),
+            weight=clean(weight_values[i]),
         )
-        for i, p in enumerate(req.positions)
+        for i, p in enumerate(positions)
     ]
 
     return WhatIfResponse(
@@ -276,12 +259,12 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
         ann_vol=vol,
         mc=MonteCarloOut(
             histogram=Histogram(bin_edges=[float(e) for e in edges], counts=[int(c) for c in counts]),
-            p5=_clean(p5),
-            p50=_clean(p50),
-            p95=_clean(p95),
+            p5=clean(p5),
+            p50=clean(p50),
+            p95=clean(p95),
             n_nonfinite=n_nonfinite,
         ),
         benchmark=BenchmarkOut(symbol=benchmark, es_975=bench_es, ann_vol=bench_vol),
         n_obs=len(returns),
-        as_of=_iso(prices.index[-1]) if len(prices) else None,
+        as_of=iso(prices.index[-1]) if len(prices) else None,
     )

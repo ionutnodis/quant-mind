@@ -332,3 +332,116 @@ def test_hedge_years_bounds_reject_out_of_range(client):
         json={"book": [{"symbol": "SPY", "qty": 10}], "objective": {"kind": "beta_target", "value": 0.0}, "years": 100},
     )
     assert r2.status_code == 422
+
+
+def test_hedge_response_has_no_cointegration_column(client):
+    # Pre-wave-3 consolidation pass (TODOS.md): cointegration's home is Lab's
+    # pair pipeline now, never the Hedge Lab response.
+    r = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "SPY", "qty": 10}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["QQQ"],
+            "years": 1,
+        },
+    )
+    assert r.status_code == 200
+    assert "coint_pvalue" not in r.json()["candidates"][0]
+
+
+def test_hedge_nonfinite_book_last_close_is_422_naming_the_symbol(tmp_path):
+    # Aligned with routers/whatif.py's identical guard (pre-wave-3
+    # consolidation pass, TODOS.md): a NaN last close on a BOOK leg must
+    # never silently propagate into book_beta/es_before/protection.
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)
+    bad_bars = _bars(seed=2)
+    bad_bars.loc[bad_bars.index[-1], "close"] = np.nan
+    store.write_bars(con_id=2, bar_size="1d", bars=bad_bars, meta=meta)
+    store.write_symbol_map({"SPY": 1, "QQQ": 2})
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    c = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+
+    r = c.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "QQQ", "qty": 10}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["SPY"],
+            "years": 1,
+        },
+    )
+    assert r.status_code == 422
+    assert "QQQ" in r.json()["detail"]
+
+
+def test_hedge_zero_gross_book_is_422(client):
+    # Two offsetting legs in the same symbol net to zero market value.
+    r = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "SPY", "qty": 10}, {"symbol": "SPY", "qty": -10}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["QQQ"],
+            "years": 1,
+        },
+    )
+    assert r.status_code == 422
+    assert "zero gross" in r.json()["detail"]
+
+
+# --- book_ref (wave-3 Task A1's book-flow spine): an alternative to inline
+# `book`, resolved via routers/book.py's pinned snapshots. ---
+
+
+def test_hedge_book_ref_resolves_to_the_same_result_as_inline_book(client):
+    pinned = client.post("/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 10}]}).json()
+
+    r_ref = client.post(
+        "/api/hedge",
+        json={
+            "book_ref": pinned["snapshot_id"],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["QQQ"],
+            "years": 1,
+        },
+    )
+    r_inline = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "SPY", "qty": 10}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["QQQ"],
+            "years": 1,
+        },
+    )
+    assert r_ref.status_code == r_inline.status_code == 200
+    assert r_ref.json() == r_inline.json()
+
+
+def test_hedge_unknown_book_ref_is_422(client):
+    r = client.post(
+        "/api/hedge",
+        json={"book_ref": "does-not-exist", "objective": {"kind": "beta_target", "value": 0.0}},
+    )
+    assert r.status_code == 422
+    assert "does-not-exist" in r.json()["detail"]
+
+
+def test_hedge_both_book_and_book_ref_is_422(client):
+    r = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "SPY", "qty": 10}],
+            "book_ref": "whatever",
+            "objective": {"kind": "beta_target", "value": 0.0},
+        },
+    )
+    assert r.status_code == 422
+
+
+def test_hedge_neither_book_nor_book_ref_is_422(client):
+    r = client.post("/api/hedge", json={"objective": {"kind": "beta_target", "value": 0.0}})
+    assert r.status_code == 422

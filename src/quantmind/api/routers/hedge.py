@@ -1,16 +1,25 @@
 """hedge domain routes — the Hedge Lab (DESIGN.md IA #4): "decisions, not
 analytics." POST /api/hedge takes a book + a beta_target objective and
 returns candidates ranked by protection (ES reduction), sized to move the
-book's beta to target. Cointegration p-value is a DIAGNOSTIC column only
-(Engineering Constraint 12) — it never drives the ranking.
+book's beta to target.
+
+Cointegration diagnostic removed (pre-wave-3 consolidation pass, TODOS.md):
+Engle-Granger p-value used to ride along as a labeled DIAGNOSTIC column here
+(Engineering Constraint 12 — never the ranking key), but its home is Lab's
+pair pipeline (wave-3B), not the Hedge Lab. Ranking is — and was always —
+strictly by protection; removing the column drops a broad `except Exception`
+around the Engle-Granger/ADF machinery from this router entirely rather than
+narrowing it, since the call itself is gone.
 
 Thin composition over the tested pure core only (Global Constraints):
 quantmind.risk.returns for beta/ES, quantmind.analytics.correlation for the
-rolling correlation-stability diagnostic, quantmind.analytics.cointegration
-for the Engle-Granger diagnostic. No math beyond wiring lives here.
+rolling correlation-stability diagnostic. No math beyond wiring lives here.
 
 Alignment approach mirrors routers/whatif.py: price-level inner join across
 every symbol involved, then pct_change, weights by |market value|-signed.
+Degenerate-input handling also mirrors whatif.py (pre-wave-3 consolidation
+pass): a non-finite last close in the BOOK's cached bars, or a book whose
+gross market value is zero, is a named 422 — never a silent NaN.
 
 Normalization convention (es_before vs es_after MUST share one denominator):
 the hedge candidate is priced as an OVERLAY on the original book, never
@@ -40,6 +49,10 @@ adding `hedge_qty` shares of a candidate with beta `beta_cand` at price
 A candidate with |beta| < 0.1 is flagged `unusable` (sizing would blow up)
 and reported without a size/protection, never dropped from the response.
 
+`book_ref` (wave-3 Task A1's book-flow spine): the `book` field accepts a
+pinned snapshot id instead of inline positions — see routers/book.py and
+routers/whatif.py's identical `book_ref` handling.
+
 Serialization policy: UTC ISO Z timestamps, NaN/Inf -> null, unknown symbols
 or an empty candidate universe -> structured 422, never a 500 (pattern:
 routers/risk.py, routers/whatif.py).
@@ -53,10 +66,11 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, model_validator
 
-from quantmind.analytics.cointegration import engle_granger
 from quantmind.analytics.correlation import rolling_correlation
+from quantmind.api.routers._shared import PositionIn, clean, iso, read_close_series, weighted_portfolio_returns
+from quantmind.api.routers.book import read_book_positions
 from quantmind.risk.returns import InsufficientDataError, historical_es, rolling_beta
 
 router = APIRouter()
@@ -64,35 +78,7 @@ router = APIRouter()
 _BETA_WINDOW = 60
 _MIN_BETA_ABS = 0.1
 _MAX_CANDIDATES_OUT = 20
-_MIN_COINT_OBS = 10
-
-
-def _clean(x: float | None) -> float | None:
-    if x is None:
-        return None
-    try:
-        xf = float(x)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(xf):
-        return None
-    return xf
-
-
-def _iso(ts: pd.Timestamp) -> str:
-    return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-class BookPositionIn(BaseModel):
-    symbol: str = Field(..., min_length=1)
-    qty: float
-
-    @field_validator("qty")
-    @classmethod
-    def _qty_nonzero(cls, v: float) -> float:
-        if v == 0:
-            raise ValueError("qty must be nonzero")
-        return v
+_MAX_BOOK_POSITIONS = 50
 
 
 class Objective(BaseModel):
@@ -101,12 +87,21 @@ class Objective(BaseModel):
 
 
 class HedgeRequest(BaseModel):
-    book: list[BookPositionIn] = Field(..., min_length=1, max_length=50)
+    # Exactly one of `book` (inline positions) or `book_ref` (a pinned
+    # snapshot id, wave-3 Task A1) must be given — see `_book_xor_book_ref`.
+    book: list[PositionIn] | None = Field(None, min_length=1, max_length=50)
+    book_ref: str | None = None
     objective: Objective
     # Default = the cached universe minus book symbols (resolved in-handler,
     # request.app.state.store isn't available at model-validation time).
     candidates: list[str] | None = None
     years: int = Field(5, ge=1, le=25)
+
+    @model_validator(mode="after")
+    def _book_xor_book_ref(self) -> "HedgeRequest":
+        if bool(self.book) == bool(self.book_ref):
+            raise ValueError("provide exactly one of book or book_ref")
+        return self
 
 
 class HedgeCandidateOut(BaseModel):
@@ -121,7 +116,6 @@ class HedgeCandidateOut(BaseModel):
     residual_beta: float | None
     # Diagnostic only (Engineering Constraint 12) — never the ranking key.
     corr_stability: float | None
-    coint_pvalue: float | None
 
 
 class HedgeResponse(BaseModel):
@@ -133,19 +127,6 @@ class HedgeResponse(BaseModel):
     n_candidates_evaluated: int
     candidates: list[HedgeCandidateOut]
     as_of: str | None
-
-
-def _read_close_series(store, con_id: int, symbol: str, years: int) -> pd.Series:
-    try:
-        bars, _ = store.read_bars(con_id=con_id, bar_size="1d")
-    except FileNotFoundError:
-        raise HTTPException(422, detail=f"symbol {symbol!r} has no cached bars")
-    series = bars["close"]
-    if years > 0:
-        series = series.iloc[-(years * 252) :]
-    if series.empty:
-        raise HTTPException(422, detail=f"symbol {symbol!r} has no cached history")
-    return series
 
 
 def _portfolio_returns(
@@ -167,7 +148,7 @@ def _portfolio_returns(
     if len(returns) == 0:
         return None, weights, book_value, gross, prices
     weights_arr = np.array([weights[s] for s in symbols])
-    portfolio_returns = pd.Series(returns[symbols].to_numpy() @ weights_arr, index=returns.index)
+    portfolio_returns = weighted_portfolio_returns(returns, symbols, weights_arr)
     return portfolio_returns, weights, book_value, gross, prices
 
 
@@ -177,9 +158,19 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     benchmark = request.app.state.benchmark
     symbol_map = store.read_symbol_map()
 
-    unique_book = list(dict.fromkeys(p.symbol for p in req.book))
+    # book_ref resolves to the same PositionIn shape as an inline book
+    # (read_book_positions 422s naming the ref if it's unknown); Field's
+    # min_length/max_length=1..50 only runs on an inline `book` body, so a
+    # book_ref-resolved list gets the same bounds check by hand here.
+    book_positions = req.book if req.book is not None else read_book_positions(store, req.book_ref)
+    if not book_positions:
+        raise HTTPException(422, detail="book_ref resolved to an empty book")
+    if len(book_positions) > _MAX_BOOK_POSITIONS:
+        raise HTTPException(422, detail=f"book has {len(book_positions)} positions; max {_MAX_BOOK_POSITIONS}")
+
+    unique_book = list(dict.fromkeys(p.symbol for p in book_positions))
     qtys: dict[str, float] = {}
-    for p in req.book:
+    for p in book_positions:
         qtys[p.symbol] = qtys.get(p.symbol, 0.0) + p.qty
 
     unknown = sorted(s for s in unique_book if s not in symbol_map)
@@ -192,9 +183,25 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
 
     series_map: dict[str, pd.Series] = {}
     for sym in [*unique_book, benchmark]:
-        series_map[sym] = _read_close_series(store, symbol_map[sym], sym, req.years)
+        series_map[sym] = read_close_series(store, symbol_map[sym], sym, req.years)
+
+    # NaN/Inf last close (corrupted/partial sync data) makes a book leg
+    # unpriceable — named 422 rather than a silently propagated NaN, aligned
+    # with routers/whatif.py's identical guard (pre-wave-3 consolidation
+    # pass: this check was previously missing here).
+    unpriceable = sorted(sym for sym in unique_book if clean(float(series_map[sym].iloc[-1])) is None)
+    if unpriceable:
+        raise HTTPException(
+            422,
+            detail=(
+                f"non-finite last close in cached bars for: {unpriceable} — "
+                "re-sync before computing"
+            ),
+        )
 
     book_returns, _weights, book_value, book_gross, book_prices = _portfolio_returns(series_map, qtys, unique_book)
+    if book_gross <= 0:
+        raise HTTPException(422, detail="portfolio has zero gross market value")
     if book_returns is None:
         raise HTTPException(422, detail="book has no overlapping trading days")
 
@@ -212,19 +219,14 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     try:
         beta_series = rolling_beta(aligned["book"], aligned["bench"], window=_BETA_WINDOW, rf=0.0)
         beta_valid = beta_series.dropna()
-        book_beta = _clean(float(beta_valid.iloc[-1])) if len(beta_valid) else None
+        book_beta = clean(float(beta_valid.iloc[-1])) if len(beta_valid) else None
     except InsufficientDataError:
         book_beta = None
 
     try:
-        es_before = _clean(historical_es(book_returns, confidence=0.975))
+        es_before = clean(historical_es(book_returns, confidence=0.975))
     except InsufficientDataError:
         es_before = None
-
-    # Book-value time series (price level, diagnostic only): sum(qty_i *
-    # price_i(t)) over the book's own inner-joined price index — the y series
-    # for the Engle-Granger cointegration diagnostic below.
-    book_value_series = sum(book_prices[s] * qtys[s] for s in unique_book)
 
     if req.candidates is not None:
         candidate_pool = [s for s in dict.fromkeys(req.candidates) if s not in unique_book]
@@ -240,7 +242,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     results: list[HedgeCandidateOut] = []
     for csym in candidate_pool:
         try:
-            cand_prices = _read_close_series(store, symbol_map[csym], csym, req.years)
+            cand_prices = read_close_series(store, symbol_map[csym], csym, req.years)
         except HTTPException:
             continue  # mapped but no cached bars — a data gap, not a client error; skip it
 
@@ -262,20 +264,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         if len(aligned_bc) >= _BETA_WINDOW + 2:
             roll_corr = rolling_correlation(aligned_bc["book"], aligned_bc["cand"], window=_BETA_WINDOW).dropna()
             if len(roll_corr):
-                corr_stability = _clean(float(roll_corr.std()))
-
-        coint_pvalue: float | None = None
-        aligned_coint = pd.concat({"y": book_value_series, "x": cand_prices}, axis=1).dropna()
-        if len(aligned_coint) >= _MIN_COINT_OBS:
-            try:
-                coint_pvalue = _clean(float(engle_granger(aligned_coint["y"], aligned_coint["x"]).pvalue))
-            except Exception:
-                # Diagnostic-only column (Engineering Constraint 12): a
-                # degenerate candidate series (e.g. zero-variance price) can
-                # make the underlying OLS/ADF machinery raise (singular
-                # design matrix, etc). Never let a diagnostic failure 500 the
-                # whole ranking — just omit it for this candidate.
-                coint_pvalue = None
+                corr_stability = clean(float(roll_corr.std()))
 
         unusable = beta_cand is None or not math.isfinite(beta_cand) or abs(beta_cand) < _MIN_BETA_ABS
 
@@ -302,7 +291,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
 
                 if hedged_returns is not None:
                     try:
-                        es_after = _clean(historical_es(hedged_returns, confidence=0.975))
+                        es_after = clean(historical_es(hedged_returns, confidence=0.975))
                     except InsufficientDataError:
                         es_after = None
                     if es_before is not None and es_after is not None:
@@ -316,23 +305,22 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                             )
                             rb_valid = rb_series.dropna()
                             if len(rb_valid):
-                                residual_beta = _clean(float(rb_valid.iloc[-1]))
+                                residual_beta = clean(float(rb_valid.iloc[-1]))
                         except InsufficientDataError:
                             residual_beta = None
 
         results.append(
             HedgeCandidateOut(
                 symbol=csym,
-                beta=_clean(beta_cand),
+                beta=clean(beta_cand),
                 unusable=unusable,
-                hedge_qty=_clean(hedge_qty),
-                hedge_notional=_clean(hedge_notional),
+                hedge_qty=clean(hedge_qty),
+                hedge_notional=clean(hedge_notional),
                 es_before=es_before,
                 es_after=es_after,
-                protection=_clean(protection),
+                protection=clean(protection),
                 residual_beta=residual_beta,
                 corr_stability=corr_stability,
-                coint_pvalue=coint_pvalue,
             )
         )
 
@@ -351,10 +339,10 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     return HedgeResponse(
         benchmark=benchmark,
         objective=req.objective,
-        book_value=_clean(book_value),
+        book_value=clean(book_value),
         book_beta=book_beta,
         es_before=es_before,
         n_candidates_evaluated=n_evaluated,
         candidates=results[:_MAX_CANDIDATES_OUT],
-        as_of=_iso(book_prices.index[-1]) if len(book_prices) else None,
+        as_of=iso(book_prices.index[-1]) if len(book_prices) else None,
     )

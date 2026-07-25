@@ -188,3 +188,34 @@ def test_whatif_single_position_defaults_mc(client):
     body = r.json()
     assert body["weights"][0]["weight"] == pytest.approx(1.0)
     assert body["mc"]["histogram"]["counts"]
+
+
+# --- book_ref (wave-3 Task A1's book-flow spine): an alternative to inline
+# `positions`, resolved via routers/book.py's pinned snapshots. ---
+
+
+def test_whatif_book_ref_resolves_to_the_same_result_as_inline_positions(client):
+    pinned = client.post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 60}, {"symbol": "QQQ", "qty": 40}]}
+    ).json()
+
+    r_ref = client.post("/api/whatif", json={"book_ref": pinned["snapshot_id"], "years": 1, "mc": {"horizon": 21, "n_paths": 2000, "seed": 7}})
+    r_inline = client.post("/api/whatif", json=_payload())
+    assert r_ref.status_code == r_inline.status_code == 200
+    assert r_ref.json() == r_inline.json()
+
+
+def test_whatif_unknown_book_ref_is_422(client):
+    r = client.post("/api/whatif", json={"book_ref": "does-not-exist", "years": 1})
+    assert r.status_code == 422
+    assert "does-not-exist" in r.json()["detail"]
+
+
+def test_whatif_both_positions_and_book_ref_is_422(client):
+    r = client.post("/api/whatif", json=_payload(book_ref="whatever"))
+    assert r.status_code == 422
+
+
+def test_whatif_neither_positions_nor_book_ref_is_422(client):
+    r = client.post("/api/whatif", json={"years": 1})
+    assert r.status_code == 422
