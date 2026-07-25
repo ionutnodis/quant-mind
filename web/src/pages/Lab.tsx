@@ -77,6 +77,7 @@ interface LabApplyResponse {
   es: number | null;
   horizon: number;
   n_paths: number;
+  n_nonfinite: number;
 }
 
 function fetchModels() {
@@ -459,6 +460,14 @@ export function Lab() {
                 Linear P&amp;L approximation over {apply.data.n_paths.toLocaleString()} paths, horizon{" "}
                 {apply.data.horizon}d.
               </p>
+              {apply.data.n_nonfinite > 0 && (
+                <p className="text-warning text-[10px]">
+                  {apply.data.n_nonfinite.toLocaleString()} path
+                  {apply.data.n_nonfinite === 1 ? "" : "s"} produced non-finite P&amp;L and{" "}
+                  {apply.data.n_nonfinite === 1 ? "was" : "were"} excluded — check fit stability in
+                  the diagnostics.
+                </p>
+              )}
             </div>
           )}
         </div>

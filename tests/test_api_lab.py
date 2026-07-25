@@ -119,6 +119,50 @@ def test_apply_unknown_model_is_404(client):
     assert r.status_code == 404
 
 
+def test_apply_explosive_fit_with_nonfinite_pnl_is_422_not_500(client):
+    # The endpoint trusts client-supplied fit params (a round-tripped
+    # FitResponse by design). An explosive OU (theta << 0) overflows the paths
+    # to inf; np.histogram on non-finite data raises ValueError, which must
+    # surface as a structured 422 — never a 500 (binding never-500 constraint).
+    explosive_fit = {
+        "model_name": "ou",
+        "params": {"theta": -1e8, "mu": 0.04, "sigma": 0.02},
+        "cis": {"theta": [-1e8, -1e8], "mu": [0.04, 0.04], "sigma": [0.02, 0.02]},
+        "diagnostics": {"adf_pvalue": 1.0},
+        "n_obs": 100,
+    }
+    r = client.post(
+        "/api/lab/apply",
+        json={
+            "model_name": "ou",
+            "fit": explosive_fit,
+            "horizon": 60,
+            "n_paths": 200,
+            "seed": 1,
+            "exposure": {"factor_kind": "rate_level", "units": "usd_per_bp", "value": -610.0},
+        },
+    )
+    assert r.status_code == 422
+    assert "finite" in r.json()["detail"]
+
+
+def test_apply_happy_path_reports_zero_nonfinite_paths(client):
+    fit = _fit(client)
+    r = client.post(
+        "/api/lab/apply",
+        json={
+            "model_name": "ou",
+            "fit": fit,
+            "horizon": 30,
+            "n_paths": 500,
+            "seed": 3,
+            "exposure": {"factor_kind": "rate_level", "units": "usd_per_bp", "value": -610.0},
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["n_nonfinite"] == 0
+
+
 def test_apply_seeded_reproducible_across_calls(client):
     fit = _fit(client)
 

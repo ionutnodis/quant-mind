@@ -63,6 +63,10 @@ class LabApplyResponse(BaseModel):
     es: float | None
     horizon: int
     n_paths: int
+    # Paths dropped because their P&L overflowed to non-finite (explosive
+    # fits). Stats/histogram cover only the finite paths; the UI is honest
+    # about how many were excluded.
+    n_nonfinite: int
 
 
 def _tail_es(pnl: np.ndarray, confidence: float = 0.975) -> float | None:
@@ -105,17 +109,30 @@ def apply_to_book_route(req: LabApplyRequest) -> LabApplyResponse:
     except UnsupportedMappingError as e:
         raise HTTPException(422, detail=str(e))
 
-    n_bins = min(60, max(1, len(pnl)))
-    counts, edges = np.histogram(pnl, bins=n_bins)
-    p5, p50, p95 = (float(v) for v in np.percentile(pnl, [5, 50, 95]))
+    # Explosive fits (e.g. theta estimated negative on a non-stationary
+    # window) can overflow paths/pnl to inf/nan. np.histogram raises on a
+    # non-finite range — guard here so the endpoint never 500s: drop
+    # non-finite paths, report how many, and 422 if nothing finite remains.
+    finite_pnl = pnl[np.isfinite(pnl)]
+    n_nonfinite = int(len(pnl) - len(finite_pnl))
+    if len(finite_pnl) == 0:
+        raise HTTPException(
+            422,
+            detail="simulation produced no finite P&L — check fit stability / diagnostics",
+        )
+
+    n_bins = min(60, max(1, len(finite_pnl)))
+    counts, edges = np.histogram(finite_pnl, bins=n_bins)
+    p5, p50, p95 = (float(v) for v in np.percentile(finite_pnl, [5, 50, 95]))
 
     return LabApplyResponse(
         histogram=Histogram(edges=[float(e) for e in edges], counts=[int(c) for c in counts]),
-        mean=_clean(float(np.mean(pnl))),
+        mean=_clean(float(np.mean(finite_pnl))),
         p5=_clean(p5),
         p50=_clean(p50),
         p95=_clean(p95),
-        es=_clean(_tail_es(pnl)),
+        es=_clean(_tail_es(finite_pnl)),
         horizon=req.horizon,
         n_paths=req.n_paths,
+        n_nonfinite=n_nonfinite,
     )

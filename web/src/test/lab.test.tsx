@@ -75,6 +75,7 @@ const APPLY_RESPONSE = {
   es: -6800.0,
   horizon: 60,
   n_paths: 500,
+  n_nonfinite: 0,
 };
 
 test("schema-driven model form renders from GET /api/models", async () => {
@@ -143,6 +144,21 @@ test("apply to book renders the amber P&L results panel", async () => {
   expect(results).toHaveClass("text-you");
   expect(within(results).getByText(/-6,?800\.00/)).toBeInTheDocument();
   await waitFor(() => expect(within(results).getByText(/es/i)).toBeInTheDocument());
+});
+
+test("apply is honest when some paths were dropped as non-finite", async () => {
+  server.use(
+    http.get("/api/models", () => HttpResponse.json([MODEL_SCHEMA])),
+    http.post("/api/models/ou/fit", () => HttpResponse.json(FIT_RESPONSE)),
+    http.post("/api/lab/apply", () =>
+      HttpResponse.json({ ...APPLY_RESPONSE, n_nonfinite: 12 })
+    )
+  );
+  renderLab();
+  fireEvent.click(await screen.findByRole("button", { name: /^fit$/i }));
+  await screen.findByText(/θ/);
+  fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+  expect(await screen.findByText(/12 paths produced non-finite/i)).toBeInTheDocument();
 });
 
 test("apply is disabled and honest about the awaiting state before a fit exists", async () => {
