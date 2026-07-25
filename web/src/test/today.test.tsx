@@ -29,6 +29,8 @@ function renderToday() {
   );
 }
 
+const MODELS = [{ name: "ou", label: "Ornstein-Uhlenbeck (mean-reverting)" }];
+
 const BRIEF = {
   tiles: [
     { symbol: "SPY", last_close: 736.28, change_1d: 0.001 },
@@ -40,20 +42,27 @@ const BRIEF = {
 };
 
 test("renders tiles with direction glyphs and ES from the API", async () => {
-  server.use(http.get("/api/brief", () => HttpResponse.json(BRIEF)));
+  server.use(
+    http.get("/api/brief", () => HttpResponse.json(BRIEF)),
+    http.get("/api/models", () => HttpResponse.json(MODELS))
+  );
   renderToday();
   expect(await screen.findByText("SPY")).toBeInTheDocument();
   expect(screen.getByText("736.28")).toBeInTheDocument();
   expect(screen.getByText(/▼ 1\.12%/)).toBeInTheDocument();
   expect(screen.getByText(/3\.14%/)).toBeInTheDocument();
-  expect(screen.getByTestId("asof")).toHaveTextContent("2026-07-24");
+  // new bench zones: regime line, book vitals panel, ranked strip, models console
+  expect(screen.getByText(/tape — QQQ leads, down 1\.12%/)).toBeInTheDocument();
+  expect(screen.getByText("Your book")).toBeInTheDocument();
+  expect(screen.getByText(/ranked by move/i)).toBeInTheDocument();
+  expect(await screen.findByText(/Ornstein-Uhlenbeck/)).toBeInTheDocument();
+  expect(screen.getByText(/as of 2026-07-24/)).toBeInTheDocument();
 });
 
 test("staleness flag shows when data is old", async () => {
   server.use(
-    http.get("/api/brief", () =>
-      HttpResponse.json({ ...BRIEF, as_of: "2026-07-01T00:00:00Z" })
-    )
+    http.get("/api/brief", () => HttpResponse.json({ ...BRIEF, as_of: "2026-07-01T00:00:00Z" })),
+    http.get("/api/models", () => HttpResponse.json(MODELS))
   );
   renderToday();
   expect(await screen.findByTestId("staleness")).toHaveTextContent(/days old/);
@@ -63,8 +72,9 @@ test("empty cache shows empty state, not a crash", async () => {
   server.use(
     http.get("/api/brief", () =>
       HttpResponse.json({ tiles: [], correlation: null, benchmark_es: null, as_of: null })
-    )
+    ),
+    http.get("/api/models", () => HttpResponse.json(MODELS))
   );
   renderToday();
-  expect(await screen.findByText(/Cache is empty/)).toBeInTheDocument();
+  expect(await screen.findByText(/No market data cached/)).toBeInTheDocument();
 });

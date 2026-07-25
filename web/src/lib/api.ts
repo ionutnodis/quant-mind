@@ -25,7 +25,14 @@ async function get<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export interface ModelSchema {
+  name: string;
+  label?: string;
+  factor?: { kind: string; units: string; dt: number };
+}
+
 export const api = {
   brief: () => get<Brief>("/api/brief"),
   health: () => get<{ status: string }>("/api/health"),
+  models: () => get<ModelSchema[]>("/api/models"),
 };
