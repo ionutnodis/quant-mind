@@ -32,11 +32,11 @@ export function CorrelationHeatmap({
           showscale: false,
         },
       ],
-      { ...baseLayout, height: 260 },
+      { ...baseLayout(), height: 260 },
       { displayModeBar: false, responsive: true }
     );
     const node = ref.current;
     return () => Plotly.purge(node);
   }, [data]);
-  return <div ref={ref} data-testid="corr-heatmap" />;
+  return <div ref={ref} data-testid="corr-heatmap" role="img" aria-label="Correlation matrix of cached instruments, daily returns over five years" />;
 }
