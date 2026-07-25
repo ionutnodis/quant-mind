@@ -125,10 +125,19 @@ def create_app(store: BarStore, benchmark: str, api_token: str = "", broker=None
 
     def _series_for(symbol: str, years: int) -> pd.Series:
         symbol_map = store.read_symbol_map()
-        if symbol not in symbol_map:
-            raise HTTPException(422, detail=f"symbol {symbol!r} not in cache")
-        bars, _ = store.read_bars(con_id=symbol_map[symbol], bar_size="1d")
-        series = bars["close"]
+        if symbol in symbol_map:
+            try:
+                bars, _ = store.read_bars(con_id=symbol_map[symbol], bar_size="1d")
+            except FileNotFoundError:
+                raise HTTPException(422, detail=f"symbol {symbol!r} mapped but has no cached bars")
+            series = bars["close"]
+        else:
+            # named series (US10Y, NET_LIQUIDITY, ...) — the Lab's natural data sources
+            try:
+                series = store.read_series(symbol)
+            except FileNotFoundError:
+                known = sorted(symbol_map) + store.list_series()
+                raise HTTPException(422, detail=f"{symbol!r} not in cache; known: {known}")
         if years > 0:
             series = series.iloc[-(years * 252):]
         return series

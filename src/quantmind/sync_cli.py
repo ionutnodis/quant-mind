@@ -20,7 +20,13 @@ from quantmind.sources.sync import sync_daily_bars
 
 # v1 macro-tile universe (design: hedge candidate list is config-editable; this
 # is the starter set — crude via USO and DXY via UUP are the constraint-16 proxies)
-DEFAULT_UNIVERSE = ["SPY", "QQQ", "IWM", "TLT", "IEF", "GLD", "USO", "UUP", "EWJ", "FXI", "EWG"]
+DEFAULT_UNIVERSE = [
+    "SPY", "QQQ", "IWM", "TLT", "IEF", "GLD", "USO", "UUP", "EWJ", "FXI", "EWG",
+    # sectors
+    "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB",
+    # factor proxies
+    "MTUM", "VLUE", "QUAL", "USMV",
+]
 
 
 async def main(symbols: list[str]) -> None:
@@ -37,6 +43,10 @@ async def main(symbols: list[str]) -> None:
         wm = store.watermark(con_id=con_id, bar_size="1d")
         print(f"{symbol:>5} conId={con_id:<12} bars through {wm.date()}")
     ib.disconnect()
+    from quantmind.sources.fred import sync_fred
+
+    for name, last in sync_fred(store).items():
+        print(f"{name:>14} series through {last}")
 
 
 if __name__ == "__main__":

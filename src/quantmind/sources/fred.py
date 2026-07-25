@@ -67,3 +67,30 @@ def fetch_net_liquidity() -> pd.Series:  # pragma: no cover - network
     nl = net_liquidity(walcl, tga, rrp)
     validate_net_liquidity(nl)
     return nl
+
+
+# store names -> (fred id, scale). Rates normalize percent -> DECIMAL so the
+# exposure bridge's ("decimal","usd_per_bp") conversion stays honest.
+FRED_STORE_SERIES = {
+    "US10Y": ("DGS10", 1e-2),
+    "US2Y": ("DGS2", 1e-2),
+    "US3M": ("DGS3MO", 1e-2),
+}
+
+
+def sync_fred(store, fetcher=fetch_series) -> dict[str, str]:
+    """Fetch FRED series into the store (rates as decimals, net liquidity in $bn).
+    Returns {store_name: last_date}."""
+    written: dict[str, str] = {}
+    for name, (fred_id, scale) in FRED_STORE_SERIES.items():
+        s = fetcher(fred_id) * scale
+        store.write_series(name, s)
+        written[name] = str(s.index[-1].date())
+    walcl = fetcher("WALCL") * 1e-3
+    tga = fetcher("WTREGEN") * 1e-3
+    rrp = fetcher("RRPONTSYD") * 1.0
+    nl = net_liquidity(walcl, tga, rrp)
+    validate_net_liquidity(nl)
+    store.write_series("NET_LIQUIDITY", nl)
+    written["NET_LIQUIDITY"] = str(nl.index[-1].date())
+    return written

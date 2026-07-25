@@ -89,3 +89,29 @@ class BarStore:
         if not path.exists():
             return {}
         return {k: int(v) for k, v in json.loads(path.read_text()).items()}
+
+    # --- generic named series (FRED etc.): root/series/{name}.parquet ---
+
+    def _series_path(self, name: str):
+        return self.root / "series" / f"{name}.parquet"
+
+    def write_series(self, name: str, series: pd.Series) -> None:
+        path = self._series_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        table = pa.Table.from_pandas(series.rename("value").to_frame(), preserve_index=True)
+        tmp = path.with_suffix(".parquet.tmp")
+        pq.write_table(table, tmp)
+        tmp.replace(path)
+
+    def read_series(self, name: str) -> pd.Series:
+        path = self._series_path(name)
+        if not path.exists():
+            raise FileNotFoundError(f"no cached series {name!r}")
+        df = pq.read_table(path).to_pandas()
+        return df["value"]
+
+    def list_series(self) -> list[str]:
+        d = self.root / "series"
+        if not d.exists():
+            return []
+        return sorted(p.stem for p in d.glob("*.parquet"))
