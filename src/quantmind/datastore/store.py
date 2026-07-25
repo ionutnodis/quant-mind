@@ -70,3 +70,22 @@ class BarStore:
             return None
         bars, _ = self.read_bars(con_id, bar_size)
         return bars.index[-1]
+
+    # --- symbol map: symbol -> conId, written by sync, read by the UI ---
+
+    def write_symbol_map(self, mapping: dict[str, int]) -> None:
+        import json
+
+        path = self.root / "symbols.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(mapping, indent=2))
+        tmp.replace(path)
+
+    def read_symbol_map(self) -> dict[str, int]:
+        import json
+
+        path = self.root / "symbols.json"
+        if not path.exists():
+            return {}
+        return {k: int(v) for k, v in json.loads(path.read_text()).items()}

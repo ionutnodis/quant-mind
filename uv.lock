@@ -901,6 +901,7 @@ name = "quantmind"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "certifi" },
     { name = "duckdb" },
     { name = "ib-async" },
     { name = "numpy" },
@@ -928,6 +929,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "certifi", specifier = ">=2026.7.22" },
     { name = "duckdb", specifier = ">=1.0" },
     { name = "fredapi", marker = "extra == 'macro'", specifier = ">=0.5" },
     { name = "ib-async", specifier = ">=1.0" },
