@@ -77,8 +77,12 @@ class SimulateResponse(BaseModel):
     n_paths: int
 
 
-def create_app(store: BarStore, benchmark: str, api_token: str = "") -> FastAPI:
+def create_app(store: BarStore, benchmark: str, api_token: str = "", broker=None) -> FastAPI:
     app = FastAPI(title="QuantMind API", version="0.1.0")
+    # Shared state for domain routers (routers/*.py): read via request.app.state
+    app.state.store = store
+    app.state.benchmark = benchmark
+    app.state.broker = broker
 
     async def auth(request: Request):
         # Security review: strict host allowlist (no test backdoors) and
@@ -174,5 +178,10 @@ def create_app(store: BarStore, benchmark: str, api_token: str = "") -> FastAPI:
             horizon=req.horizon,
             n_paths=req.n_paths,
         )
+
+    from quantmind.api.routers import ROUTERS
+
+    for r in ROUTERS:
+        app.include_router(r, prefix="/api", dependencies=dep)
 
     return app

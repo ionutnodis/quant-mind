@@ -10,6 +10,11 @@ import {
 import "./index.css";
 import { Shell } from "./shell/Shell";
 import { Today } from "./pages/Today";
+import { Portfolio } from "./pages/Portfolio";
+import { Risk } from "./pages/Risk";
+import { Lab } from "./pages/Lab";
+import { WhatIf } from "./pages/WhatIf";
+import { Macro } from "./pages/Macro";
 
 const Stub = (label: string) =>
   function StubPage() {
@@ -24,12 +29,12 @@ const Stub = (label: string) =>
 export const rootRoute = createRootRoute({ component: Shell });
 const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: "/", component: Today }),
-  createRoute({ getParentRoute: () => rootRoute, path: "/portfolio", component: Stub("Portfolio") }),
-  createRoute({ getParentRoute: () => rootRoute, path: "/risk", component: Stub("Risk") }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/portfolio", component: Portfolio }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/risk", component: Risk }),
   createRoute({ getParentRoute: () => rootRoute, path: "/hedge", component: Stub("Hedge Lab") }),
-  createRoute({ getParentRoute: () => rootRoute, path: "/whatif", component: Stub("What-If") }),
-  createRoute({ getParentRoute: () => rootRoute, path: "/macro", component: Stub("Macro") }),
-  createRoute({ getParentRoute: () => rootRoute, path: "/lab", component: Stub("Lab") }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/whatif", component: WhatIf }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/macro", component: Macro }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/lab", component: Lab }),
 ];
 
 export const router = createRouter({ routeTree: rootRoute.addChildren(routes) });
