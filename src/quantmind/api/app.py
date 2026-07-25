@@ -9,11 +9,12 @@ Phase 1, not deferred to the execution phase.
 from __future__ import annotations
 
 import math
+import secrets
 
 import numpy as np
 import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from quantmind.brief import build_brief
 from quantmind.datastore.store import BarStore
@@ -48,7 +49,7 @@ class BriefResponse(BaseModel):
 
 class FitRequest(BaseModel):
     symbol: str
-    years: int = 5
+    years: int = Field(5, ge=0, le=25)
 
 
 class FitResponse(BaseModel):
@@ -61,8 +62,10 @@ class FitResponse(BaseModel):
 
 class SimulateRequest(BaseModel):
     fit: FitResponse
-    horizon: int = 126
-    n_paths: int = 10_000
+    # Bounds are the resource-exhaustion guard: 200k paths x 2520 days is the
+    # ceiling a request may allocate (security review).
+    horizon: int = Field(126, ge=1, le=2520)
+    n_paths: int = Field(10_000, ge=1, le=200_000)
     seed: int | None = None
     x0: float | None = None
 
@@ -78,12 +81,14 @@ def create_app(store: BarStore, benchmark: str, api_token: str = "") -> FastAPI:
     app = FastAPI(title="QuantMind API", version="0.1.0")
 
     async def auth(request: Request):
+        # Security review: strict host allowlist (no test backdoors) and
+        # constant-time token comparison.
         host = request.headers.get("host", "").split(":")[0]
-        if host not in ("127.0.0.1", "localhost", "testserver"):
+        if host not in ("127.0.0.1", "localhost"):
             raise HTTPException(403, "local access only")
         if api_token:
             header = request.headers.get("authorization", "")
-            if header != f"Bearer {api_token}":
+            if not secrets.compare_digest(header, f"Bearer {api_token}"):
                 raise HTTPException(401, "invalid or missing token")
 
     dep = [Depends(auth)]

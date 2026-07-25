@@ -27,13 +27,13 @@ def client(tmp_path):
     store.write_bars(con_id=2, bar_size="1d", bars=_bars(seed=2), meta=meta)
     store.write_symbol_map({"SPY": 1, "QQQ": 2})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
-    return TestClient(app, headers={"Authorization": "Bearer testtoken"})
+    return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 
 @pytest.fixture
 def empty_client(tmp_path):
     app = create_app(store=BarStore(tmp_path / "empty"), benchmark="SPY", api_token="testtoken")
-    return TestClient(app, headers={"Authorization": "Bearer testtoken"})
+    return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 
 def test_health(client):
@@ -107,3 +107,24 @@ def test_simulate_endpoint_returns_bands_not_raw_paths(client):
     assert set(body["bands"]) == {"p5", "p25", "p50", "p75", "p95"}
     assert len(body["bands"]["p50"]) == 60
     assert len(body["sample_paths"]) <= 100  # never raw 10k paths over the wire
+
+
+def test_forged_host_header_is_rejected(client):
+    r = client.get("/api/health", headers={"Host": "testserver"})
+    assert r.status_code == 403
+    r2 = client.get("/api/health", headers={"Host": "evil.example.com"})
+    assert r2.status_code == 403
+
+
+def test_simulate_bounds_reject_resource_exhaustion(client):
+    fit = client.post("/api/models/ou/fit", json={"symbol": "SPY", "years": 1}).json()
+    r = client.post(
+        "/api/models/ou/simulate",
+        json={"fit": fit, "horizon": 60, "n_paths": 10_000_000, "seed": 1, "x0": 100.0},
+    )
+    assert r.status_code == 422
+    r2 = client.post(
+        "/api/models/ou/simulate",
+        json={"fit": fit, "horizon": 100_000, "n_paths": 100, "seed": 1, "x0": 100.0},
+    )
+    assert r2.status_code == 422
