@@ -1,0 +1,1 @@
+/Users/nodisionut/conductor/repos/quant-mind/.claude/skills/gstack/codex/SKILL.md
