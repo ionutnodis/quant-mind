@@ -48,3 +48,8 @@
 ## Responsive layout pass (design-review deferred, 2026-07-25)
 - **What:** Breakpoint behavior for sidebar, tile strip, and panels below ~1024px.
 - **Why:** Desktop-first is deliberate (personal tool, external monitor), but a laptop-width squeeze currently gets no accommodations.
+
+## Pre-wave-3 consolidation pass (final-review mandated, 2026-07-25)
+- **What:** Extract shared `api/routers/_shared.py` (`_clean`, `_iso`, `_read_close_series`, the qty-nonzero PositionIn model — currently 7/4/2/2 duplicated copies); shared `BookBuilder` React component (Hedge's string-qty variant as base — WhatIf and Hedge have diverging row-builders); align Hedge's degenerate-input 422s (gross<=0, non-finite closes) with WhatIf's named-422 policy; narrow the Engle-Granger broad except.
+- **Why:** Wave-2's exclusive-file-ownership rules tripled helper duplication (right tradeoff then, wrong to keep); any NaN-policy change now needs 7 edits; a third row-builder copy in wave 3 locks in drift.
+- **Context:** Wave-2 final whole-branch review M1/M2/M5; ledger history in git (docs/plans/2026-07-25-wave2.md).
