@@ -28,12 +28,18 @@ function renderHedge() {
   );
 }
 
+// es_before/es_after/protection are FRACTIONS of gross (historical_es on
+// daily returns), never dollars — realistic magnitudes are ~0.001-0.05.
+// Regression guard for C1: a dollar-scaled fixture (e.g. 250.0) would let a
+// num(x, 0) render bug ("0 -> 0 (0)") slip through unnoticed, so these are
+// pinned to real fraction values and the rendered percent strings are
+// asserted below.
 const HEDGE_RESPONSE = {
   benchmark: "SPY",
   objective: { kind: "beta_target", value: 0.0 },
   book_value: 10000.0,
   book_beta: 1.0,
-  es_before: 250.0,
+  es_before: 0.0231,
   n_candidates_evaluated: 3,
   as_of: "2026-07-24T00:00:00Z",
   candidates: [
@@ -43,9 +49,9 @@ const HEDGE_RESPONSE = {
       unusable: false,
       hedge_qty: -21.3,
       hedge_notional: -8500.5,
-      es_before: 250.0,
-      es_after: 90.0,
-      protection: 160.0,
+      es_before: 0.0231,
+      es_after: 0.009,
+      protection: 0.0141,
       residual_beta: 0.05,
       corr_stability: 0.04,
       coint_pvalue: 0.031,
@@ -56,9 +62,9 @@ const HEDGE_RESPONSE = {
       unusable: false,
       hedge_qty: -30.1,
       hedge_notional: -6200.2,
-      es_before: 250.0,
-      es_after: 150.0,
-      protection: 100.0,
+      es_before: 0.0231,
+      es_after: 0.015,
+      protection: 0.0081,
       residual_beta: 0.1,
       corr_stability: 0.09,
       coint_pvalue: 0.4,
@@ -69,7 +75,7 @@ const HEDGE_RESPONSE = {
       unusable: true,
       hedge_qty: null,
       hedge_notional: null,
-      es_before: 250.0,
+      es_before: 0.0231,
       es_after: null,
       protection: null,
       residual_beta: null,
@@ -112,6 +118,13 @@ test("build a book, run, and render the ranked candidates table in amber", async
   // Protection column is amber (the book-impact number).
   const protectionCell = within(bodyRows[0]).getByTestId("protection-cell");
   expect(protectionCell.className).toMatch(/text-you/);
+
+  // C1 regression guard: es_before/es_after/protection are fractions of
+  // gross, not dollars — they must render as percentages, not as "0 -> 0
+  // (0)" (the num(x, 0) bug that hid every real candidate's protection).
+  expect(protectionCell.textContent).toContain("2.31% → 0.90%(1.41%)");
+  const iwmProtectionCell = within(bodyRows[1]).getByTestId("protection-cell");
+  expect(iwmProtectionCell.textContent).toContain("2.31% → 1.50%(0.81%)");
 
   // Unusable candidate is flagged, not silently dropped.
   expect(within(bodyRows[2]).getByText(/unusable/i)).toBeInTheDocument();

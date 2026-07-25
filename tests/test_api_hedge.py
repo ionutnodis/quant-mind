@@ -254,6 +254,73 @@ def test_hedge_objective_value_bounds_reject_out_of_range(client):
     assert r2.status_code == 422
 
 
+def test_hedge_protection_not_inflated_by_large_hedge_notional(tmp_path):
+    """I1 regression: es_after must be computed by overlaying the hedge on
+    the ORIGINAL book (normalized by the original book's gross), never by
+    re-normalizing a blended book+hedge portfolio by the NEW (hedge-inflated)
+    gross. The old approach mechanically shrinks the hedge leg's weight
+    whenever its notional is large relative to the book — which happens for
+    any low-beta candidate, since sizing (hedge_qty ∝ 1/beta_cand) blows up
+    as beta_cand shrinks. That let a low-beta, weakly-correlated candidate
+    ("WEAK") look MORE protective than a well-correlated, sanely-sized one
+    ("GOOD") purely because its huge notional dominated the blended gross and
+    drowned out the book's own risk in the denominator — not because it
+    actually reduces the book's tail risk. Pre-fix, this assertion fails
+    (WEAK's protection > GOOD's); post-fix WEAK must not beat GOOD."""
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    spy_bars = _bars(seed=1)
+    store.write_bars(con_id=1, bar_size="1d", bars=spy_bars, meta=meta)  # SPY (book)
+    store.write_bars(
+        con_id=2,
+        bar_size="1d",
+        bars=_beta_correlated_bars(spy_bars["close"], beta=0.8, noise_scale=0.002, seed=2),
+        meta=meta,
+    )  # GOOD: well-correlated, sanely-sized hedge
+    store.write_bars(
+        con_id=3,
+        bar_size="1d",
+        # Low beta (just above the 0.1 unusable floor) + tiny idiosyncratic
+        # noise -> low own-volatility AND a huge required notional (sizing
+        # is inversely proportional to beta_cand). This combination is what
+        # exploited the old normalization: dominating the blended gross with
+        # a low-vol instrument mechanically crushed es_after towards zero.
+        bars=_beta_correlated_bars(spy_bars["close"], beta=0.15, noise_scale=0.0005, seed=3),
+        meta=meta,
+    )  # WEAK
+    store.write_symbol_map({"SPY": 1, "GOOD": 2, "WEAK": 3})
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    client = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+
+    r = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "SPY", "qty": 10}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["GOOD", "WEAK"],
+            "years": 1,
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    by_symbol = {c["symbol"]: c for c in body["candidates"]}
+    good, weak = by_symbol["GOOD"], by_symbol["WEAK"]
+    assert good["unusable"] is False
+    assert weak["unusable"] is False
+
+    # WEAK needs a much larger notional than GOOD to hit the same beta
+    # target (sizing ∝ 1/beta_cand, and 0.15 << 0.8) — that's the setup for
+    # the denominator-inflation exploit, not the bug itself.
+    assert abs(weak["hedge_notional"]) > abs(good["hedge_notional"])
+
+    # The bug: WEAK's protection must not exceed GOOD's purely because its
+    # huge notional inflated (old code) or dominates (this is the honest
+    # overlay check) the denominator. A weakly-correlated, low-beta hedge is
+    # not a better hedge just because it's sized bigger.
+    assert weak["protection"] is not None and good["protection"] is not None
+    assert weak["protection"] <= good["protection"]
+
+
 def test_hedge_years_bounds_reject_out_of_range(client):
     r = client.post(
         "/api/hedge",

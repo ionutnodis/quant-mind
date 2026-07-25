@@ -280,8 +280,8 @@ export function WhatIf() {
           )}
           {data && (
             <div data-testid="whatif-weights" className="space-y-2">
-              {data.weights.map((w) => (
-                <div key={w.symbol} className="space-y-1">
+              {data.weights.map((w, i) => (
+                <div key={i} className="space-y-1">
                   <div className="flex items-baseline justify-between text-[12px] num">
                     <span className="text-ink">{w.symbol}</span>
                     <span className="text-muted">{pct(w.weight)}</span>

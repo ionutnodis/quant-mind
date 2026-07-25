@@ -9,12 +9,21 @@ sync process, per the wave-2 plan.
 
 GET /api/sync/{job_id} is a thin passthrough of JobManager.status; an unknown
 id (never submitted, or evicted after TTL) is a 404, not a 500.
+
+`_job_manager` lazily creates the singleton JobManager on first use (there is
+no app-startup hook that constructs it eagerly). Two concurrent first
+requests would otherwise both observe `app.state.job_manager is None` and
+each build their own JobManager -> two ProcessPoolExecutor pools racing
+`sync_cli` subprocesses against one on-disk cache (TOCTOU). `_job_manager_lock`
+double-checked-locks the create so exactly one JobManager is ever built,
+regardless of request concurrency.
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -22,6 +31,10 @@ from pydantic import BaseModel
 from quantmind.api.jobs import JobManager
 
 router = APIRouter()
+
+# Guards the lazy JobManager creation in `_job_manager` below — see module
+# docstring for why this needs to be a real lock, not a bare None-check.
+_job_manager_lock = threading.Lock()
 
 
 def _run_sync_cli() -> str:
@@ -51,8 +64,13 @@ class SyncStatusResponse(BaseModel):
 def _job_manager(request: Request) -> JobManager:
     jm = getattr(request.app.state, "job_manager", None)
     if jm is None:
-        jm = JobManager(max_workers=1)
-        request.app.state.job_manager = jm
+        # Double-checked locking: re-read state under the lock in case
+        # another thread already built it while we were waiting.
+        with _job_manager_lock:
+            jm = getattr(request.app.state, "job_manager", None)
+            if jm is None:
+                jm = JobManager(max_workers=1)
+                request.app.state.job_manager = jm
     return jm
 
 

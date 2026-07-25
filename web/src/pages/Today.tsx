@@ -93,7 +93,7 @@ function SyncButton() {
         data-testid="sync-now"
         onClick={handleClick}
         disabled={running}
-        className="num text-[11px] border border-hairline px-2.5 py-1 text-ink hover:border-you disabled:opacity-50 disabled:cursor-not-allowed"
+        className="num text-[11px] border border-hairline px-2.5 py-1 text-ink hover:border-muted disabled:opacity-50 disabled:cursor-not-allowed"
       >
         {running ? "Syncing…" : "Sync now"}
       </button>

@@ -12,6 +12,25 @@ for the Engle-Granger diagnostic. No math beyond wiring lives here.
 Alignment approach mirrors routers/whatif.py: price-level inner join across
 every symbol involved, then pct_change, weights by |market value|-signed.
 
+Normalization convention (es_before vs es_after MUST share one denominator):
+the hedge candidate is priced as an OVERLAY on the original book, never
+folded into a re-normalized blended portfolio. Concretely, `book_returns` is
+a per-original-book-dollar return series (weights are fractions of the
+ORIGINAL book's gross). The hedge leg's daily dollar P&L is approximated as
+`hedge_notional * cand_return(t)` (constant-notional approximation over the
+window) and is converted to the SAME per-original-book-dollar units by
+dividing by that same original gross:
+`hedged_return(t) = book_return(t) + hedge_notional * cand_return(t) / book_gross`.
+es_after = historical_es(hedged_returns) then shares es_before's denominator
+exactly. The earlier approach re-ran `_portfolio_returns` on book+hedge
+together, which re-normalizes weights by the NEW (inflated) gross whenever
+the hedge notional is large — mechanically shrinking the hedge leg's weight
+and deflating es_after for large-notional hedges (e.g. a low-beta candidate
+that needs a huge notional to hit the target), biasing `protection` upward
+for exactly the candidates that should look worst. The overlay convention
+above removes that bias: protection can only come from the hedge actually
+reducing tail risk, not from denominator inflation.
+
 Hedge sizing: to move book beta from `book_beta` to `objective.value` by
 adding `hedge_qty` shares of a candidate with beta `beta_cand` at price
 `price_cand`, the dollar-beta needed from the hedge leg is
@@ -131,9 +150,12 @@ def _read_close_series(store, con_id: int, symbol: str, years: int) -> pd.Series
 
 def _portfolio_returns(
     series_map: dict[str, pd.Series], qtys: dict[str, float], symbols: list[str]
-) -> tuple[pd.Series | None, dict[str, float], float, pd.DataFrame]:
+) -> tuple[pd.Series | None, dict[str, float], float, float, pd.DataFrame]:
     """Price-level inner join across `symbols`, then pct_change, weighted by
-    |market value|-signed weight (mirrors routers/whatif.py's alignment)."""
+    |market value|-signed weight (mirrors routers/whatif.py's alignment).
+    Returns (portfolio_returns, weights, book_value, gross, prices); `gross`
+    is the denominator the caller must reuse for any per-book-dollar overlay
+    computation (see module docstring's normalization convention)."""
     last_close = {s: float(series_map[s].iloc[-1]) for s in symbols}
     market_values = {s: qtys[s] * last_close[s] for s in symbols}
     gross = sum(abs(v) for v in market_values.values())
@@ -143,10 +165,10 @@ def _portfolio_returns(
     prices = pd.concat({s: series_map[s] for s in symbols}, axis=1).dropna()
     returns = prices.pct_change().dropna()
     if len(returns) == 0:
-        return None, weights, book_value, prices
+        return None, weights, book_value, gross, prices
     weights_arr = np.array([weights[s] for s in symbols])
     portfolio_returns = pd.Series(returns[symbols].to_numpy() @ weights_arr, index=returns.index)
-    return portfolio_returns, weights, book_value, prices
+    return portfolio_returns, weights, book_value, gross, prices
 
 
 @router.post("/hedge", response_model=HedgeResponse)
@@ -172,7 +194,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     for sym in [*unique_book, benchmark]:
         series_map[sym] = _read_close_series(store, symbol_map[sym], sym, req.years)
 
-    book_returns, _weights, book_value, book_prices = _portfolio_returns(series_map, qtys, unique_book)
+    book_returns, _weights, book_value, book_gross, book_prices = _portfolio_returns(series_map, qtys, unique_book)
     if book_returns is None:
         raise HTTPException(422, detail="book has no overlapping trading days")
 
@@ -266,13 +288,18 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                 hedge_qty = -raw_size
                 hedge_notional = hedge_qty * price_cand_last
 
-                hedge_symbols = [*unique_book, csym]
-                hedge_qtys = dict(qtys)
-                hedge_qtys[csym] = hedge_qtys.get(csym, 0.0) + hedge_qty
-                hedge_series_map = dict(series_map)
-                hedge_series_map[csym] = cand_prices
+                # Overlay, not a re-blended portfolio (see module docstring's
+                # normalization convention): the hedge leg's daily dollar P&L
+                # (hedge_notional * cand_return(t), constant-notional
+                # approximation) is added to book_returns after converting to
+                # the SAME per-original-book-dollar units via book_gross —
+                # never the (possibly hedge-inflated) new portfolio gross.
+                aligned_overlay = pd.concat({"book": book_returns, "cand": cand_returns}, axis=1).dropna()
+                hedged_returns: pd.Series | None = None
+                if len(aligned_overlay) > 0 and book_gross:
+                    hedge_leg_returns = hedge_notional * aligned_overlay["cand"] / book_gross
+                    hedged_returns = aligned_overlay["book"] + hedge_leg_returns
 
-                hedged_returns, _hw, _hv, _hp = _portfolio_returns(hedge_series_map, hedge_qtys, hedge_symbols)
                 if hedged_returns is not None:
                     try:
                         es_after = _clean(historical_es(hedged_returns, confidence=0.975))

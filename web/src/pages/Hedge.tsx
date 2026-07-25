@@ -56,6 +56,14 @@ function num(x: number | null | undefined, digits = 2): string {
   return x.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
+// es_before/es_after/protection are fractions of gross (historical_es on
+// daily returns, ~0.001-0.05) — never dollar-scaled — so they render as
+// percentages, matching WhatIf's pct() pattern (WhatIf.tsx).
+function pct(x: number | null | undefined): string {
+  if (x === null || x === undefined || !Number.isFinite(x)) return "—";
+  return `${(x * 100).toFixed(2)}%`;
+}
+
 let rowKeySeq = 0;
 function newRow(): BookRow & { key: number } {
   rowKeySeq += 1;
@@ -269,8 +277,8 @@ export function Hedge() {
                         "—"
                       ) : (
                         <>
-                          {num(c.es_before, 0)} → {num(c.es_after, 0)}
-                          <span className="ml-1">({num(c.protection, 0)})</span>
+                          {pct(c.es_before)} → {pct(c.es_after)}
+                          <span className="ml-1">({pct(c.protection)})</span>
                         </>
                       )}
                     </td>

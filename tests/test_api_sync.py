@@ -12,7 +12,9 @@ or IB Gateway.
 
 from __future__ import annotations
 
+import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -104,3 +106,43 @@ def test_unknown_job_id_is_404(client):
     r = client.get("/api/sync/does-not-exist")
     assert r.status_code == 404
     assert "detail" in r.json()
+
+
+def test_job_manager_created_exactly_once_under_concurrent_first_requests(monkeypatch):
+    # I2 (TOCTOU): two simultaneous first calls into `_job_manager` must not
+    # each observe `job_manager is None` and build their own JobManager (two
+    # ProcessPoolExecutor pools racing sync_cli against one cache). Count
+    # constructions directly, bypassing HTTP/TestClient entirely so the race
+    # is on `_job_manager`'s own state, not on unrelated I/O.
+    construction_count = 0
+    construction_lock = threading.Lock()
+
+    class _CountingJobManager:
+        def __init__(self, *args, **kwargs):
+            nonlocal construction_count
+            # Widen the window between the None-check and the state-assignment
+            # in `_job_manager` so a racing thread reliably observes
+            # `job_manager is None` too, rather than relying on GIL luck.
+            time.sleep(0.01)
+            with construction_lock:
+                construction_count += 1
+
+    monkeypatch.setattr(sync_module, "JobManager", _CountingJobManager)
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    n_threads = 32
+    barrier = threading.Barrier(n_threads)
+
+    def worker():
+        barrier.wait()  # maximize the odds every thread races the None-check together
+        sync_module._job_manager(request)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert construction_count == 1
+    assert isinstance(request.app.state.job_manager, _CountingJobManager)
