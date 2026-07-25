@@ -68,6 +68,22 @@ async def test_first_sync_fetches_full_history_and_saves_symbol_map(tmp_path):
     assert sleeper.delays == [0.5, 0.5]
 
 
+async def test_partial_universe_sync_preserves_existing_symbol_map_entries(tmp_path):
+    # Fix-loop IMPORTANT 1: `python -m quantmind.sync_cli SPY` (documented
+    # argv mode) syncs a subset — sync_daily_bars must read-modify-write the
+    # symbol map, not rebuild it from {}, or every other mapping (VIX/SPX,
+    # world ETFs, yfinance entries) is silently wiped and /api/instruments/*
+    # breaks for all of them.
+    store, broker, sleeper = BarStore(tmp_path), FakeBroker(), FakeSleeper()
+    store.write_symbol_map({"VIX": 13455763, "EZU": -12345})
+    symbol_map = await sync_daily_bars(store, broker, ["SPY"], years=5, sleep=sleeper)
+    assert symbol_map["SPY"] == 756733
+    persisted = store.read_symbol_map()
+    assert persisted["VIX"] == 13455763  # pre-existing index mapping survives
+    assert persisted["EZU"] == -12345  # pre-existing yfinance mapping survives
+    assert persisted["SPY"] == 756733
+
+
 async def test_incremental_sync_fetches_short_duration_and_merges(tmp_path):
     store, broker, sleeper = BarStore(tmp_path), FakeBroker(), FakeSleeper()
     await sync_daily_bars(store, broker, ["SPY"], years=5, sleep=sleeper)
@@ -203,8 +219,9 @@ class FakeYFinanceProvider:
 
 def test_sync_yfinance_bars_writes_bars_and_provider_metadata(tmp_path):
     store, provider = BarStore(tmp_path), FakeYFinanceProvider()
-    symbol_map = sync_yfinance_bars(store, provider, ["EZU", "EWU"], years=1)
+    symbol_map, skipped = sync_yfinance_bars(store, provider, ["EZU", "EWU"], years=1)
     ezu_con_id = yfinance_pseudo_con_id("EZU")
+    assert skipped == []
     assert symbol_map["EZU"] == ezu_con_id
     assert symbol_map["EWU"] == yfinance_pseudo_con_id("EWU")
     bars, meta = store.read_bars(con_id=ezu_con_id, bar_size="1d")
@@ -222,3 +239,35 @@ def test_sync_yfinance_bars_merges_into_existing_symbol_map(tmp_path):
     sync_yfinance_bars(store, provider, ["EZU"])
     assert store.read_symbol_map()["SPY"] == 756733
     assert "EZU" in store.read_symbol_map()
+
+
+def test_sync_yfinance_bars_skips_ibkr_mapped_symbols_and_keeps_provenance(tmp_path):
+    # Fix-loop IMPORTANT 2: an operator putting an IBKR-synced symbol on
+    # QM_YFINANCE_SYMBOLS must NOT silently repoint its symbol_map entry to
+    # the negative pseudo-conId / flip its provider — IBKR provenance wins
+    # (single-provenance law). The symbol is skipped and reported.
+    store, provider = BarStore(tmp_path), FakeYFinanceProvider()
+    store.write_symbol_map({"EEM": 2})  # positive conId = IBKR-sourced
+    store.write_instrument_metadata("EEM", {"con_id": 2, "provider": "ibkr", "long_name": "iShares EM"})
+    symbol_map, skipped = sync_yfinance_bars(store, provider, ["EEM", "EZU"])
+    assert skipped == ["EEM"]
+    assert "EEM" not in provider.calls  # no bars fetched for the skipped symbol
+    assert symbol_map["EEM"] == 2  # mapping untouched
+    assert store.read_symbol_map()["EEM"] == 2
+    meta = store.read_instrument_metadata("EEM")
+    assert meta["provider"] == "ibkr"  # provenance intact
+    assert meta["con_id"] == 2
+    # the non-conflicting symbol still syncs normally
+    assert symbol_map["EZU"] == yfinance_pseudo_con_id("EZU")
+
+
+def test_sync_yfinance_bars_resync_of_own_symbol_is_not_skipped(tmp_path):
+    # A yfinance symbol re-appearing on the allowlist (its own negative
+    # pseudo-conId already in the map) is a refresh, not a conflict.
+    store, provider = BarStore(tmp_path), FakeYFinanceProvider()
+    sync_yfinance_bars(store, provider, ["EZU"])
+    provider.calls.clear()
+    symbol_map, skipped = sync_yfinance_bars(store, provider, ["EZU"])
+    assert skipped == []
+    assert provider.calls == ["EZU"]
+    assert symbol_map["EZU"] == yfinance_pseudo_con_id("EZU")

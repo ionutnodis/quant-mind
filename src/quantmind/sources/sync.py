@@ -30,11 +30,21 @@ async def sync_daily_bars(
     sleep=asyncio.sleep,
     pace_seconds: float = 0.5,
 ) -> dict[str, int]:
-    """Sync adjusted daily bars for `symbols`; returns and persists symbol -> conId."""
+    """Sync adjusted daily bars for `symbols`; returns and persists symbol -> conId.
+
+    Read-modify-writes the symbol map (same discipline as sync_index_bars /
+    sync_yfinance_bars): a partial-universe run (`python -m quantmind.sync_cli
+    SPY`) must never wipe mappings written by other sync passes (indices,
+    world ETFs, yfinance entries). Persists the MERGED map but returns only
+    the symbols synced in THIS call, so callers (sync_cli's watermark print +
+    metadata fetch) don't accidentally treat other providers' symbols as
+    IBKR-synced."""
+    persisted_map = store.read_symbol_map()
     symbol_map: dict[str, int] = {}
     for symbol in symbols:
         con_id = await broker.resolve_stock_con_id(symbol)
         symbol_map[symbol] = con_id
+        persisted_map[symbol] = con_id
 
         watermark = store.watermark(con_id=con_id, bar_size="1d")
         fetch_years = years if watermark is None else 1  # incremental: recent window only
@@ -52,7 +62,7 @@ async def sync_daily_bars(
         )
         await sleep(pace_seconds)
 
-    store.write_symbol_map(symbol_map)
+    store.write_symbol_map(persisted_map)
     return symbol_map
 
 
@@ -72,11 +82,15 @@ async def sync_index_bars(
 
     Merges resolved conIds into the EXISTING symbol map (read-modify-write)
     rather than overwriting it, since this may run in the same sync_cli pass
-    as sync_daily_bars against a different symbol set."""
-    symbol_map = store.read_symbol_map()
+    as sync_daily_bars against a different symbol set. Persists the MERGED
+    map but returns only the indices synced in THIS call (see
+    sync_daily_bars' rationale)."""
+    persisted_map = store.read_symbol_map()
+    symbol_map: dict[str, int] = {}
     for symbol, exchange in indices.items():
         con_id = await broker.resolve_index_con_id(symbol, exchange)
         symbol_map[symbol] = con_id
+        persisted_map[symbol] = con_id
 
         watermark = store.watermark(con_id=con_id, bar_size="1d")
         fetch_years = years if watermark is None else 1
@@ -94,7 +108,7 @@ async def sync_index_bars(
         )
         await sleep(pace_seconds)
 
-    store.write_symbol_map(symbol_map)
+    store.write_symbol_map(persisted_map)
     return symbol_map
 
 
@@ -139,15 +153,30 @@ def sync_yfinance_bars(
     provider,
     symbols: list[str],
     years: int = 5,
-) -> dict[str, int]:
+) -> tuple[dict[str, int], list[str]]:
     """Free-fallback sync (Task A2, Global Constraints: free-first data,
     single-provenance law) — for symbols on the explicit config allowlist
     that IBKR isn't the source for. Bars land in the same per-conId parquet
     layout as IBKR bars via a deterministic pseudo-conId, and the provider is
     recorded in instrument metadata so downstream consumers know the
-    provenance. Merges into the existing symbol map rather than overwriting."""
-    symbol_map = store.read_symbol_map()
+    provenance. Merges into the existing symbol map rather than overwriting.
+
+    Returns (symbol_map for THIS call's symbols, skipped): a symbol already
+    mapped to a POSITIVE conId is IBKR-sourced — silently repointing it to a
+    pseudo-conId and flipping its provider would violate the
+    single-provenance law and leave stale IBKR metadata fields lingering
+    under a yfinance tag. IBKR provenance wins: the symbol is skipped
+    untouched and named in `skipped` so the CLI can warn the operator to fix
+    the allowlist."""
+    persisted_map = store.read_symbol_map()
+    symbol_map: dict[str, int] = {}
+    skipped: list[str] = []
     for symbol in symbols:
+        existing_con_id = persisted_map.get(symbol)
+        if existing_con_id is not None and existing_con_id > 0:
+            skipped.append(symbol)
+            symbol_map[symbol] = existing_con_id  # report the (untouched) IBKR mapping
+            continue
         con_id = yfinance_pseudo_con_id(symbol)
         bars = provider.daily_bars(symbol)
         if years > 0:
@@ -160,5 +189,6 @@ def sync_yfinance_bars(
         )
         store.write_instrument_metadata(symbol, {"con_id": con_id, "provider": provider.name})
         symbol_map[symbol] = con_id
-    store.write_symbol_map(symbol_map)
-    return symbol_map
+        persisted_map[symbol] = con_id
+    store.write_symbol_map(persisted_map)
+    return symbol_map, skipped

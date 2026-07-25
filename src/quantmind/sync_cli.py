@@ -82,9 +82,15 @@ async def main(symbols: list[str]) -> None:
 
     yfinance_symbols = settings.yfinance_symbol_list()
     if yfinance_symbols:
-        yf_map = sync_yfinance_bars(store, YFinanceProvider(), yfinance_symbols, years=5)
+        yf_map, skipped = sync_yfinance_bars(store, YFinanceProvider(), yfinance_symbols, years=5)
+        for symbol in skipped:
+            print(
+                f"WARNING: {symbol} is IBKR-synced (positive conId) — skipped yfinance sync; "
+                f"remove it from QM_YFINANCE_SYMBOLS (single-provenance law: IBKR wins)"
+            )
         for symbol, con_id in yf_map.items():
-            print(f"{symbol:>5} conId={con_id:<12} synced via yfinance")
+            if symbol not in skipped:
+                print(f"{symbol:>5} conId={con_id:<12} synced via yfinance")
 
     from quantmind.sources.fred import sync_fred
 
