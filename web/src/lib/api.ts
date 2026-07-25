@@ -17,12 +17,34 @@ export interface Brief {
 
 const TOKEN = import.meta.env.VITE_QM_TOKEN as string | undefined;
 
-async function get<T>(path: string): Promise<T> {
+// Shared fetch wrapper: attaches the bearer token + JSON content type, and —
+// unlike a bare fetch() — parses a structured `{ detail }` error body (the
+// shape every backend 422 uses) into the thrown Error's message so callers
+// can surface the server's actual reason instead of a bare status code.
+export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(path, {
-    headers: TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {},
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
+      ...(options.headers ?? {}),
+    },
   });
-  if (!res.ok) throw new Error(`${path} → ${res.status}`);
+  if (!res.ok) {
+    let detail = `${path} → ${res.status}`;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body?.detail) detail = body.detail;
+    } catch {
+      // non-JSON error body — fall back to the status line above
+    }
+    throw new Error(detail);
+  }
   return res.json() as Promise<T>;
+}
+
+function get<T>(path: string): Promise<T> {
+  return request<T>(path);
 }
 
 export interface ModelSchema {

@@ -4,12 +4,10 @@
 // amber — beta line and MC histogram are market steel (DESIGN.md).
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { api } from "../lib/api";
+import { api, request } from "../lib/api";
 import { Panel, Skeleton } from "../components/Panel";
 import { RollingBetaChart } from "../components/RollingBetaChart";
 import { FanChart } from "../components/FanChart";
-
-const TOKEN = import.meta.env.VITE_QM_TOKEN as string | undefined;
 
 interface BetaPoint {
   date: string;
@@ -46,31 +44,21 @@ interface MonteCarloResponse {
   es_975: number | null;
 }
 
-async function getRisk(symbol: string, window_: number, years: number): Promise<RiskResponse> {
+function getRisk(symbol: string, window_: number, years: number): Promise<RiskResponse> {
   const qs = new URLSearchParams({ window: String(window_), years: String(years) });
-  const res = await fetch(`/api/risk/${encodeURIComponent(symbol)}?${qs}`, {
-    headers: TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {},
-  });
-  if (!res.ok) throw new Error(`risk ${symbol} → ${res.status}`);
-  return res.json() as Promise<RiskResponse>;
+  return request<RiskResponse>(`/api/risk/${encodeURIComponent(symbol)}?${qs}`);
 }
 
-async function postMontecarlo(body: {
+function postMontecarlo(body: {
   symbol: string;
   horizon: number;
   n_paths: number;
   seed?: number;
 }): Promise<MonteCarloResponse> {
-  const res = await fetch("/api/risk/montecarlo", {
+  return request<MonteCarloResponse>("/api/risk/montecarlo", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
-    },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`montecarlo ${body.symbol} → ${res.status}`);
-  return res.json() as Promise<MonteCarloResponse>;
 }
 
 function pct(x: number | null): string {
@@ -109,7 +97,8 @@ export function Risk() {
   });
 
   if (brief.isLoading) return <Skeleton className="h-64" />;
-  if (brief.error) return <p className="text-down">Risk unavailable: {String(brief.error)}</p>;
+  if (brief.error)
+    return <p className="text-down">Risk unavailable: {String(brief.error.message ?? brief.error)}</p>;
   if (!brief.data || brief.data.tiles.length === 0)
     return (
       <Panel title="Cache empty">
@@ -181,14 +170,18 @@ export function Risk() {
           </div>
 
           {risk.isLoading && <Skeleton className="h-60" />}
-          {risk.error && <p className="text-down text-[12px]">Risk series unavailable: {String(risk.error)}</p>}
+          {risk.error && (
+            <p className="text-down text-[12px]">
+              Risk series unavailable: {String(risk.error.message ?? risk.error)}
+            </p>
+          )}
           {risk.data && <RollingBetaChart points={risk.data.beta_series} benchmark={risk.data.benchmark} />}
         </Panel>
 
         <Panel title="Tail risk & vol" note={risk.data ? `${risk.data.n_obs} obs` : undefined}>
           <div className="grid grid-cols-2 gap-x-4 gap-y-3">
             <div>
-              <div className="text-[10px] tracking-wider uppercase text-muted">ES (97.5%)</div>
+              <div className="text-[10px] tracking-wider uppercase text-muted">ES 97.5% (loss)</div>
               <div className="num text-lg">{risk.data ? pct(risk.data.es_975) : "—"}</div>
             </div>
             <div>
@@ -262,7 +255,11 @@ export function Risk() {
           <p className="text-muted text-[12px]">Run to see the terminal distribution.</p>
         )}
         {mc.isPending && <Skeleton className="h-60" />}
-        {mc.error && <p className="text-down text-[12px]">Monte Carlo failed: {String(mc.error)}</p>}
+        {mc.error && (
+          <p className="text-down text-[12px]">
+            Monte Carlo failed: {String(mc.error.message ?? mc.error)}
+          </p>
+        )}
         {mc.data && (
           <div className="grid grid-cols-[1.6fr_1fr] gap-4">
             <FanChart histogram={mc.data.histogram} p5={mc.data.p5} p50={mc.data.p50} p95={mc.data.p95} />
@@ -280,7 +277,7 @@ export function Risk() {
                 <div className="num text-lg">{pct(mc.data.p95)}</div>
               </div>
               <div>
-                <div className="text-[10px] tracking-wider uppercase text-muted">ES (97.5%)</div>
+                <div className="text-[10px] tracking-wider uppercase text-muted">ES 97.5% (loss)</div>
                 <div className="num text-lg">{pct(mc.data.es_975)}</div>
               </div>
             </div>

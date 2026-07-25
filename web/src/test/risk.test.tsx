@@ -115,6 +115,38 @@ test("Monte Carlo panel awaits a run, then shows histogram and percentiles", asy
   expect(screen.getByText(/9\.50%/)).toBeInTheDocument(); // ES of simulated terminal returns
 });
 
+test("Monte Carlo 422 surfaces the server's detail message near the controls, not a bare status", async () => {
+  server.use(
+    http.get("/api/brief", () => HttpResponse.json(BRIEF)),
+    http.get("/api/risk/:symbol", () => HttpResponse.json(RISK_SPY)),
+    http.post("/api/risk/montecarlo", () =>
+      HttpResponse.json(
+        { detail: "simulation produced no finite terminal returns — check cached bars for zero/degenerate prices" },
+        { status: 422 }
+      )
+    )
+  );
+  renderRisk();
+  await screen.findByTestId("rolling-beta-chart");
+
+  fireEvent.click(screen.getByRole("button", { name: /run monte carlo/i }));
+
+  expect(await screen.findByText(/no finite terminal returns/i)).toBeInTheDocument();
+  expect(screen.queryByText(/→ 422/)).not.toBeInTheDocument();
+});
+
+test("Risk series 422 surfaces the server's detail message near the beta panel", async () => {
+  server.use(
+    http.get("/api/brief", () => HttpResponse.json(BRIEF)),
+    http.get("/api/risk/:symbol", () =>
+      HttpResponse.json({ detail: "symbol 'SPY' has no cached bars" }, { status: 422 })
+    )
+  );
+  renderRisk();
+  expect(await screen.findByText(/no cached bars/i)).toBeInTheDocument();
+  expect(screen.queryByText(/→ 422/)).not.toBeInTheDocument();
+});
+
 test("window/years/horizon/n_paths controls are bounded matching backend limits", async () => {
   server.use(
     http.get("/api/brief", () => HttpResponse.json(BRIEF)),

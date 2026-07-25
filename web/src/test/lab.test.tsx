@@ -67,7 +67,7 @@ const SIMULATE_RESPONSE = {
 };
 
 const APPLY_RESPONSE = {
-  histogram: { edges: [-100, 0, 100], counts: [3, 2] },
+  histogram: { bin_edges: [-100, 0, 100], counts: [3, 2] },
   mean: -450.0,
   p5: -6100.0,
   p50: -300.0,

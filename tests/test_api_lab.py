@@ -62,7 +62,7 @@ def test_apply_rate_level_usd_per_bp_produces_finite_sane_numbers(client):
     assert body["horizon"] == 60
     assert body["n_paths"] == 2000
     hist = body["histogram"]
-    assert len(hist["edges"]) == len(hist["counts"]) + 1
+    assert len(hist["bin_edges"]) == len(hist["counts"]) + 1
     assert sum(hist["counts"]) == 2000
     assert len(hist["counts"]) <= 60
     # ES is the average of the worst tail — never better than the p5 readout.

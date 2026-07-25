@@ -149,3 +149,47 @@ def test_montecarlo_bounds_reject_resource_exhaustion(client):
         json={"symbol": "SPY", "horizon": 100_000, "n_paths": 100, "seed": 1},
     )
     assert r2.status_code == 422
+
+
+def _bars_with_zero_close(n=300, seed=1):
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range(end="2026-07-24", periods=n)
+    close = np.abs(np.cumprod(1 + rng.normal(0, 0.01, n))) * 100
+    # A single degenerate zero close (bad tick / corporate-action artifact in
+    # cached bars) makes pct_change() emit inf, which compounds through the
+    # block bootstrap into non-finite terminal draws.
+    close[150] = 0.0
+    return pd.DataFrame(
+        {"open": close, "high": close, "low": close, "close": close, "volume": 1000.0}, index=idx
+    )
+
+
+@pytest.fixture
+def client_with_zero_close(tmp_path):
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(con_id=1, bar_size="1d", bars=_bars_with_zero_close(seed=1), meta=meta)
+    store.write_symbol_map({"SPY": 1, "ZERO": 1})
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+
+
+def test_montecarlo_zero_close_never_500s_and_reports_n_nonfinite(client_with_zero_close):
+    # Reproduces the finite-guard gap: np.histogram used to raise ValueError
+    # (autodetected range of [nan, nan] is not finite) -> unhandled -> 500.
+    # Match lab's semantics (src/quantmind/api/routers/lab.py): drop
+    # non-finite draws, report how many via n_nonfinite, 422 only if nothing
+    # finite remains.
+    r = client_with_zero_close.post(
+        "/api/risk/montecarlo",
+        json={"symbol": "ZERO", "horizon": 21, "n_paths": 2000, "seed": 7},
+    )
+    assert r.status_code in (200, 422)
+    if r.status_code == 200:
+        body = r.json()
+        assert "n_nonfinite" in body
+        assert body["n_nonfinite"] > 0
+        hist = body["histogram"]
+        assert sum(hist["counts"]) == 2000 - body["n_nonfinite"]
+    else:
+        assert "detail" in r.json()

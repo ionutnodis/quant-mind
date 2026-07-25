@@ -13,33 +13,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Panel, Skeleton } from "../components/Panel";
 import { LabFanChart } from "../components/LabFanChart";
-
-// ---- typed fetch helpers (api.ts is owned by another task; these are local
-// to the Lab page, following its Authorization-header pattern) -------------
-
-const TOKEN = import.meta.env.VITE_QM_TOKEN as string | undefined;
-
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const res = await fetch(path, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
-      ...(options.headers ?? {}),
-    },
-  });
-  if (!res.ok) {
-    let detail = `${path} → ${res.status}`;
-    try {
-      const body = (await res.json()) as { detail?: string };
-      if (body?.detail) detail = body.detail;
-    } catch {
-      // non-JSON error body — fall back to the status line above
-    }
-    throw new Error(detail);
-  }
-  return res.json() as Promise<T>;
-}
+import { request } from "../lib/api";
 
 interface ParamMeta {
   label: string;
@@ -69,7 +43,7 @@ interface SimulateResponse {
 }
 
 interface LabApplyResponse {
-  histogram: { edges: number[]; counts: number[] };
+  histogram: { bin_edges: number[]; counts: number[] };
   mean: number | null;
   p5: number | null;
   p50: number | null;
@@ -428,7 +402,7 @@ export function Lab() {
                   <span className="ml-1">{num(apply.data.mean, 2)}</span>
                 </div>
                 <div className="num text-[12px]">
-                  <span className="text-you/70">ES 97.5%</span>
+                  <span className="text-you/70">ES 97.5% (P&amp;L)</span>
                   <span className="ml-1">{num(apply.data.es, 2)}</span>
                 </div>
                 <div className="num text-[12px]">

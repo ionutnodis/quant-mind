@@ -49,13 +49,16 @@ class LabApplyRequest(BaseModel):
     exposure: ExposureRequest
 
 
-class Histogram(BaseModel):
-    edges: list[float]
+class PnlHistogram(BaseModel):
+    # Named distinctly from risk.py's Histogram (same shape, different field
+    # name until this unification) so FastAPI's OpenAPI schema doesn't mangle
+    # two same-named-but-different models into Histogram/Histogram1.
+    bin_edges: list[float]
     counts: list[int]
 
 
 class LabApplyResponse(BaseModel):
-    histogram: Histogram
+    histogram: PnlHistogram
     mean: float | None
     p5: float | None
     p50: float | None
@@ -126,7 +129,9 @@ def apply_to_book_route(req: LabApplyRequest) -> LabApplyResponse:
     p5, p50, p95 = (float(v) for v in np.percentile(finite_pnl, [5, 50, 95]))
 
     return LabApplyResponse(
-        histogram=Histogram(edges=[float(e) for e in edges], counts=[int(c) for c in counts]),
+        histogram=PnlHistogram(
+            bin_edges=[float(e) for e in edges], counts=[int(c) for c in counts]
+        ),
         mean=_clean(float(np.mean(finite_pnl))),
         p5=_clean(p5),
         p50=_clean(p50),

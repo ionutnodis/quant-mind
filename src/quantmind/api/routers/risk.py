@@ -114,6 +114,11 @@ class MonteCarloResponse(BaseModel):
     p50: float | None
     p95: float | None
     es_975: float | None
+    # Paths dropped because their terminal return overflowed to non-finite
+    # (e.g. a zero/degenerate close in cached bars produces an inf daily
+    # return that compounds through the block bootstrap). Stats/histogram
+    # cover only the finite paths; the response is honest about the rest.
+    n_nonfinite: int
 
 
 @router.get("/risk/{symbol}", response_model=RiskResponse)
@@ -191,12 +196,28 @@ def montecarlo(request: Request, req: MonteCarloRequest):
         seed=req.seed,
     )
 
-    n_bins = min(_MAX_HIST_BINS, max(1, req.n_paths))
-    counts, edges = np.histogram(terminal, bins=n_bins)
-    p5, p50, p95 = (float(x) for x in np.percentile(terminal, [5, 50, 95]))
+    # A degenerate close (e.g. a zero-price bad tick) in cached bars produces
+    # an inf/nan daily return that compounds through the block bootstrap into
+    # non-finite terminal draws. np.histogram raises on a non-finite range —
+    # guard here the same way lab.py's /api/lab/apply does: drop non-finite
+    # paths, report how many, and 422 if nothing finite remains.
+    finite_terminal = terminal[np.isfinite(terminal)]
+    n_nonfinite = int(len(terminal) - len(finite_terminal))
+    if len(finite_terminal) == 0:
+        raise HTTPException(
+            422,
+            detail=(
+                "simulation produced no finite terminal returns — check cached bars for "
+                "zero/degenerate prices"
+            ),
+        )
+
+    n_bins = min(_MAX_HIST_BINS, max(1, len(finite_terminal)))
+    counts, edges = np.histogram(finite_terminal, bins=n_bins)
+    p5, p50, p95 = (float(x) for x in np.percentile(finite_terminal, [5, 50, 95]))
 
     try:
-        es = historical_es(pd.Series(terminal), confidence=0.975)
+        es = historical_es(pd.Series(finite_terminal), confidence=0.975)
     except InsufficientDataError:
         es = None
 
@@ -209,4 +230,5 @@ def montecarlo(request: Request, req: MonteCarloRequest):
         p50=_clean(p50),
         p95=_clean(p95),
         es_975=_clean(es),
+        n_nonfinite=n_nonfinite,
     )

@@ -4,6 +4,7 @@
 // state when the paper book has no positions yet, matching Today's language.
 import { useQuery } from "@tanstack/react-query";
 import { Panel, Skeleton } from "../components/Panel";
+import { request } from "../lib/api";
 
 interface Position {
   con_id: number;
@@ -29,14 +30,8 @@ interface PortfolioResponse {
   totals: Totals;
 }
 
-const TOKEN = import.meta.env.VITE_QM_TOKEN as string | undefined;
-
-async function fetchPortfolio(): Promise<PortfolioResponse> {
-  const res = await fetch("/api/portfolio", {
-    headers: TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {},
-  });
-  if (!res.ok) throw new Error(`/api/portfolio → ${res.status}`);
-  return res.json() as Promise<PortfolioResponse>;
+function fetchPortfolio(): Promise<PortfolioResponse> {
+  return request<PortfolioResponse>("/api/portfolio");
 }
 
 function fmtNum(v: number | null, digits = 2): string {
