@@ -36,7 +36,12 @@ class JobManager:
         with self._lock:
             if idempotency_key and idempotency_key in self._by_key:
                 existing = self._by_key[idempotency_key]
-                if existing in self._jobs:
+                # Join the existing job only while it is NON-terminal (still
+                # queued/running). A finished/cancelled job must not pin its
+                # key until TTL eviction — resubmitting after completion
+                # starts a fresh job and remaps the key below (wave-2 review:
+                # "double-click joins the RUNNING job", not permanent de-dup).
+                if existing in self._jobs and not self._jobs[existing].future.done():
                     return existing
             job_id = uuid.uuid4().hex[:12]
             future = self._pool.submit(fn, *args, **kwargs)

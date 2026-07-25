@@ -61,14 +61,26 @@ function SyncButton() {
   async function handleClick() {
     setSubmitting(true);
     setStatus(null);
+    let submittedJobId: string | null = null;
     try {
       const { job_id } = await postSync();
+      submittedJobId = job_id;
       setJobId(job_id);
       const s = await getSyncStatus(job_id);
       setStatus(s);
       if (s.state === "done") {
         queryClient.invalidateQueries({ queryKey: ["brief"] });
       }
+    } catch (err) {
+      if (submittedJobId === null) {
+        // The POST itself failed — no job exists. Surface the error in the
+        // status slot and clear any stale jobId so polling doesn't resume
+        // against a previous run.
+        setJobId(null);
+        setStatus({ state: "error", error: err instanceof Error ? err.message : String(err) });
+      }
+      // else: submit succeeded but the immediate status check failed —
+      // leave state as-is; the 2s poll loop owns retrying from here.
     } finally {
       setSubmitting(false);
     }

@@ -63,6 +63,24 @@ def test_idempotent_submission_by_key(jm):
     assert a == b  # second submit returns the existing job
 
 
+def test_key_resubmit_after_terminal_job_starts_a_new_job(jm):
+    # Idempotency de-dups only while the mapped job is RUNNING. Once it is
+    # terminal, the same key must submit a FRESH job and remap — otherwise a
+    # finished job pins its key until TTL eviction and every resubmit is a
+    # silent no-op (wave-2 Task 4 review finding).
+    a = jm.submit(_quick, 1, idempotency_key="same")
+    _wait_done(jm, a)
+    b = jm.submit(_quick, 2, idempotency_key="same")
+    assert b != a  # terminal job does not absorb the resubmission
+    s = _wait_done(jm, b)
+    assert s["result"] == 4  # the new fn actually ran
+    # and the key now maps to the new job: once b is terminal too, a third
+    # submit spawns yet another fresh job rather than returning a or b
+    c = jm.submit(_quick, 3, idempotency_key="same")
+    assert c not in (a, b)
+    _wait_done(jm, c)
+
+
 def test_unknown_job_id_raises(jm):
     with pytest.raises(KeyError):
         jm.status("nonexistent")

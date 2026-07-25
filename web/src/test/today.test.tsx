@@ -126,3 +126,19 @@ test("sync now: surfaces an error message and re-enables the button", async () =
   await waitFor(() => expect(button).not.toBeDisabled());
   expect(await screen.findByText(/boom/)).toBeInTheDocument();
 });
+
+test("sync now: failed submit (500) surfaces the error and re-enables the button", async () => {
+  server.use(
+    http.get("/api/brief", () => HttpResponse.json({ ...BRIEF, as_of: "2026-07-01T00:00:00Z" })),
+    http.get("/api/models", () => HttpResponse.json(MODELS)),
+    http.post("/api/sync", () =>
+      HttpResponse.json({ detail: "sync submit exploded" }, { status: 500 })
+    )
+  );
+  renderToday();
+  const button = await screen.findByTestId("sync-now");
+  fireEvent.click(button);
+  // the POST failure must be caught: error text visible, button usable again
+  expect(await screen.findByText(/sync submit exploded/)).toBeInTheDocument();
+  await waitFor(() => expect(button).not.toBeDisabled());
+});

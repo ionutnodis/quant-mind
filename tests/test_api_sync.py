@@ -26,6 +26,11 @@ def _fast_ok() -> str:
     return "synced 3 symbols"
 
 
+def _slow_ok() -> str:
+    time.sleep(0.5)
+    return "synced 3 symbols"
+
+
 def _fast_fail() -> str:
     raise RuntimeError("sync_cli exited 1: boom")
 
@@ -69,12 +74,30 @@ def test_status_reports_error_message_on_failure(client, monkeypatch):
     assert "boom" in body["error"]
 
 
-def test_double_submit_is_idempotent(client, monkeypatch):
-    monkeypatch.setattr(sync_module, "_run_sync_cli", _fast_ok)
+def test_double_submit_while_running_is_idempotent(client, monkeypatch):
+    # _slow_ok (not _fast_ok): the first job must still be running when the
+    # second POST lands, since de-dup now applies only to non-terminal jobs.
+    monkeypatch.setattr(sync_module, "_run_sync_cli", _slow_ok)
     a = client.post("/api/sync").json()["job_id"]
     b = client.post("/api/sync").json()["job_id"]
     assert a == b
     _wait_terminal(client, a)  # drain so the pool shuts down cleanly
+
+
+def test_resubmit_after_completion_runs_a_fresh_sync(client, monkeypatch):
+    # De-dup applies only while a sync is running. Once the first job is done,
+    # "Sync now" must start a NEW job (new id, runner invoked again) — not
+    # silently return the stale done job until TTL eviction (review finding).
+    monkeypatch.setattr(sync_module, "_run_sync_cli", _fast_ok)
+    a = client.post("/api/sync").json()["job_id"]
+    first = _wait_terminal(client, a)
+    assert first["state"] == "done"
+
+    b = client.post("/api/sync").json()["job_id"]
+    assert b != a
+    second = _wait_terminal(client, b)
+    assert second["state"] == "done"
+    assert second["result"] == "synced 3 symbols"  # the runner actually ran again
 
 
 def test_unknown_job_id_is_404(client):
