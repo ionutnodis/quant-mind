@@ -39,3 +39,12 @@
 - **Cons:** Accumulation delays the feature's usefulness; purchase adds a vendor and normalization work (single-provenance rule applies).
 - **Context:** Design doc Open Question 9.
 - **Depends on:** Options chain ingestion working (to know exactly which IV series to backfill).
+
+## In-app sync action (design-review deferred, 2026-07-25)
+- **What:** POST /api/sync endpoint (job-manager backed, subprocess or in-process broker) + a sync button in the Today staleness banner and empty state.
+- **Why:** The UI currently tells the user to run a terminal command — poor workbench utility language (design-review FINDING-005).
+- **Depends on:** JobManager (exists); decide subprocess vs in-process broker connect.
+
+## Responsive layout pass (design-review deferred, 2026-07-25)
+- **What:** Breakpoint behavior for sidebar, tile strip, and panels below ~1024px.
+- **Why:** Desktop-first is deliberate (personal tool, external monitor), but a laptop-width squeeze currently gets no accommodations.

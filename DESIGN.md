@@ -67,3 +67,5 @@
 | 2026-07-25 | Conventional green/red up/down restored | User lives in TradingView; direction-by-glyph experiment dropped |
 | 2026-07-25 | Approved remix: C structure (incl. saved-models console) + B chart discipline + B wordmark/controls + C diagnostic depth | Board feedback round 2 (ratings B5/A4/C4) |
 | 2026-07-25 | Lab = model registry with fit→diagnose→simulate→apply-to-book pipeline as product centerpiece | "Garage for a mechanic" — flexibility + mathematical precision, tied back to the real portfolio |
+| 2026-07-25 | Sanctioned amber uses: wordmark accent + active-nav state ("you are here"); `--color-warning #D9A63F` added for caution banners | /design-review — every other amber is book data |
+| 2026-07-25 | Desktop-first: no mobile breakpoints in v1 (personal tool, external monitor); revisit on demand | /design-review deferred finding |
