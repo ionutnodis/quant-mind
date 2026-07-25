@@ -1,0 +1,2224 @@
+{
+  "components": {
+    "schemas": {
+      "BenchmarkOut": {
+        "properties": {
+          "ann_vol": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ann Vol"
+          },
+          "es_975": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Es 975"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "es_975",
+          "ann_vol"
+        ],
+        "title": "BenchmarkOut",
+        "type": "object"
+      },
+      "BetaPoint": {
+        "properties": {
+          "beta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta"
+          },
+          "date": {
+            "title": "Date",
+            "type": "string"
+          }
+        },
+        "required": [
+          "date",
+          "beta"
+        ],
+        "title": "BetaPoint",
+        "type": "object"
+      },
+      "BookPositionIn": {
+        "properties": {
+          "qty": {
+            "title": "Qty",
+            "type": "number"
+          },
+          "symbol": {
+            "minLength": 1,
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "qty"
+        ],
+        "title": "BookPositionIn",
+        "type": "object"
+      },
+      "BriefResponse": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "benchmark_es": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Benchmark Es"
+          },
+          "correlation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Correlation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tiles": {
+            "items": {
+              "$ref": "#/components/schemas/Tile"
+            },
+            "title": "Tiles",
+            "type": "array"
+          }
+        },
+        "required": [
+          "tiles",
+          "correlation",
+          "benchmark_es",
+          "as_of"
+        ],
+        "title": "BriefResponse",
+        "type": "object"
+      },
+      "Correlation": {
+        "properties": {
+          "matrix": {
+            "items": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "title": "Matrix",
+            "type": "array"
+          },
+          "symbols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Symbols",
+            "type": "array"
+          }
+        },
+        "required": [
+          "symbols",
+          "matrix"
+        ],
+        "title": "Correlation",
+        "type": "object"
+      },
+      "ExposureRequest": {
+        "properties": {
+          "factor_kind": {
+            "title": "Factor Kind",
+            "type": "string"
+          },
+          "units": {
+            "title": "Units",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "number"
+          }
+        },
+        "required": [
+          "factor_kind",
+          "units",
+          "value"
+        ],
+        "title": "ExposureRequest",
+        "type": "object"
+      },
+      "FitRequest": {
+        "properties": {
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          },
+          "years": {
+            "default": 5,
+            "maximum": 25.0,
+            "minimum": 0.0,
+            "title": "Years",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "symbol"
+        ],
+        "title": "FitRequest",
+        "type": "object"
+      },
+      "FitResponse": {
+        "properties": {
+          "cis": {
+            "additionalProperties": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            "title": "Cis",
+            "type": "object"
+          },
+          "diagnostics": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Diagnostics",
+            "type": "object"
+          },
+          "model_name": {
+            "title": "Model Name",
+            "type": "string"
+          },
+          "n_obs": {
+            "title": "N Obs",
+            "type": "integer"
+          },
+          "params": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Params",
+            "type": "object"
+          }
+        },
+        "required": [
+          "model_name",
+          "params",
+          "cis",
+          "diagnostics",
+          "n_obs"
+        ],
+        "title": "FitResponse",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HedgeCandidateOut": {
+        "properties": {
+          "beta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta"
+          },
+          "coint_pvalue": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coint Pvalue"
+          },
+          "corr_stability": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Corr Stability"
+          },
+          "es_after": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Es After"
+          },
+          "es_before": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Es Before"
+          },
+          "hedge_notional": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hedge Notional"
+          },
+          "hedge_qty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hedge Qty"
+          },
+          "protection": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protection"
+          },
+          "residual_beta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Residual Beta"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          },
+          "unusable": {
+            "title": "Unusable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "symbol",
+          "beta",
+          "unusable",
+          "hedge_qty",
+          "hedge_notional",
+          "es_before",
+          "es_after",
+          "protection",
+          "residual_beta",
+          "corr_stability",
+          "coint_pvalue"
+        ],
+        "title": "HedgeCandidateOut",
+        "type": "object"
+      },
+      "HedgeRequest": {
+        "properties": {
+          "book": {
+            "items": {
+              "$ref": "#/components/schemas/BookPositionIn"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Book",
+            "type": "array"
+          },
+          "candidates": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidates"
+          },
+          "objective": {
+            "$ref": "#/components/schemas/Objective"
+          },
+          "years": {
+            "default": 5,
+            "maximum": 25.0,
+            "minimum": 1.0,
+            "title": "Years",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "book",
+          "objective"
+        ],
+        "title": "HedgeRequest",
+        "type": "object"
+      },
+      "HedgeResponse": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "benchmark": {
+            "title": "Benchmark",
+            "type": "string"
+          },
+          "book_beta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book Beta"
+          },
+          "book_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book Value"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/HedgeCandidateOut"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "es_before": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Es Before"
+          },
+          "n_candidates_evaluated": {
+            "title": "N Candidates Evaluated",
+            "type": "integer"
+          },
+          "objective": {
+            "$ref": "#/components/schemas/Objective"
+          }
+        },
+        "required": [
+          "benchmark",
+          "objective",
+          "book_value",
+          "book_beta",
+          "es_before",
+          "n_candidates_evaluated",
+          "candidates",
+          "as_of"
+        ],
+        "title": "HedgeResponse",
+        "type": "object"
+      },
+      "Histogram": {
+        "properties": {
+          "bin_edges": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Bin Edges",
+            "type": "array"
+          },
+          "counts": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bin_edges",
+          "counts"
+        ],
+        "title": "Histogram",
+        "type": "object"
+      },
+      "LabApplyRequest": {
+        "properties": {
+          "exposure": {
+            "$ref": "#/components/schemas/ExposureRequest"
+          },
+          "fit": {
+            "$ref": "#/components/schemas/FitResponse"
+          },
+          "horizon": {
+            "default": 126,
+            "maximum": 2520.0,
+            "minimum": 1.0,
+            "title": "Horizon",
+            "type": "integer"
+          },
+          "model_name": {
+            "title": "Model Name",
+            "type": "string"
+          },
+          "n_paths": {
+            "default": 10000,
+            "maximum": 200000.0,
+            "minimum": 1.0,
+            "title": "N Paths",
+            "type": "integer"
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed"
+          },
+          "x0": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "X0"
+          }
+        },
+        "required": [
+          "model_name",
+          "fit",
+          "exposure"
+        ],
+        "title": "LabApplyRequest",
+        "type": "object"
+      },
+      "LabApplyResponse": {
+        "properties": {
+          "es": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Es"
+          },
+          "histogram": {
+            "$ref": "#/components/schemas/PnlHistogram"
+          },
+          "horizon": {
+            "title": "Horizon",
+            "type": "integer"
+          },
+          "mean": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mean"
+          },
+          "n_nonfinite": {
+            "title": "N Nonfinite",
+            "type": "integer"
+          },
+          "n_paths": {
+            "title": "N Paths",
+            "type": "integer"
+          },
+          "p5": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P5"
+          },
+          "p50": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50"
+          },
+          "p95": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95"
+          }
+        },
+        "required": [
+          "histogram",
+          "mean",
+          "p5",
+          "p50",
+          "p95",
+          "es",
+          "horizon",
+          "n_paths",
+          "n_nonfinite"
+        ],
+        "title": "LabApplyResponse",
+        "type": "object"
+      },
+      "MacroResponse": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "factors": {
+            "items": {
+              "$ref": "#/components/schemas/RotationRow"
+            },
+            "title": "Factors",
+            "type": "array"
+          },
+          "missing": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing",
+            "type": "array"
+          },
+          "net_liquidity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NetLiquidityBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sectors": {
+            "items": {
+              "$ref": "#/components/schemas/RotationRow"
+            },
+            "title": "Sectors",
+            "type": "array"
+          },
+          "yields": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/YieldsBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "yields",
+          "net_liquidity",
+          "sectors",
+          "factors",
+          "as_of",
+          "missing"
+        ],
+        "title": "MacroResponse",
+        "type": "object"
+      },
+      "MonteCarloOut": {
+        "properties": {
+          "histogram": {
+            "$ref": "#/components/schemas/Histogram"
+          },
+          "n_nonfinite": {
+            "title": "N Nonfinite",
+            "type": "integer"
+          },
+          "p5": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P5"
+          },
+          "p50": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50"
+          },
+          "p95": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95"
+          }
+        },
+        "required": [
+          "histogram",
+          "p5",
+          "p50",
+          "p95",
+          "n_nonfinite"
+        ],
+        "title": "MonteCarloOut",
+        "type": "object"
+      },
+      "MonteCarloParams": {
+        "properties": {
+          "horizon": {
+            "default": 126,
+            "maximum": 2520.0,
+            "minimum": 1.0,
+            "title": "Horizon",
+            "type": "integer"
+          },
+          "n_paths": {
+            "default": 10000,
+            "maximum": 200000.0,
+            "minimum": 1.0,
+            "title": "N Paths",
+            "type": "integer"
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed"
+          }
+        },
+        "title": "MonteCarloParams",
+        "type": "object"
+      },
+      "MonteCarloRequest": {
+        "properties": {
+          "horizon": {
+            "default": 252,
+            "maximum": 2520.0,
+            "minimum": 1.0,
+            "title": "Horizon",
+            "type": "integer"
+          },
+          "n_paths": {
+            "default": 10000,
+            "maximum": 200000.0,
+            "minimum": 1.0,
+            "title": "N Paths",
+            "type": "integer"
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol"
+        ],
+        "title": "MonteCarloRequest",
+        "type": "object"
+      },
+      "MonteCarloResponse": {
+        "properties": {
+          "es_975": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Es 975"
+          },
+          "histogram": {
+            "$ref": "#/components/schemas/Histogram"
+          },
+          "horizon": {
+            "title": "Horizon",
+            "type": "integer"
+          },
+          "n_nonfinite": {
+            "title": "N Nonfinite",
+            "type": "integer"
+          },
+          "n_paths": {
+            "title": "N Paths",
+            "type": "integer"
+          },
+          "p5": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P5"
+          },
+          "p50": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50"
+          },
+          "p95": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "horizon",
+          "n_paths",
+          "histogram",
+          "p5",
+          "p50",
+          "p95",
+          "es_975",
+          "n_nonfinite"
+        ],
+        "title": "MonteCarloResponse",
+        "type": "object"
+      },
+      "NetLiquidityBlock": {
+        "properties": {
+          "cadence_note": {
+            "title": "Cadence Note",
+            "type": "string"
+          },
+          "latest_bn": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Bn"
+          },
+          "series": {
+            "items": {
+              "$ref": "#/components/schemas/SeriesPoint"
+            },
+            "title": "Series",
+            "type": "array"
+          }
+        },
+        "required": [
+          "latest_bn",
+          "series",
+          "cadence_note"
+        ],
+        "title": "NetLiquidityBlock",
+        "type": "object"
+      },
+      "Objective": {
+        "properties": {
+          "kind": {
+            "const": "beta_target",
+            "default": "beta_target",
+            "title": "Kind",
+            "type": "string"
+          },
+          "value": {
+            "maximum": 2.0,
+            "minimum": -2.0,
+            "title": "Value",
+            "type": "number"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "Objective",
+        "type": "object"
+      },
+      "PnlHistogram": {
+        "properties": {
+          "bin_edges": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Bin Edges",
+            "type": "array"
+          },
+          "counts": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bin_edges",
+          "counts"
+        ],
+        "title": "PnlHistogram",
+        "type": "object"
+      },
+      "PortfolioResponse": {
+        "properties": {
+          "base_currency": {
+            "title": "Base Currency",
+            "type": "string"
+          },
+          "positions": {
+            "items": {
+              "$ref": "#/components/schemas/PositionOut"
+            },
+            "title": "Positions",
+            "type": "array"
+          },
+          "snapshot_id": {
+            "title": "Snapshot Id",
+            "type": "string"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/Totals"
+          },
+          "valuation_ts": {
+            "title": "Valuation Ts",
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "valuation_ts",
+          "base_currency",
+          "positions",
+          "totals"
+        ],
+        "title": "PortfolioResponse",
+        "type": "object"
+      },
+      "PositionIn": {
+        "properties": {
+          "qty": {
+            "title": "Qty",
+            "type": "number"
+          },
+          "symbol": {
+            "minLength": 1,
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "qty"
+        ],
+        "title": "PositionIn",
+        "type": "object"
+      },
+      "PositionOut": {
+        "properties": {
+          "con_id": {
+            "title": "Con Id",
+            "type": "integer"
+          },
+          "last_close": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Close"
+          },
+          "market_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Market Value"
+          },
+          "multiplier": {
+            "title": "Multiplier",
+            "type": "number"
+          },
+          "qty": {
+            "title": "Qty",
+            "type": "number"
+          },
+          "sec_type": {
+            "title": "Sec Type",
+            "type": "string"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          },
+          "weight": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight"
+          }
+        },
+        "required": [
+          "con_id",
+          "symbol",
+          "qty",
+          "sec_type",
+          "multiplier",
+          "last_close",
+          "market_value",
+          "weight"
+        ],
+        "title": "PositionOut",
+        "type": "object"
+      },
+      "RiskResponse": {
+        "properties": {
+          "alpha_annualized": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha Annualized"
+          },
+          "alpha_note": {
+            "title": "Alpha Note",
+            "type": "string"
+          },
+          "ann_vol": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ann Vol"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "benchmark": {
+            "title": "Benchmark",
+            "type": "string"
+          },
+          "beta_series": {
+            "items": {
+              "$ref": "#/components/schemas/BetaPoint"
+            },
+            "title": "Beta Series",
+            "type": "array"
+          },
+          "es_975": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Es 975"
+          },
+          "n_obs": {
+            "title": "N Obs",
+            "type": "integer"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          },
+          "window": {
+            "title": "Window",
+            "type": "integer"
+          },
+          "years": {
+            "title": "Years",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "symbol",
+          "benchmark",
+          "window",
+          "years",
+          "n_obs",
+          "beta_series",
+          "alpha_annualized",
+          "alpha_note",
+          "es_975",
+          "ann_vol",
+          "as_of"
+        ],
+        "title": "RiskResponse",
+        "type": "object"
+      },
+      "RotationRow": {
+        "properties": {
+          "ret_1d": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ret 1D"
+          },
+          "ret_1m": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ret 1M"
+          },
+          "ret_3m": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ret 3M"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "ret_1d",
+          "ret_1m",
+          "ret_3m"
+        ],
+        "title": "RotationRow",
+        "type": "object"
+      },
+      "SeriesPoint": {
+        "properties": {
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "date",
+          "value"
+        ],
+        "title": "SeriesPoint",
+        "type": "object"
+      },
+      "SimulateRequest": {
+        "properties": {
+          "fit": {
+            "$ref": "#/components/schemas/FitResponse"
+          },
+          "horizon": {
+            "default": 126,
+            "maximum": 2520.0,
+            "minimum": 1.0,
+            "title": "Horizon",
+            "type": "integer"
+          },
+          "n_paths": {
+            "default": 10000,
+            "maximum": 200000.0,
+            "minimum": 1.0,
+            "title": "N Paths",
+            "type": "integer"
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed"
+          },
+          "x0": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "X0"
+          }
+        },
+        "required": [
+          "fit"
+        ],
+        "title": "SimulateRequest",
+        "type": "object"
+      },
+      "SimulateResponse": {
+        "properties": {
+          "bands": {
+            "additionalProperties": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "title": "Bands",
+            "type": "object"
+          },
+          "horizon": {
+            "title": "Horizon",
+            "type": "integer"
+          },
+          "n_paths": {
+            "title": "N Paths",
+            "type": "integer"
+          },
+          "sample_paths": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "title": "Sample Paths",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bands",
+          "sample_paths",
+          "horizon",
+          "n_paths"
+        ],
+        "title": "SimulateResponse",
+        "type": "object"
+      },
+      "SyncStatusResponse": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "SyncStatusResponse",
+        "type": "object"
+      },
+      "SyncSubmitResponse": {
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "title": "SyncSubmitResponse",
+        "type": "object"
+      },
+      "Tile": {
+        "properties": {
+          "change_1d": {
+            "title": "Change 1D",
+            "type": "number"
+          },
+          "last_close": {
+            "title": "Last Close",
+            "type": "number"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "last_close",
+          "change_1d"
+        ],
+        "title": "Tile",
+        "type": "object"
+      },
+      "Totals": {
+        "properties": {
+          "market_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Market Value"
+          },
+          "n_positions": {
+            "title": "N Positions",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "market_value",
+          "n_positions"
+        ],
+        "title": "Totals",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "WeightOut": {
+        "properties": {
+          "market_value": {
+            "title": "Market Value",
+            "type": "number"
+          },
+          "price": {
+            "title": "Price",
+            "type": "number"
+          },
+          "qty": {
+            "title": "Qty",
+            "type": "number"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          },
+          "weight": {
+            "title": "Weight",
+            "type": "number"
+          }
+        },
+        "required": [
+          "symbol",
+          "qty",
+          "price",
+          "market_value",
+          "weight"
+        ],
+        "title": "WeightOut",
+        "type": "object"
+      },
+      "WhatIfRequest": {
+        "properties": {
+          "mc": {
+            "$ref": "#/components/schemas/MonteCarloParams"
+          },
+          "positions": {
+            "items": {
+              "$ref": "#/components/schemas/PositionIn"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Positions",
+            "type": "array"
+          },
+          "years": {
+            "default": 5,
+            "maximum": 25.0,
+            "minimum": 1.0,
+            "title": "Years",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "positions"
+        ],
+        "title": "WhatIfRequest",
+        "type": "object"
+      },
+      "WhatIfResponse": {
+        "properties": {
+          "ann_vol": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ann Vol"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "benchmark": {
+            "$ref": "#/components/schemas/BenchmarkOut"
+          },
+          "beta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta"
+          },
+          "es_975": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Es 975"
+          },
+          "mc": {
+            "$ref": "#/components/schemas/MonteCarloOut"
+          },
+          "n_obs": {
+            "title": "N Obs",
+            "type": "integer"
+          },
+          "weights": {
+            "items": {
+              "$ref": "#/components/schemas/WeightOut"
+            },
+            "title": "Weights",
+            "type": "array"
+          }
+        },
+        "required": [
+          "weights",
+          "beta",
+          "es_975",
+          "ann_vol",
+          "mc",
+          "benchmark",
+          "n_obs",
+          "as_of"
+        ],
+        "title": "WhatIfResponse",
+        "type": "object"
+      },
+      "YieldsBlock": {
+        "properties": {
+          "series": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/components/schemas/SeriesPoint"
+              },
+              "type": "array"
+            },
+            "title": "Series",
+            "type": "object"
+          },
+          "spread_2s10s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spread 2S10S"
+          },
+          "us10y": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Us10Y"
+          },
+          "us2y": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Us2Y"
+          },
+          "us3m": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Us3M"
+          }
+        },
+        "required": [
+          "us10y",
+          "us2y",
+          "us3m",
+          "spread_2s10s",
+          "series"
+        ],
+        "title": "YieldsBlock",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "QuantMind API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/brief": {
+      "get": {
+        "operationId": "brief_api_brief_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BriefResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Brief"
+      }
+    },
+    "/api/health": {
+      "get": {
+        "operationId": "health_api_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    },
+    "/api/hedge": {
+      "post": {
+        "operationId": "hedge_api_hedge_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HedgeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HedgeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Hedge"
+      }
+    },
+    "/api/lab/apply": {
+      "post": {
+        "operationId": "apply_to_book_route_api_lab_apply_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LabApplyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LabApplyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Apply To Book Route"
+      }
+    },
+    "/api/macro": {
+      "get": {
+        "operationId": "macro_api_macro_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MacroResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Macro"
+      }
+    },
+    "/api/models": {
+      "get": {
+        "operationId": "models_api_models_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Models"
+      }
+    },
+    "/api/models/{name}/fit": {
+      "post": {
+        "operationId": "fit_api_models__name__fit_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FitResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Fit"
+      }
+    },
+    "/api/models/{name}/simulate": {
+      "post": {
+        "operationId": "simulate_api_models__name__simulate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimulateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Simulate"
+      }
+    },
+    "/api/portfolio": {
+      "get": {
+        "operationId": "get_portfolio_api_portfolio_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortfolioResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Portfolio"
+      }
+    },
+    "/api/risk/montecarlo": {
+      "post": {
+        "operationId": "montecarlo_api_risk_montecarlo_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MonteCarloRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MonteCarloResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Montecarlo"
+      }
+    },
+    "/api/risk/{symbol}": {
+      "get": {
+        "operationId": "risk_api_risk__symbol__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "symbol",
+            "required": true,
+            "schema": {
+              "title": "Symbol",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "window",
+            "required": false,
+            "schema": {
+              "default": 60,
+              "maximum": 756,
+              "minimum": 5,
+              "title": "Window",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "years",
+            "required": false,
+            "schema": {
+              "default": 5,
+              "maximum": 25,
+              "minimum": 1,
+              "title": "Years",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RiskResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Risk"
+      }
+    },
+    "/api/sync": {
+      "post": {
+        "operationId": "submit_sync_api_sync_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncSubmitResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Submit Sync"
+      }
+    },
+    "/api/sync/{job_id}": {
+      "get": {
+        "operationId": "sync_status_api_sync__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sync Status"
+      }
+    },
+    "/api/whatif": {
+      "post": {
+        "operationId": "whatif_api_whatif_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WhatIfRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhatIfResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Whatif"
+      }
+    }
+  }
+}

@@ -3,10 +3,94 @@
 // impact, analytics row with the saved-models console. Renders from cache;
 // staleness visible, never hidden. The book zone is honest about the empty
 // paper book — structure present, amber reserved for when positions exist.
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../lib/api";
+import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, request } from "../lib/api";
 import { CorrelationHeatmap } from "../components/CorrelationHeatmap";
 import { Panel, Skeleton } from "../components/Panel";
+
+// Local, page-scoped types + calls for the sync job — api.ts is shared and not
+// owned here, so these stay in Today.tsx per the wave-2 ownership rule.
+interface SyncSubmitResponse {
+  job_id: string;
+}
+interface SyncStatusResponse {
+  state: "running" | "done" | "error" | "cancelled";
+  result?: string | null;
+  error?: string | null;
+}
+function postSync(): Promise<SyncSubmitResponse> {
+  return request<SyncSubmitResponse>("/api/sync", { method: "POST" });
+}
+function getSyncStatus(jobId: string): Promise<SyncStatusResponse> {
+  return request<SyncStatusResponse>(`/api/sync/${jobId}`);
+}
+
+const SYNC_POLL_MS = 2000;
+
+// "Sync now" — lives in both the staleness banner and the empty-cache state.
+// Submits the job, checks immediately, then polls every 2s while running;
+// on completion the brief query is invalidated so the page picks up fresh
+// data without a manual reload.
+function SyncButton() {
+  const queryClient = useQueryClient();
+  const [submitting, setSubmitting] = useState(false);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [status, setStatus] = useState<SyncStatusResponse | null>(null);
+
+  const terminal = status?.state === "done" || status?.state === "error" || status?.state === "cancelled";
+  const running = submitting || (jobId !== null && !terminal);
+
+  useEffect(() => {
+    if (!jobId || terminal) return;
+    const id = setInterval(async () => {
+      try {
+        const s = await getSyncStatus(jobId);
+        setStatus(s);
+        if (s.state === "done") {
+          queryClient.invalidateQueries({ queryKey: ["brief"] });
+        }
+      } catch {
+        // transient poll failure — keep trying on the next tick
+      }
+    }, SYNC_POLL_MS);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId, terminal]);
+
+  async function handleClick() {
+    setSubmitting(true);
+    setStatus(null);
+    try {
+      const { job_id } = await postSync();
+      setJobId(job_id);
+      const s = await getSyncStatus(job_id);
+      setStatus(s);
+      if (s.state === "done") {
+        queryClient.invalidateQueries({ queryKey: ["brief"] });
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <span className="inline-flex items-center gap-2 ml-2">
+      <button
+        type="button"
+        data-testid="sync-now"
+        onClick={handleClick}
+        disabled={running}
+        className="num text-[11px] border border-hairline px-2.5 py-1 text-ink hover:border-you disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {running ? "Syncing…" : "Sync now"}
+      </button>
+      {status?.state === "error" && (
+        <span className="text-down text-[11px]">{status.error ?? "sync failed"}</span>
+      )}
+    </span>
+  );
+}
 
 function staleDays(asOf: string | null): number | null {
   if (!asOf) return null;
@@ -52,6 +136,9 @@ export function Today() {
           No market data cached yet. With IB Gateway running, sync the universe:
         </p>
         <code className="num text-ink block mt-2">uv run python -m quantmind.sync_cli</code>
+        <div className="mt-3">
+          <SyncButton />
+        </div>
       </Panel>
     );
 
@@ -62,8 +149,12 @@ export function Today() {
   return (
     <div className="space-y-3 max-w-[1400px]">
       {days !== null && days > 3 && (
-        <p data-testid="staleness" className="text-warning text-[12px] num border border-warning/40 px-3 py-1.5">
+        <p
+          data-testid="staleness"
+          className="text-warning text-[12px] num border border-warning/40 px-3 py-1.5 flex items-center"
+        >
           Data is {days} days old ({asOfNote}) — run the sync.
+          <SyncButton />
         </p>
       )}
 

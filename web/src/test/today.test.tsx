@@ -2,7 +2,7 @@
  * Today page component tests (phase test contract): tiles render from mocked
  * API, staleness flag appears when as-of is old, empty cache shows empty state.
  */
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
@@ -77,4 +77,52 @@ test("empty cache shows empty state, not a crash", async () => {
   );
   renderToday();
   expect(await screen.findByText(/No market data cached/)).toBeInTheDocument();
+  // empty state gets a Sync now button too, not just the CLI hint
+  expect(await screen.findByTestId("sync-now")).toBeInTheDocument();
+});
+
+test("sync now button renders in the staleness banner", async () => {
+  server.use(
+    http.get("/api/brief", () => HttpResponse.json({ ...BRIEF, as_of: "2026-07-01T00:00:00Z" })),
+    http.get("/api/models", () => HttpResponse.json(MODELS))
+  );
+  renderToday();
+  const staleness = await screen.findByTestId("staleness");
+  expect(await screen.findByTestId("sync-now")).toBeInTheDocument();
+  expect(staleness).toBeInTheDocument();
+});
+
+test("sync now: posts a job, disables while running, polls to completion, and invalidates the brief", async () => {
+  let pollCount = 0;
+  server.use(
+    http.get("/api/brief", () => HttpResponse.json({ ...BRIEF, as_of: "2026-07-01T00:00:00Z" })),
+    http.get("/api/models", () => HttpResponse.json(MODELS)),
+    http.post("/api/sync", () => HttpResponse.json({ job_id: "abc123" })),
+    http.get("/api/sync/abc123", () => {
+      pollCount += 1;
+      return HttpResponse.json(
+        pollCount < 2 ? { state: "running" } : { state: "done", result: "synced 3 symbols" }
+      );
+    })
+  );
+  renderToday();
+  const button = await screen.findByTestId("sync-now");
+  fireEvent.click(button);
+  await waitFor(() => expect(button).toBeDisabled());
+  await waitFor(() => expect(button).not.toBeDisabled(), { timeout: 5000 });
+  expect(pollCount).toBeGreaterThanOrEqual(2);
+});
+
+test("sync now: surfaces an error message and re-enables the button", async () => {
+  server.use(
+    http.get("/api/brief", () => HttpResponse.json({ ...BRIEF, as_of: "2026-07-01T00:00:00Z" })),
+    http.get("/api/models", () => HttpResponse.json(MODELS)),
+    http.post("/api/sync", () => HttpResponse.json({ job_id: "err1" })),
+    http.get("/api/sync/err1", () => HttpResponse.json({ state: "error", error: "boom" }))
+  );
+  renderToday();
+  const button = await screen.findByTestId("sync-now");
+  fireEvent.click(button);
+  await waitFor(() => expect(button).not.toBeDisabled());
+  expect(await screen.findByText(/boom/)).toBeInTheDocument();
 });
