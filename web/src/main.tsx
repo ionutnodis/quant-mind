@@ -15,23 +15,14 @@ import { Risk } from "./pages/Risk";
 import { Lab } from "./pages/Lab";
 import { WhatIf } from "./pages/WhatIf";
 import { Macro } from "./pages/Macro";
-
-const Stub = (label: string) =>
-  function StubPage() {
-    return (
-      <div>
-        <h1 className="text-xl font-semibold">{label}</h1>
-        <p className="text-muted mt-2">Coming in a later phase.</p>
-      </div>
-    );
-  };
+import { Hedge } from "./pages/Hedge";
 
 export const rootRoute = createRootRoute({ component: Shell });
 const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: "/", component: Today }),
   createRoute({ getParentRoute: () => rootRoute, path: "/portfolio", component: Portfolio }),
   createRoute({ getParentRoute: () => rootRoute, path: "/risk", component: Risk }),
-  createRoute({ getParentRoute: () => rootRoute, path: "/hedge", component: Stub("Hedge Lab") }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/hedge", component: Hedge }),
   createRoute({ getParentRoute: () => rootRoute, path: "/whatif", component: WhatIf }),
   createRoute({ getParentRoute: () => rootRoute, path: "/macro", component: Macro }),
   createRoute({ getParentRoute: () => rootRoute, path: "/lab", component: Lab }),
