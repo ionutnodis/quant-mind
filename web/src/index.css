@@ -13,6 +13,7 @@
   --color-market: #7fa0b4;
   --color-up: #2fbf71;
   --color-down: #e5484d;
+  --color-warning: #d9a63f; /* caution banners only — visually distinct from book-amber by context */
   --font-sans: "General Sans", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Geist Mono", ui-monospace, monospace;
 }

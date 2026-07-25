@@ -1,6 +1,8 @@
 // App shell: sidebar (approved variant-C chrome) + topbar. Active nav state is
 // the ONLY navigational use of the amber "you" accent (DESIGN.md).
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "../lib/api";
 import { CommandPalette } from "./CommandPalette";
 
 export const PAGES = [
@@ -15,6 +17,7 @@ export const PAGES = [
 
 export function Shell() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const { data } = useQuery({ queryKey: ["brief"], queryFn: api.brief, staleTime: 60 * 60 * 1000 });
   return (
     <div className="flex min-h-screen">
       <aside className="w-48 shrink-0 border-r border-hairline flex flex-col">
@@ -45,7 +48,9 @@ export function Shell() {
       <div className="flex-1 flex flex-col min-w-0">
         <header className="flex items-center justify-between px-5 py-2.5 border-b border-hairline">
           <span className="text-muted text-[11px] num">⌘K — command palette</span>
-          <span className="text-muted text-[11px] num" data-testid="topbar-asof" />
+          <span className="text-muted text-[11px] num" data-testid="topbar-asof">
+            {data?.as_of ? `data as of ${data.as_of.slice(0, 10)}` : ""}
+          </span>
         </header>
         <main className="flex-1 p-5">
           <Outlet />
