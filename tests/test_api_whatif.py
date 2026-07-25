@@ -153,6 +153,32 @@ def test_whatif_insufficient_overlap_is_422(tmp_path):
     assert "detail" in r.json()
 
 
+def test_whatif_nonfinite_last_close_is_422_naming_the_symbol(tmp_path):
+    # Corrupted/partial sync data: a NaN last close makes the leg unpriceable.
+    # Unlike GET /api/portfolio (display of broker truth, where a leg degrades
+    # to null fields), What-If's weights ARE the risk computation — silently
+    # dropping the leg would compute risk for a different book than the one
+    # the user built. So: structured 422 naming the symbol, never a NaN
+    # leaking into the JSON (binding NaN/Inf -> null / never-crash policy).
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)
+    bad_bars = _bars(seed=2)
+    bad_bars.loc[bad_bars.index[-1], "close"] = np.nan
+    store.write_bars(con_id=2, bar_size="1d", bars=bad_bars, meta=meta)
+    store.write_symbol_map({"SPY": 1, "QQQ": 2})
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    c = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+
+    r = c.post("/api/whatif", json=_payload())
+    assert r.status_code == 422
+    assert "QQQ" in r.json()["detail"]
+
+    # A book that avoids the corrupted symbol still computes fine.
+    r2 = c.post("/api/whatif", json=_payload(positions=[{"symbol": "SPY", "qty": 10}]))
+    assert r2.status_code == 200
+
+
 def test_whatif_single_position_defaults_mc(client):
     r = client.post(
         "/api/whatif",

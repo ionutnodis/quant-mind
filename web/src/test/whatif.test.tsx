@@ -132,6 +132,29 @@ test("n_nonfinite warning renders when the Monte Carlo drops paths", async () =>
   expect(await screen.findByText(/7 paths produced non-finite/i)).toBeInTheDocument();
 });
 
+test("null weight fields render as em-dash placeholders, not crashes", async () => {
+  // Backend serialization policy: NaN/Inf -> null. The weights panel must
+  // degrade to "—" (portfolio.test.tsx precedent), never crash.
+  server.use(
+    http.post("/api/whatif", () =>
+      HttpResponse.json({
+        ...WHATIF_RESPONSE,
+        weights: [
+          { symbol: "SPY", qty: 60, price: null, market_value: null, weight: null },
+          ...WHATIF_RESPONSE.weights.slice(1),
+        ],
+      })
+    )
+  );
+  renderWhatIf();
+  fillFirstRow();
+  fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
+  const weights = await screen.findByTestId("whatif-weights");
+  expect(within(weights).getByText("SPY")).toBeInTheDocument();
+  expect(within(weights).getByText("—")).toBeInTheDocument();
+  expect(within(weights).getByText("40.00%")).toBeInTheDocument();
+});
+
 test("422 detail surfaces honestly, not a crash", async () => {
   server.use(
     http.post("/api/whatif", () =>

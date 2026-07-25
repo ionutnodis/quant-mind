@@ -17,9 +17,11 @@ interface PositionRow {
 interface WeightOut {
   symbol: string;
   qty: number;
-  price: number;
-  market_value: number;
-  weight: number;
+  // Nullable per the backend serialization policy (NaN/Inf -> null): render
+  // "—" via pct()/num(), never crash on a null field.
+  price: number | null;
+  market_value: number | null;
+  weight: number | null;
 }
 
 interface MonteCarloOut {
@@ -286,8 +288,8 @@ export function WhatIf() {
                   </div>
                   <div className="h-1.5 bg-elevated">
                     <div
-                      className={`h-1.5 ${w.market_value >= 0 ? "bg-up" : "bg-down"}`}
-                      style={{ width: `${Math.min(100, Math.abs(w.weight) * 100)}%` }}
+                      className={`h-1.5 ${(w.market_value ?? 0) >= 0 ? "bg-up" : "bg-down"}`}
+                      style={{ width: `${Math.min(100, Math.abs(w.weight ?? 0) * 100)}%` }}
                     />
                   </div>
                 </div>

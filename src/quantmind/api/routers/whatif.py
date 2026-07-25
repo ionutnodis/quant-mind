@@ -82,11 +82,19 @@ class Histogram(BaseModel):
 
 
 class WeightOut(BaseModel):
+    # price/market_value/weight are nullable + _clean-wrapped (portfolio.py
+    # precedent) as serialization defense-in-depth: no NaN/Inf may ever reach
+    # the JSON. In practice a book leg with a non-finite last close is
+    # rejected earlier with a named 422 (see the guard in whatif()) — unlike
+    # GET /api/portfolio, a display of broker truth where a leg can degrade
+    # to null fields, What-If's weights ARE the risk computation, and
+    # silently dropping a leg would compute risk for a different book than
+    # the one the user built.
     symbol: str
     qty: float
-    price: float
-    market_value: float
-    weight: float
+    price: float | None
+    market_value: float | None
+    weight: float | None
 
 
 class MonteCarloOut(BaseModel):
@@ -154,7 +162,20 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
             continue
         series_map[sym] = _read_close_series(request, symbol_map[sym], sym, req.years)
 
-    last_close = {sym: float(s.iloc[-1]) for sym, s in series_map.items()}
+    # NaN/Inf last close (corrupted/partial sync data) makes a leg
+    # unpriceable, and every downstream number (weights -> beta/ES/vol/MC)
+    # keys off these prices. Reject with a named 422 rather than letting a
+    # NaN propagate (never-crash / NaN-never-serialized policy).
+    last_close = {sym: _clean(float(s.iloc[-1])) for sym, s in series_map.items()}
+    unpriceable = sorted(sym for sym in unique_needed if last_close[sym] is None)
+    if unpriceable:
+        raise HTTPException(
+            422,
+            detail=(
+                f"non-finite last close in cached bars for: {unpriceable} — "
+                "re-sync before computing"
+            ),
+        )
 
     market_values = [p.qty * last_close[p.symbol] for p in req.positions]
     gross = sum(abs(mv) for mv in market_values)
@@ -241,9 +262,9 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
         WeightOut(
             symbol=p.symbol,
             qty=p.qty,
-            price=last_close[p.symbol],
-            market_value=market_values[i],
-            weight=weight_values[i],
+            price=_clean(last_close[p.symbol]),
+            market_value=_clean(market_values[i]),
+            weight=_clean(weight_values[i]),
         )
         for i, p in enumerate(req.positions)
     ]
