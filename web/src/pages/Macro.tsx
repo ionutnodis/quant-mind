@@ -6,6 +6,7 @@
 // re-implements.
 import { useQuery } from "@tanstack/react-query";
 import { request } from "../lib/api";
+import { InstrumentHover } from "../components/InstrumentHover";
 import { Panel, Skeleton } from "../components/Panel";
 import { SeriesChart, type SeriesPoint } from "../components/SeriesChart";
 
@@ -84,7 +85,11 @@ function RotationTable({ rows, emptyNote }: { rows: RotationRow[]; emptyNote: st
       <tbody>
         {rows.map((row) => (
           <tr key={row.symbol} className="border-b border-hairline last:border-0">
-            <td className="num py-1.5 text-ink">{row.symbol}</td>
+            <td className="num py-1.5 text-ink">
+              <InstrumentHover symbol={row.symbol} change1d={row.ret_1d}>
+                {row.symbol}
+              </InstrumentHover>
+            </td>
             <td className="text-right py-1.5">
               <ReturnCell value={row.ret_1d} />
             </td>

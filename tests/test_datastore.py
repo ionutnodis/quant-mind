@@ -62,3 +62,40 @@ def test_read_missing_instrument_raises_clear_error(tmp_path):
     store = BarStore(tmp_path)
     with pytest.raises(FileNotFoundError, match="con_id 42"):
         store.read_bars(con_id=42, bar_size="1d")
+
+
+# --- instrument metadata (Task A2): contract-details cache, symbol -> dict,
+# merge-write so a later refresh (e.g. new region tag) doesn't clobber fields
+# a previous sync already wrote.
+
+def test_instrument_metadata_missing_symbol_is_none(tmp_path):
+    store = BarStore(tmp_path)
+    assert store.read_instrument_metadata("SPY") is None
+    assert store.read_all_instrument_metadata() == {}
+
+
+def test_instrument_metadata_round_trip(tmp_path):
+    store = BarStore(tmp_path)
+    store.write_instrument_metadata(
+        "SPY", {"con_id": 756733, "long_name": "SPDR S&P 500", "exchange": "ARCA", "provider": "ibkr"}
+    )
+    got = store.read_instrument_metadata("SPY")
+    assert got == {"con_id": 756733, "long_name": "SPDR S&P 500", "exchange": "ARCA", "provider": "ibkr"}
+
+
+def test_instrument_metadata_write_merges_not_overwrites(tmp_path):
+    store = BarStore(tmp_path)
+    store.write_instrument_metadata("EEM", {"con_id": 1, "long_name": "iShares EM ETF"})
+    store.write_instrument_metadata("EEM", {"region": "Emerging Markets"})
+    got = store.read_instrument_metadata("EEM")
+    assert got == {"con_id": 1, "long_name": "iShares EM ETF", "region": "Emerging Markets"}
+
+
+def test_instrument_metadata_does_not_disturb_other_symbols(tmp_path):
+    store = BarStore(tmp_path)
+    store.write_instrument_metadata("SPY", {"con_id": 1})
+    store.write_instrument_metadata("QQQ", {"con_id": 2})
+    all_meta = store.read_all_instrument_metadata()
+    assert set(all_meta) == {"SPY", "QQQ"}
+    assert all_meta["SPY"]["con_id"] == 1
+    assert all_meta["QQQ"]["con_id"] == 2

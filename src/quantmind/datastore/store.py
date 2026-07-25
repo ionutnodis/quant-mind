@@ -115,3 +115,35 @@ class BarStore:
         if not d.exists():
             return []
         return sorted(p.stem for p in d.glob("*.parquet"))
+
+    # --- instrument metadata (Task A2): symbol -> {con_id, long_name,
+    # exchange, currency, sec_type, industry, region, provider}, cached at
+    # sync from IBKR contract details (or recorded provider="yfinance" for
+    # the free-fallback path). One JSON file, merge-write per symbol so a
+    # later refresh (e.g. a new region tag) never clobbers fields a previous
+    # sync already wrote — single-provenance law lives in the `provider` field.
+
+    def _instruments_path(self) -> Path:
+        return self.root / "instruments.json"
+
+    def write_instrument_metadata(self, symbol: str, fields: dict) -> None:
+        import json
+
+        path = self._instruments_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        all_meta = self.read_all_instrument_metadata()
+        all_meta[symbol] = {**all_meta.get(symbol, {}), **fields}
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(all_meta, indent=2))
+        tmp.replace(path)
+
+    def read_instrument_metadata(self, symbol: str) -> dict | None:
+        return self.read_all_instrument_metadata().get(symbol)
+
+    def read_all_instrument_metadata(self) -> dict[str, dict]:
+        import json
+
+        path = self._instruments_path()
+        if not path.exists():
+            return {}
+        return json.loads(path.read_text())

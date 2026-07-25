@@ -71,3 +71,56 @@ class IbBroker(ReadOnlyBroker):
             raise LookupError(f"no historical bars returned for con_id {con_id}")
         df = df.set_index(pd.DatetimeIndex(pd.to_datetime(df["date"])))
         return df[["open", "high", "low", "close", "volume"]].astype(float)
+
+    async def resolve_index_con_id(self, symbol: str, exchange: str = "CBOE") -> int:
+        """Indices (VIX, SPX) aren't SMART-routable — resolve via an Index
+        contract on the primary exchange. Empirically verified working:
+        Index("VIX", "CBOE") (Task A2 design note)."""
+        from ib_async import Index
+
+        contract = Index(symbol, exchange)
+        details = await self._ib.reqContractDetailsAsync(contract)
+        if not details:
+            raise LookupError(f"could not resolve index contract for symbol {symbol!r}")
+        return details[0].contract.conId
+
+    async def get_index_bars(self, con_id: int, exchange: str = "CBOE", years: int = 5) -> pd.DataFrame:
+        """Indices have no ADJUSTED_LAST feed (no splits/dividends to adjust
+        for), so this fetches TRADES bars — the whatToShow that was
+        empirically verified to work for VIX/SPX Index contracts."""
+        from ib_async import Contract, util
+
+        contract = Contract(conId=con_id, exchange=exchange, secType="IND")
+        bars = await self._ib.reqHistoricalDataAsync(
+            contract,
+            endDateTime="",
+            durationStr=f"{years} Y",
+            barSizeSetting="1 day",
+            whatToShow="TRADES",
+            useRTH=True,
+            formatDate=1,
+        )
+        df = util.df(bars)
+        if df is None or df.empty:
+            raise LookupError(f"no historical index bars returned for con_id {con_id}")
+        df = df.set_index(pd.DatetimeIndex(pd.to_datetime(df["date"])))
+        return df[["open", "high", "low", "close", "volume"]].astype(float)
+
+    async def fetch_contract_details(self, con_id: int) -> dict:
+        """Contract-details metadata cache (Task A2): longName/exchange/
+        currency/secType/industry, keyed by conId (resolves by conId alone —
+        works uniformly for stocks, ETFs, and indices)."""
+        from ib_async import Contract
+
+        contract = Contract(conId=con_id)
+        details = await self._ib.reqContractDetailsAsync(contract)
+        if not details:
+            raise LookupError(f"could not fetch contract details for con_id {con_id}")
+        d = details[0]
+        return {
+            "long_name": d.longName or None,
+            "exchange": d.contract.exchange or None,
+            "currency": d.contract.currency or None,
+            "sec_type": d.contract.secType or None,
+            "industry": (d.industry or None) if hasattr(d, "industry") else None,
+        }

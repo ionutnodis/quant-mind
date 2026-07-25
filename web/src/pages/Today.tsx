@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, request } from "../lib/api";
 import { CorrelationHeatmap } from "../components/CorrelationHeatmap";
+import { InstrumentHover } from "../components/InstrumentHover";
 import { Panel, Skeleton } from "../components/Panel";
 
 // Local, page-scoped types + calls for the sync job — api.ts is shared and not
@@ -206,7 +207,11 @@ export function Today() {
         <div className="grid grid-cols-11 gap-px bg-hairline -m-3">
           {ranked.map((t) => (
             <div key={t.symbol} className="bg-surface px-2.5 py-2">
-              <div className="text-[10px] tracking-wider text-muted">{t.symbol}</div>
+              <div className="text-[10px] tracking-wider text-muted">
+                <InstrumentHover symbol={t.symbol} change1d={t.change_1d}>
+                  {t.symbol}
+                </InstrumentHover>
+              </div>
               <div className="num text-[14px]">{t.last_close.toFixed(2)}</div>
               <div className={`num text-[12px] ${t.change_1d >= 0 ? "text-up" : "text-down"}`}>
                 {t.change_1d >= 0 ? "▲" : "▼"} {(Math.abs(t.change_1d) * 100).toFixed(2)}%
