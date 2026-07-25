@@ -19,17 +19,12 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from quantmind.api.app import FitResponse
+from quantmind.api.routers._shared import clean
 from quantmind.exposure.bridge import Exposure, UnsupportedMappingError, apply_to_book
 from quantmind.models.base import FitResult
 from quantmind.models.registry import get_model
 
 router = APIRouter()
-
-
-def _clean(x: float | None) -> float | None:
-    if x is None or not math.isfinite(x):
-        return None
-    return float(x)
 
 
 class ExposureRequest(BaseModel):
@@ -132,11 +127,11 @@ def apply_to_book_route(req: LabApplyRequest) -> LabApplyResponse:
         histogram=PnlHistogram(
             bin_edges=[float(e) for e in edges], counts=[int(c) for c in counts]
         ),
-        mean=_clean(float(np.mean(finite_pnl))),
-        p5=_clean(p5),
-        p50=_clean(p50),
-        p95=_clean(p95),
-        es=_clean(_tail_es(finite_pnl)),
+        mean=clean(float(np.mean(finite_pnl))),
+        p5=clean(p5),
+        p50=clean(p50),
+        p95=clean(p95),
+        es=clean(_tail_es(finite_pnl)),
         horizon=req.horizon,
         n_paths=req.n_paths,
         n_nonfinite=n_nonfinite,

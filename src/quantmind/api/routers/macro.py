@@ -14,11 +14,11 @@ can say exactly what a sync would fix.
 
 from __future__ import annotations
 
-import math
-
 import pandas as pd
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
+
+from quantmind.api.routers._shared import clean, downsample, iso
 
 router = APIRouter()
 
@@ -34,22 +34,6 @@ _YIELD_SERIES = {"us10y": "US10Y", "us2y": "US2Y", "us3m": "US3M"}
 
 _ONE_MONTH = 21  # trading days
 _THREE_MONTH = 63
-
-
-def _clean(x: float | None) -> float | None:
-    if x is None:
-        return None
-    try:
-        xf = float(x)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(xf):
-        return None
-    return xf
-
-
-def _iso(ts: pd.Timestamp) -> str:
-    return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class SeriesPoint(BaseModel):
@@ -87,16 +71,9 @@ class MacroResponse(BaseModel):
     missing: list[str]
 
 
-def _downsample(series: pd.Series, max_points: int) -> pd.Series:
-    if len(series) <= max_points:
-        return series
-    step = math.ceil(len(series) / max_points)
-    return series.iloc[::step]
-
-
 def _series_points(series: pd.Series, max_points: int) -> list[SeriesPoint]:
-    ds = _downsample(series, max_points)
-    return [SeriesPoint(date=_iso(d), value=_clean(v)) for d, v in ds.items()]
+    ds = downsample(series, max_points)
+    return [SeriesPoint(date=iso(d), value=clean(v)) for d, v in ds.items()]
 
 
 def _read_named_series(store, name: str) -> pd.Series | None:
@@ -118,9 +95,9 @@ def _rotation_row(store, symbol_map: dict[str, int], symbol: str) -> tuple[Rotat
     close = bars["close"]
     if len(close) == 0:
         return None, None
-    ret_1d = _clean(close.iloc[-1] / close.iloc[-2] - 1) if len(close) >= 2 else None
-    ret_1m = _clean(close.iloc[-1] / close.iloc[-1 - _ONE_MONTH] - 1) if len(close) > _ONE_MONTH else None
-    ret_3m = _clean(close.iloc[-1] / close.iloc[-1 - _THREE_MONTH] - 1) if len(close) > _THREE_MONTH else None
+    ret_1d = clean(close.iloc[-1] / close.iloc[-2] - 1) if len(close) >= 2 else None
+    ret_1m = clean(close.iloc[-1] / close.iloc[-1 - _ONE_MONTH] - 1) if len(close) > _ONE_MONTH else None
+    ret_3m = clean(close.iloc[-1] / close.iloc[-1 - _THREE_MONTH] - 1) if len(close) > _THREE_MONTH else None
     row = RotationRow(symbol=symbol, ret_1d=ret_1d, ret_1m=ret_1m, ret_3m=ret_3m)
     return row, close.index[-1]
 
@@ -164,10 +141,10 @@ def macro(request: Request) -> MacroResponse:
 
     yields_block: YieldsBlock | None = None
     if len(yield_series) == len(_YIELD_SERIES):
-        us10y = _clean(yield_series["us10y"].iloc[-1])
-        us2y = _clean(yield_series["us2y"].iloc[-1])
-        us3m = _clean(yield_series["us3m"].iloc[-1])
-        spread = _clean(us10y - us2y) if us10y is not None and us2y is not None else None
+        us10y = clean(yield_series["us10y"].iloc[-1])
+        us2y = clean(yield_series["us2y"].iloc[-1])
+        us3m = clean(yield_series["us3m"].iloc[-1])
+        spread = clean(us10y - us2y) if us10y is not None and us2y is not None else None
         yields_block = YieldsBlock(
             us10y=us10y,
             us2y=us2y,
@@ -184,7 +161,7 @@ def macro(request: Request) -> MacroResponse:
         missing.append("NET_LIQUIDITY")
     else:
         net_liquidity_block = NetLiquidityBlock(
-            latest_bn=_clean(nl.iloc[-1]),
+            latest_bn=clean(nl.iloc[-1]),
             series=_series_points(nl, _MAX_SERIES_POINTS),
             cadence_note="weekly",
         )
@@ -198,7 +175,7 @@ def macro(request: Request) -> MacroResponse:
     if factors_latest is not None:
         latest_dates.append(factors_latest)
 
-    as_of = _iso(max(latest_dates)) if latest_dates else None
+    as_of = iso(max(latest_dates)) if latest_dates else None
 
     return MacroResponse(
         yields=yields_block,

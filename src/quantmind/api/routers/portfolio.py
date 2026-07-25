@@ -11,22 +11,16 @@ bars degrades to null price/market_value/weight, it never crashes the route.
 
 from __future__ import annotations
 
-import math
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
+from quantmind.api.routers._shared import clean
 from quantmind.core.snapshot import BookSnapshot
 from quantmind.portfolio import Portfolio
 
 router = APIRouter()
-
-
-def _clean(x: float | None) -> float | None:
-    if x is None or (isinstance(x, float) and not math.isfinite(x)):
-        return None
-    return float(x)
 
 
 class PositionOut(BaseModel):
@@ -60,7 +54,7 @@ def _last_close(store, con_id: int) -> float | None:
         return None
     if bars.empty:
         return None
-    return _clean(float(bars["close"].iloc[-1]))
+    return clean(float(bars["close"].iloc[-1]))
 
 
 @router.get("/portfolio", response_model=PortfolioResponse)
@@ -82,7 +76,7 @@ async def get_portfolio(request: Request) -> PortfolioResponse:
     for p in portfolio.positions:
         last_close = _last_close(store, p.con_id)
         last_closes.append(last_close)
-        mv = _clean(p.qty * p.multiplier * last_close) if last_close is not None else None
+        mv = clean(p.qty * p.multiplier * last_close) if last_close is not None else None
         market_values.append(mv)
 
     known_mvs = [mv for mv in market_values if mv is not None]

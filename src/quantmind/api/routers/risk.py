@@ -11,13 +11,12 @@ insufficient history -> structured 422, never a 500.
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from quantmind.api.routers._shared import clean, downsample, iso
 from quantmind.risk.montecarlo import simulate_terminal_returns
 from quantmind.risk.returns import (
     InsufficientDataError,
@@ -34,22 +33,6 @@ _MAX_BETA_POINTS = 500
 _MAX_HIST_BINS = 60
 
 
-def _clean(x: float | None) -> float | None:
-    if x is None:
-        return None
-    try:
-        xf = float(x)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(xf):
-        return None
-    return xf
-
-
-def _iso(ts: pd.Timestamp) -> str:
-    return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def _price_series(request: Request, symbol: str, years: int) -> pd.Series:
     store = request.app.state.store
     symbol_map = store.read_symbol_map()
@@ -64,13 +47,6 @@ def _price_series(request: Request, symbol: str, years: int) -> pd.Series:
     if years > 0:
         series = series.iloc[-(years * 252):]
     return series
-
-
-def _downsample(points: list["BetaPoint"], max_points: int) -> list["BetaPoint"]:
-    if len(points) <= max_points:
-        return points
-    step = math.ceil(len(points) / max_points)
-    return points[::step]
 
 
 class BetaPoint(BaseModel):
@@ -148,11 +124,11 @@ def risk(
         raise HTTPException(422, detail=str(e))
 
     beta_valid = beta.dropna()
-    points = [BetaPoint(date=_iso(d), beta=_clean(v)) for d, v in beta_valid.items()]
-    points = _downsample(points, _MAX_BETA_POINTS)
+    points = [BetaPoint(date=iso(d), beta=clean(v)) for d, v in beta_valid.items()]
+    points = downsample(points, _MAX_BETA_POINTS)
 
     alpha_valid = alpha.dropna()
-    alpha_last = _clean(alpha_valid.iloc[-1]) if len(alpha_valid) else None
+    alpha_last = clean(alpha_valid.iloc[-1]) if len(alpha_valid) else None
 
     try:
         es = historical_es(asset_returns, confidence=0.975)
@@ -160,7 +136,7 @@ def risk(
         es = None
 
     try:
-        ann_vol = _clean(annualized_vol(asset_returns))
+        ann_vol = clean(annualized_vol(asset_returns))
     except InsufficientDataError:
         ann_vol = None
 
@@ -173,9 +149,9 @@ def risk(
         beta_series=points,
         alpha_annualized=alpha_last,
         alpha_note=f"vs {benchmark}, rf=0 until FRED wiring",
-        es_975=_clean(es),
+        es_975=clean(es),
         ann_vol=ann_vol,
-        as_of=_iso(prices.index[-1]) if len(prices) else None,
+        as_of=iso(prices.index[-1]) if len(prices) else None,
     )
 
 
@@ -226,9 +202,9 @@ def montecarlo(request: Request, req: MonteCarloRequest):
         horizon=req.horizon,
         n_paths=req.n_paths,
         histogram=Histogram(bin_edges=[float(e) for e in edges], counts=[int(c) for c in counts]),
-        p5=_clean(p5),
-        p50=_clean(p50),
-        p95=_clean(p95),
-        es_975=_clean(es),
+        p5=clean(p5),
+        p50=clean(p50),
+        p95=clean(p95),
+        es_975=clean(es),
         n_nonfinite=n_nonfinite,
     )
