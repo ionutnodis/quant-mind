@@ -1554,12 +1554,26 @@
       "WeightOut": {
         "properties": {
           "market_value": {
-            "title": "Market Value",
-            "type": "number"
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Market Value"
           },
           "price": {
-            "title": "Price",
-            "type": "number"
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price"
           },
           "qty": {
             "title": "Qty",
@@ -1570,8 +1584,15 @@
             "type": "string"
           },
           "weight": {
-            "title": "Weight",
-            "type": "number"
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight"
           }
         },
         "required": [

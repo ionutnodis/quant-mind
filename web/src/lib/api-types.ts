@@ -698,15 +698,15 @@ export interface components {
         /** WeightOut */
         WeightOut: {
             /** Market Value */
-            market_value: number;
+            market_value: number | null;
             /** Price */
-            price: number;
+            price: number | null;
             /** Qty */
             qty: number;
             /** Symbol */
             symbol: string;
             /** Weight */
-            weight: number;
+            weight: number | null;
         };
         /** WhatIfRequest */
         WhatIfRequest: {
