@@ -151,6 +151,16 @@ def test_montecarlo_bounds_reject_resource_exhaustion(client):
     assert r2.status_code == 422
 
 
+def test_montecarlo_negative_seed_is_422_not_500(client):
+    # Batch-2 final review item 3 (never-500): np.random.default_rng(-1)
+    # raises ValueError — bounds-check the seed like whatif does.
+    r = client.post(
+        "/api/risk/montecarlo",
+        json={"symbol": "SPY", "horizon": 21, "n_paths": 100, "seed": -1},
+    )
+    assert r.status_code == 422
+
+
 def _bars_with_zero_close(n=300, seed=1):
     rng = np.random.default_rng(seed)
     idx = pd.bdate_range(end="2026-07-24", periods=n)

@@ -54,10 +54,23 @@
 - **BookBuilder option-leg inputs** — strike/expiry/right rows in the shared builder (Batch 2 What-If spec).
 - **Cosmetics** — dead `rng` fixture and aligned-sample comment cleanups flagged in review.
 - **Drift-artifact commit-ordering process note (F9)** — regenerate `openapi.json` + `web/src/lib/api-types.ts` in the SAME commit as the schema change, per-commit not per-batch, so no intermediate commit fails the drift gate.
-- **Radix vs plain-div popovers** — InstrumentHover/Sheet are plain positioned divs today; adopting Radix primitives (DESIGN.md component base) is pending user decision.
+- **Radix vs plain-div popovers** — DECIDED 2026-07-26: lazy adoption (see DESIGN.md Decisions Log); migrate InstrumentHover/Sheet when a wave next touches them.
 - **NewsTicker relevance-filter tuning** — keyword/symbol filter precision beyond the new "showing latest broadtape" fallback.
 
 ## Pre-wave-3 consolidation pass (final-review mandated, 2026-07-25)
 - **What:** Extract shared `api/routers/_shared.py` (`_clean`, `_iso`, `_read_close_series`, the qty-nonzero PositionIn model — currently 7/4/2/2 duplicated copies); shared `BookBuilder` React component (Hedge's string-qty variant as base — WhatIf and Hedge have diverging row-builders); align Hedge's degenerate-input 422s (gross<=0, non-finite closes) with WhatIf's named-422 policy; narrow the Engle-Granger broad except.
 - **Why:** Wave-2's exclusive-file-ownership rules tripled helper duplication (right tradeoff then, wrong to keep); any NaN-policy change now needs 7 edits; a third row-builder copy in wave 3 locks in drift.
 - **Context:** Wave-2 final whole-branch review M1/M2/M5; ledger history in git (docs/plans/2026-07-25-wave2.md).
+
+## Deferred from Batch-2 final review
+- **Regime-sample truncation disclosure field** — regime_rotation buckets silently share whatever aligned sample survives the inner join; a per-block disclosure needs schema design.
+- **Displacement z CI** — the Pair Bench's current_z displacement ships without an interval; statistical design needed (every-estimate-carries-CI Global Constraint cited).
+- **block_day_indices extraction into risk/montecarlo.py** — hedge/bootstrap.py re-implements block-start sampling; proposed signature `block_day_indices(rng, n_days, out_len, n_rows, block_size)`; needs risk/ ownership sign-off.
+- **Benchmark-ES window labeling divergence (whatif vs risk)** — the two routers label/window benchmark ES differently; CRN-defensible but unlabeled today.
+- **Lab /apply `es` sign convention** — opposite sign to `es_975` elsewhere; plus `_tail_es` duplicates risk/returns.historical_es — consolidate when owning risk/.
+- **Seed-convention unification + Lab seed exposure** — Lab simulate/apply don't expose the seed actually used, so Lab sims are currently non-reproducible from the UI.
+- **Negative-ppc rank edge policy** — a candidate with negative protection-per-cost currently sorts among the costed ones; decide whether it should sink below the un-costed tail.
+- **Pins cross-tab last-write-wins** — pinned-scenario localStorage writes from two tabs silently clobber each other.
+- ~~Amber action buttons~~ — DECIDED 2026-07-26 (DESIGN.md Decisions Log): the one book-result button per page is sanctioned amber; decorative `hover:text-you` on scenario load repainted neutral. Open remainder: tail without-hedge column emphasis (with-hedge amber, without-hedge plain — both book P&L; unify or keep the asymmetry).
+- ~~Radix vs plain-div~~ — DECIDED 2026-07-26 (DESIGN.md Decisions Log): lazy adoption — migrate a component to Radix whenever a wave touches it; no big-bang.
+- ~~Lab one-click Apply rate-series gating~~ — DECIDED 2026-07-26 and implemented: Apply (and Use in Apply) gate on the fitted source being US10Y/US2Y/US3M with an honest note.

@@ -64,6 +64,26 @@ def test_downsample_steps_lists_and_series_identically():
     assert list(ser_ds) == lst_ds
 
 
+def test_downsample_retains_the_true_last_element():
+    # Batch-2 final review item 7f (golden): seq[::step] drops the true last
+    # element unless (len-1) % step == 0 — the chart's most recent point (the
+    # as-of anchor) must never be the casualty of downsampling.
+    seq = list(range(11))  # step ceil(11/4)=3 -> [0,3,6,9]: 10 was lost pre-fix
+    out = downsample(seq, 4)
+    assert out[0] == 0
+    assert out[-1] == 10
+    assert len(out) <= 4
+
+    ser = pd.Series(range(11))
+    out_s = downsample(ser, 4)
+    assert out_s.iloc[0] == 0
+    assert out_s.iloc[-1] == 10
+    assert len(out_s) <= 4
+
+    # When the stride already lands on the last element, output is unchanged.
+    assert downsample(list(range(10)), 4) == [0, 3, 6, 9]
+
+
 def test_position_in_rejects_zero_qty():
     with pytest.raises(Exception):
         PositionIn(symbol="SPY", qty=0)

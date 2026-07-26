@@ -9,11 +9,19 @@
 // -> Apply to Book (same fit piped through the exposure bridge -> P&L
 // distribution). Panels before their inputs exist show structured "awaiting"
 // states, never fake data (DESIGN.md empty-state honesty).
+//
+// Wave-3B practitioner row: Book Exposure (regress the book's daily $P&L on
+// Δ US10Y bp with HAC SEs — a BOOK quantity, so its headline is amber — with
+// one-click hand-off of the estimated β into Apply-to-Book's exposure) and
+// the Pair Bench (EG→OU: hedge-pair discovery lives here now, moved out of
+// the Hedge Lab in wave-3A — market data, steel only). Every OU fit also
+// carries the half-life/displacement readout and the random-walk gate.
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Panel, Skeleton } from "../components/Panel";
-import { LabFanChart } from "../components/LabFanChart";
+import { LabFanChart, PairBandsChart } from "../components/LabFanChart";
 import { request } from "../lib/api";
+import { getCurrentBook, readActiveBookRef } from "../lib/book";
 
 interface ParamMeta {
   label: string;
@@ -88,6 +96,76 @@ function applyToBook(body: {
   });
 }
 
+// Page-scoped response types for the wave-3B practitioner endpoints
+// (openapi-typescript regeneration happens after the batch; Global
+// Constraints: page-local types, never edits to lib/api-types.ts).
+interface BookRegressionResponse {
+  factor_series: string;
+  horizon: string; // "daily" — every risk number is horizon-labeled
+  exposure_units: string; // "usd_per_bp"
+  beta_usd_per_bp: number | null;
+  beta_se: number | null;
+  beta_ci: [number, number] | null;
+  alpha_usd: number | null;
+  alpha_se: number | null;
+  r_squared: number | null;
+  n_obs: number;
+  hac_lags: number;
+  book_gross: number | null;
+  as_of: string | null;
+  // Declared approximations (batch-2 final review item 2): e.g. the option
+  // delta-one proxy when the pinned book carries OPT legs. Optional so
+  // pre-regen fixtures stay valid.
+  notes?: string[];
+}
+
+interface PairResponse {
+  y_symbol: string;
+  x_symbol: string;
+  horizon: string;
+  coint_pvalue: number | null;
+  hedge_ratio: number | null;
+  hedge_ratio_se: number | null;
+  is_cointegrated: boolean;
+  dates: string[];
+  spread: (number | null)[];
+  mu: number | null;
+  stationary_sigma: number | null;
+  current_z: number | null;
+  half_life_days: number | null;
+  half_life_ci: [number, number] | null;
+  mean_reversion_established: boolean;
+  fit: FitResponse;
+  n_obs: number;
+  as_of: string | null;
+}
+
+async function runBookRegression(years: number): Promise<BookRegressionResponse> {
+  // The active pinned snapshot (?book_ref=) wins; otherwise pull the live
+  // book via /api/book/current (which auto-pins and returns a snapshot id).
+  let ref = readActiveBookRef();
+  if (!ref) {
+    const snapshot = await getCurrentBook();
+    ref = snapshot.snapshot_id;
+  }
+  return request<BookRegressionResponse>("/api/lab/book-regression", {
+    method: "POST",
+    body: JSON.stringify({ book_ref: ref, factor_series: "US10Y", years }),
+  });
+}
+
+function runPair(body: { y_symbol: string; x_symbol: string; years: number }) {
+  return request<PairResponse>("/api/lab/pair", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// The cached FRED yield series (decimal levels) — the only fit sources whose
+// Δ×1e4 is genuinely basis points, so the only ones Apply accepts (user
+// decision 2026-07-26; the fit endpoint itself accepts any symbol).
+const RATE_SERIES = new Set(["US10Y", "US2Y", "US3M"]);
+
 // Mirrors quantmind.exposure.bridge._CONVERSIONS — the only exposure units
 // each factor kind's units can be dimensionally converted into.
 const UNIT_OPTIONS: Record<string, string[]> = {
@@ -99,13 +177,78 @@ const UNIT_OPTIONS: Record<string, string[]> = {
 const DIAG_LABELS: Record<string, string> = {
   adf_pvalue: "ADF p",
   aic: "AIC",
+  aic_rw: "AIC (RW)",
+  delta_aic: "ΔAIC (RW−OU)",
+  lr_stat: "LR",
   log_likelihood: "Log-lik",
   r_squared: "R²",
 };
 
+// Diagnostics rendered by the dedicated half-life/displacement readout and
+// the RW-gate banner — kept out of the generic diagnostics grid.
+const READOUT_DIAG_KEYS = new Set([
+  "x_last",
+  "half_life_days",
+  "half_life_ci_lo",
+  "half_life_ci_hi",
+  "displacement_sigma",
+  "stationary_sigma",
+  "mean_reversion",
+]);
+
 function num(x: number | null | undefined, digits = 4): string {
   if (x === null || x === undefined || !Number.isFinite(x)) return "—";
   return x.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+// "2.1σ above mean · half-life 34d (95% CI 21–61d)" — the practitioner
+// readout shared by the Model zone (any OU fit) and the Pair Bench (spread).
+function DisplacementReadout({
+  z,
+  halfLife,
+  ci,
+}: {
+  z: number | null | undefined;
+  halfLife: number | null | undefined;
+  ci: [number, number] | null | undefined;
+}) {
+  const zVal = z !== null && z !== undefined && Number.isFinite(z) ? z : null;
+  const hlVal =
+    halfLife !== null && halfLife !== undefined && Number.isFinite(halfLife) ? halfLife : null;
+  if (zVal === null && hlVal === null) return null;
+  return (
+    <div className="num text-[12px] text-ink">
+      {zVal !== null && (
+        <span>
+          {Math.abs(zVal).toFixed(1)}σ {zVal >= 0 ? "above" : "below"} mean
+        </span>
+      )}
+      {zVal !== null && hlVal !== null && <span className="text-muted"> · </span>}
+      {hlVal !== null && (
+        <span>
+          half-life {Math.round(hlVal)}d
+          {ci && (
+            <span className="text-muted">
+              {" "}
+              (95% CI {Math.round(ci[0])}–{Math.round(ci[1])}d)
+            </span>
+          )}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Random-walk gate banner (warning tone — a caution badge, never book-amber).
+function RwGateBanner({ diagnostics }: { diagnostics: Record<string, number> }) {
+  if (diagnostics.mean_reversion !== 0) return null;
+  return (
+    <p className="text-warning text-[11px]">
+      Mean reversion not established — random-walk null not rejected (ΔAIC{" "}
+      {num(diagnostics.delta_aic, 1)}, LR {num(diagnostics.lr_stat, 1)}, ADF p{" "}
+      {num(diagnostics.adf_pvalue, 3)}).
+    </p>
+  );
 }
 
 export function Lab() {
@@ -118,6 +261,17 @@ export function Lab() {
   const [nPaths, setNPaths] = useState(10_000);
   const [exposureUnits, setExposureUnits] = useState("");
   const [exposureValue, setExposureValue] = useState(-610);
+  const [pairY, setPairY] = useState("QQQ");
+  const [pairX, setPairX] = useState("SPY");
+  // The resolved pinned ref, displayed on the Book Exposure panel (batch-2
+  // final review item 5): "uses ?book_ref= if pinned" alone left the user
+  // guessing WHICH book the regression would hit.
+  const [pinnedBookRef] = useState<string | null>(() => readActiveBookRef());
+  // User decision 2026-07-26: Apply assumes a rate-level factor (Δbp shocks),
+  // so it gates on WHAT was fit — an OU fit on SPY closes would feed the
+  // bridge Δprice×1e4 "bp" nonsense. Tracked at fit time, not from the
+  // symbol input (which can change after the fit).
+  const [fittedSymbol, setFittedSymbol] = useState<string | null>(null);
 
   const schema = useMemo(() => {
     if (!models.data || models.data.length === 0) return undefined;
@@ -127,25 +281,59 @@ export function Lab() {
   const allowedUnits = schema ? (UNIT_OPTIONS[schema.factor.units] ?? []) : [];
   const activeUnits = allowedUnits.includes(exposureUnits) ? exposureUnits : allowedUnits[0];
 
-  const fit = useMutation({ mutationFn: () => fitModel(activeName, symbol, years) });
+  const fit = useMutation({
+    mutationFn: () => {
+      const source = symbol;
+      return fitModel(activeName, source, years).then((r) => {
+        setFittedSymbol(source);
+        return r;
+      });
+    },
+  });
   const simulate = useMutation({
     mutationFn: () => {
       if (!fit.data) throw new Error("fit a model first");
       return simulateModel(activeName, { fit: fit.data, horizon, n_paths: nPaths });
     },
   });
+  // `override` is the one-click Book Exposure hand-off: the regression's β
+  // posts immediately (state setters alone would race the mutation read).
   const apply = useMutation({
-    mutationFn: () => {
-      if (!fit.data || !schema || !activeUnits) throw new Error("fit a model first");
+    mutationFn: (override?: { units: string; value: number }) => {
+      const units = override?.units ?? activeUnits;
+      if (!fit.data || !schema || !units) throw new Error("fit a model first");
       return applyToBook({
         model_name: activeName,
         fit: fit.data,
         horizon,
         n_paths: nPaths,
-        exposure: { factor_kind: schema.factor.kind, units: activeUnits, value: exposureValue },
+        exposure: {
+          factor_kind: schema.factor.kind,
+          units,
+          value: override?.value ?? exposureValue,
+        },
       });
     },
   });
+  const bookReg = useMutation({ mutationFn: () => runBookRegression(years) });
+  const pair = useMutation({
+    mutationFn: () => runPair({ y_symbol: pairY, x_symbol: pairX, years }),
+  });
+
+  const bookBeta = bookReg.data?.beta_usd_per_bp ?? null;
+  const isRateFit = fittedSymbol !== null && RATE_SERIES.has(fittedSymbol);
+  const canFeedApply =
+    fit.data !== undefined &&
+    isRateFit &&
+    bookBeta !== null &&
+    (schema ? (UNIT_OPTIONS[schema.factor.units] ?? []).includes("usd_per_bp") : false);
+
+  const feedRegressionIntoApply = () => {
+    if (bookBeta === null) return;
+    setExposureUnits("usd_per_bp");
+    setExposureValue(bookBeta);
+    apply.mutate({ units: "usd_per_bp", value: bookBeta });
+  };
 
   if (models.isLoading)
     return (
@@ -252,14 +440,29 @@ export function Lab() {
                   </div>
                 );
               })}
+              {/* Practitioner readout: displacement + half-life on every fit
+                  (market/model quantities — ink/steel, never amber). */}
+              <DisplacementReadout
+                z={fit.data.diagnostics.displacement_sigma}
+                halfLife={fit.data.diagnostics.half_life_days}
+                ci={
+                  fit.data.diagnostics.half_life_ci_lo !== undefined &&
+                  fit.data.diagnostics.half_life_ci_hi !== undefined
+                    ? [fit.data.diagnostics.half_life_ci_lo, fit.data.diagnostics.half_life_ci_hi]
+                    : null
+                }
+              />
+              <RwGateBanner diagnostics={fit.data.diagnostics} />
               <div className="text-[10px] tracking-wider uppercase text-muted pt-1">Diagnostics</div>
               <div className="grid grid-cols-2 gap-x-2 gap-y-1">
-                {Object.entries(fit.data.diagnostics).map(([key, value]) => (
-                  <div key={key} className="num text-[11px]">
-                    <span className="text-muted">{DIAG_LABELS[key] ?? key}</span>
-                    <span className="ml-1 text-ink">{num(value)}</span>
-                  </div>
-                ))}
+                {Object.entries(fit.data.diagnostics)
+                  .filter(([key]) => !READOUT_DIAG_KEYS.has(key))
+                  .map(([key, value]) => (
+                    <div key={key} className="num text-[11px]">
+                      <span className="text-muted">{DIAG_LABELS[key] ?? key}</span>
+                      <span className="ml-1 text-ink">{num(value)}</span>
+                    </div>
+                  ))}
               </div>
             </div>
           )}
@@ -373,11 +576,19 @@ export function Lab() {
           <button
             type="button"
             className="w-full border border-you/60 bg-you/10 hover:bg-you/20 text-you text-[12px] py-1.5 disabled:opacity-40 disabled:text-muted disabled:border-hairline disabled:bg-transparent"
-            disabled={!fit.data || !activeUnits || apply.isPending}
-            onClick={() => apply.mutate()}
+            disabled={!fit.data || !activeUnits || apply.isPending || !isRateFit}
+            onClick={() => apply.mutate(undefined)}
           >
             {apply.isPending ? "Applying…" : "Apply"}
           </button>
+
+          {fit.data && !isRateFit && (
+            <p data-testid="apply-rate-gate" className="text-muted text-[11px]">
+              Apply assumes a rate-level model (shocks in Δbp) — this fit is on {fittedSymbol},
+              not a rate series (US10Y · US2Y · US3M). Fit on a rate series to apply it to the
+              book.
+            </p>
+          )}
 
           {apply.isError && (
             <p className="text-down text-[11px]">{String(apply.error.message ?? apply.error)}</p>
@@ -442,6 +653,213 @@ export function Lab() {
                   the diagnostics.
                 </p>
               )}
+            </div>
+          )}
+        </div>
+      </Panel>
+
+      {/* ROW 2 — practitioner bench (wave-3B): Book Exposure | Pair Bench */}
+      <Panel
+        title="Book Exposure"
+        note={
+          bookReg.data
+            ? `daily · as of ${bookReg.data.as_of?.slice(0, 10) ?? "—"}`
+            : "your book · Δ US10Y"
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-muted text-[11px]">
+            Regresses your book&apos;s daily $P&amp;L on the daily bp change of US10Y
+            (Newey-West HAC SEs). Uses ?book_ref= if pinned
+            {pinnedBookRef ? (
+              <>
+                {" "}
+                (pinned: <span className="num text-you">{pinnedBookRef}</span>)
+              </>
+            ) : (
+              ""
+            )}
+            , otherwise the live book.
+          </p>
+          <button
+            type="button"
+            className="w-full border border-hairline bg-elevated hover:bg-hairline text-[12px] py-1.5 disabled:opacity-40"
+            disabled={bookReg.isPending}
+            onClick={() => bookReg.mutate()}
+          >
+            {bookReg.isPending ? "Regressing…" : "Regress book vs Δ US10Y"}
+          </button>
+
+          {bookReg.isError && (
+            <p className="text-down text-[11px]">
+              {String(bookReg.error.message ?? bookReg.error)}
+            </p>
+          )}
+          {!bookReg.data && !bookReg.isPending && (
+            <p className="text-muted text-[11px] border-t border-hairline pt-2">
+              Awaiting regression — the estimated β lands directly in Apply&apos;s
+              usd_per_bp exposure.
+            </p>
+          )}
+
+          {bookReg.data && (
+            <div
+              data-testid="book-regression-results"
+              className="text-you border-t border-hairline pt-2 space-y-2"
+            >
+              {/* Book sensitivity — THE amber quantity on this panel. */}
+              <div className="num text-[14px]">
+                β {num(bookReg.data.beta_usd_per_bp, 0)} $/bp
+                <span className="text-you/70 text-[12px]"> ± {num(bookReg.data.beta_se, 0)}</span>
+              </div>
+              {bookReg.data.beta_ci && (
+                <div className="num text-[11px] text-you/70">
+                  95% CI ({num(bookReg.data.beta_ci[0], 0)}, {num(bookReg.data.beta_ci[1], 0)})
+                  · {bookReg.data.horizon} horizon
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-x-2 gap-y-1 num text-[11px]">
+                <div>
+                  <span className="text-you/70">α $/day</span>
+                  <span className="ml-1">{num(bookReg.data.alpha_usd, 1)}</span>
+                </div>
+                <div>
+                  <span className="text-you/70">R²</span>
+                  <span className="ml-1">{num(bookReg.data.r_squared, 3)}</span>
+                </div>
+                <div>
+                  <span className="text-you/70">obs (daily)</span>
+                  <span className="ml-1">{bookReg.data.n_obs}</span>
+                </div>
+                <div>
+                  <span className="text-you/70">HAC lags</span>
+                  <span className="ml-1">{bookReg.data.hac_lags}</span>
+                </div>
+              </div>
+              {(bookReg.data.notes ?? []).map((n, i) => (
+                <p key={i} className="text-warning text-[10px]">{n}</p>
+              ))}
+              <button
+                type="button"
+                className="w-full border border-you/60 bg-you/10 hover:bg-you/20 text-you text-[12px] py-1.5 disabled:opacity-40 disabled:text-muted disabled:border-hairline disabled:bg-transparent"
+                disabled={!canFeedApply || apply.isPending}
+                onClick={feedRegressionIntoApply}
+              >
+                Use in Apply → β as usd_per_bp exposure
+              </button>
+              {!fit.data && (
+                <p className="text-muted text-[10px]">
+                  Fit a model first — the β feeds that fit&apos;s Apply-to-Book run.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      </Panel>
+
+      <Panel
+        className="col-span-2"
+        title="Pair Bench"
+        note={
+          pair.data
+            ? `daily · as of ${pair.data.as_of?.slice(0, 10) ?? "—"}`
+            : "EG → OU · steel"
+        }
+      >
+        <div className="space-y-3">
+          <div className="grid grid-cols-4 gap-2">
+            <div>
+              <label
+                htmlFor="lab-pair-y"
+                className="text-[10px] tracking-wider uppercase text-muted block mb-1"
+              >
+                Pair Y
+              </label>
+              <input
+                id="lab-pair-y"
+                className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
+                value={pairY}
+                onChange={(e) => setPairY(e.target.value.toUpperCase())}
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="lab-pair-x"
+                className="text-[10px] tracking-wider uppercase text-muted block mb-1"
+              >
+                Pair X
+              </label>
+              <input
+                id="lab-pair-x"
+                className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
+                value={pairX}
+                onChange={(e) => setPairX(e.target.value.toUpperCase())}
+              />
+            </div>
+            <div className="col-span-2 flex items-end">
+              <button
+                type="button"
+                className="w-full border border-hairline bg-elevated hover:bg-hairline text-[12px] py-1.5 disabled:opacity-40"
+                disabled={pair.isPending}
+                onClick={() => pair.mutate()}
+              >
+                {pair.isPending ? "Running…" : "Run pair"}
+              </button>
+            </div>
+          </div>
+
+          {pair.isError && (
+            <p className="text-down text-[11px]">{String(pair.error.message ?? pair.error)}</p>
+          )}
+          {!pair.data && !pair.isPending && (
+            <p className="text-muted text-[11px] border-t border-hairline pt-2">
+              Awaiting pair — Engle-Granger on the pair, OU on the spread, z-score bands.
+              Hedge-pair discovery lives here now.
+            </p>
+          )}
+
+          {pair.data && (
+            <div className="border-t border-hairline pt-2 space-y-2">
+              <div className="num text-[12px] text-ink">
+                EG p = {num(pair.data.coint_pvalue, 4)}{" "}
+                {pair.data.is_cointegrated ? (
+                  <span className="text-muted">· cointegrated (5%)</span>
+                ) : (
+                  <span className="text-warning">· not cointegrated (5%)</span>
+                )}
+              </div>
+              <div className="num text-[12px] text-ink">
+                hedge ratio β = {num(pair.data.hedge_ratio)}
+                <span className="text-muted">
+                  {" "}
+                  ± {num(pair.data.hedge_ratio_se)} · spread = {pair.data.y_symbol} − β·
+                  {pair.data.x_symbol}
+                </span>
+              </div>
+              <DisplacementReadout
+                z={pair.data.current_z}
+                halfLife={pair.data.half_life_days}
+                ci={pair.data.half_life_ci}
+              />
+              {!pair.data.mean_reversion_established && (
+                <p className="text-warning text-[11px]">
+                  Mean reversion not established on this spread — random-walk null not
+                  rejected (ΔAIC {num(pair.data.fit.diagnostics.delta_aic, 1)}, LR{" "}
+                  {num(pair.data.fit.diagnostics.lr_stat, 1)}, ADF p{" "}
+                  {num(pair.data.fit.diagnostics.adf_pvalue, 3)}).
+                </p>
+              )}
+              <PairBandsChart
+                dates={pair.data.dates}
+                values={pair.data.spread}
+                mu={pair.data.mu}
+                sigma={pair.data.stationary_sigma}
+              />
+              <p className="text-muted text-[10px]">
+                {pair.data.n_obs} daily obs · OU fit on the spread: θ{" "}
+                {num(pair.data.fit.params.theta, 3)}, μ {num(pair.data.fit.params.mu, 3)}, σ{" "}
+                {num(pair.data.fit.params.sigma, 3)}
+              </p>
             </div>
           )}
         </div>

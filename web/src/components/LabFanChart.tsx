@@ -86,3 +86,90 @@ export function LabFanChart({ bands, samplePaths = [] }: LabFanChartProps) {
     />
   );
 }
+
+// Pair-pipeline z-score bands chart (wave-3B): the EG spread in steel with
+// ±1σ/±2σ stationary bands around the OU long-run mean and the current
+// (last) observation marked. Market data — steel/muted only, never amber.
+export interface PairBandsChartProps {
+  dates: string[];
+  values: (number | null)[];
+  mu: number | null;
+  sigma: number | null;
+}
+
+export function PairBandsChart({ dates, values, mu, sigma }: PairBandsChartProps) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!ref.current) return;
+    const traces: Partial<Data>[] = [];
+
+    if (mu !== null && sigma !== null && dates.length > 1) {
+      const edge = [dates[0], dates[dates.length - 1]];
+      // ±2σ then ±1σ fills (outer fainter), mean dashed.
+      for (const [k, opacity] of [
+        [2, 0.08],
+        [1, 0.16],
+      ] as [number, number][]) {
+        traces.push({
+          type: "scatter",
+          mode: "lines",
+          x: [...edge, ...edge.slice().reverse()],
+          y: [mu + k * sigma, mu + k * sigma, mu - k * sigma, mu - k * sigma],
+          fill: "toself",
+          fillcolor: tokens.market,
+          opacity,
+          line: { width: 0 },
+          hoverinfo: "skip",
+        });
+      }
+      traces.push({
+        type: "scatter",
+        mode: "lines",
+        x: edge,
+        y: [mu, mu],
+        line: { color: tokens.muted, width: 1, dash: "dash" },
+        hoverinfo: "skip",
+      });
+    }
+
+    traces.push({
+      type: "scatter",
+      mode: "lines",
+      x: dates,
+      y: values,
+      line: { color: tokens.market, width: 1.5 },
+      hoverinfo: "skip",
+    });
+
+    const last = values[values.length - 1];
+    if (last !== null && last !== undefined) {
+      traces.push({
+        type: "scatter",
+        mode: "markers",
+        x: [dates[dates.length - 1]],
+        y: [last],
+        marker: { color: tokens.ink, size: 7 },
+        hoverinfo: "skip",
+      });
+    }
+
+    Plotly.newPlot(
+      ref.current,
+      traces,
+      { ...baseLayout(), height: 260 },
+      { displayModeBar: false, responsive: true }
+    );
+    const node = ref.current;
+    return () => Plotly.purge(node);
+  }, [dates, values, mu, sigma]);
+
+  return (
+    <div
+      ref={ref}
+      data-testid="pair-bands-chart"
+      role="img"
+      aria-label="Pair spread with stationary ±1σ and ±2σ bands around the OU long-run mean, current observation marked"
+    />
+  );
+}

@@ -32,7 +32,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from quantmind.api.routers._shared import PositionIn
+from quantmind.api.routers._shared import PositionIn, _validate_option_legs
 from quantmind.core.snapshot import BookSnapshot
 from quantmind.portfolio import Portfolio, Position
 
@@ -164,7 +164,13 @@ def read_book_positions(store, snapshot_id: str) -> list[PositionIn]:
     docstring) — there is no way to price it correctly, and silently
     treating it as a bare underlier position would be exactly the silent
     wrong-numbers bug this fix wave exists to close. Refuse it honestly
-    instead."""
+    instead.
+
+    Batch-2 final review item 1: ANY persisted leg with a partially-set
+    strike/expiry/right descriptor is refused regardless of sec_type —
+    pin_book now enforces all-or-none at pin time, but snapshots written
+    BEFORE that guard (e.g. sec_type STK with strike 450 and no right) still
+    exist on disk and would otherwise silently misprice downstream."""
     payload = read_book(store, snapshot_id)
     positions: list[PositionIn] = []
     for p in payload["positions"]:
@@ -173,6 +179,18 @@ def read_book_positions(store, snapshot_id: str) -> list[PositionIn]:
                 422,
                 detail=(
                     f"snapshot's option legs lack strike/expiry ({p['symbol']!r}) — "
+                    "re-pin with explicit legs"
+                ),
+            )
+        descriptor = {"strike": p.get("strike"), "expiry": p.get("expiry"), "right": p.get("right")}
+        given = [k for k, v in descriptor.items() if v is not None]
+        if given and len(given) < len(descriptor):
+            missing = [k for k, v in descriptor.items() if v is None]
+            raise HTTPException(
+                422,
+                detail=(
+                    f"snapshot leg {p['symbol']!r} has a partial option descriptor "
+                    f"(has {'/'.join(given)}, missing {'/'.join(missing)}) — "
                     "re-pin with explicit legs"
                 ),
             )
@@ -254,6 +272,12 @@ async def pin_book(request: Request, req: BookPinRequest) -> BookSnapshotOut:
     valuation_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     if req.positions is not None:
+        # Pin-time all-or-none (Batch-2 final review item 1): a partial
+        # strike/expiry/right descriptor must never PERSIST — refusing here
+        # closes the hole for every downstream book_ref consumer at once
+        # (whatif/hedge/lab/macro/portfolio/options), instead of each one
+        # re-validating at consumption time.
+        _validate_option_legs(req.positions, "pinned book")
         portfolio = _portfolio_from_positions(store, req.positions, valuation_ts)
         return _pin_and_respond(store, portfolio, valuation_ts, legs=req.positions)
 

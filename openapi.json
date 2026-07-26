@@ -259,6 +259,109 @@
         "title": "AttributionRow",
         "type": "object"
       },
+      "BaseRiskOut": {
+        "description": "The CURRENT (pinned) book's risk, computed on the SAME aligned panel\nand CRN seed as the hypothetical \u2014 the amber side of the comparison.",
+        "properties": {
+          "ann_vol": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ann Vol"
+          },
+          "beta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta"
+          },
+          "book_ref": {
+            "title": "Book Ref",
+            "type": "string"
+          },
+          "es_975": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Es 975"
+          },
+          "n_positions": {
+            "title": "N Positions",
+            "type": "integer"
+          },
+          "p5": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P5"
+          },
+          "p50": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50"
+          },
+          "p95": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95"
+          },
+          "valuation_ts": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valuation Ts"
+          }
+        },
+        "required": [
+          "book_ref",
+          "valuation_ts",
+          "n_positions",
+          "beta",
+          "es_975",
+          "ann_vol",
+          "p5",
+          "p50",
+          "p95"
+        ],
+        "title": "BaseRiskOut",
+        "type": "object"
+      },
       "BenchmarkOut": {
         "properties": {
           "ann_vol": {
@@ -555,6 +658,201 @@
         "title": "BookPositionOut",
         "type": "object"
       },
+      "BookRegressionRequest": {
+        "properties": {
+          "book": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PositionIn"
+                },
+                "maxItems": 50,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book"
+          },
+          "book_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book Ref"
+          },
+          "factor_series": {
+            "default": "US10Y",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Factor Series",
+            "type": "string"
+          },
+          "years": {
+            "default": 5,
+            "maximum": 25.0,
+            "minimum": 1.0,
+            "title": "Years",
+            "type": "integer"
+          }
+        },
+        "title": "BookRegressionRequest",
+        "type": "object"
+      },
+      "BookRegressionResponse": {
+        "properties": {
+          "alpha_se": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha Se"
+          },
+          "alpha_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha Usd"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "beta_ci": {
+            "anyOf": [
+              {
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ],
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta Ci"
+          },
+          "beta_se": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta Se"
+          },
+          "beta_usd_per_bp": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta Usd Per Bp"
+          },
+          "book_gross": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book Gross"
+          },
+          "exposure_units": {
+            "const": "usd_per_bp",
+            "default": "usd_per_bp",
+            "title": "Exposure Units",
+            "type": "string"
+          },
+          "factor_series": {
+            "title": "Factor Series",
+            "type": "string"
+          },
+          "hac_lags": {
+            "title": "Hac Lags",
+            "type": "integer"
+          },
+          "horizon": {
+            "const": "daily",
+            "default": "daily",
+            "title": "Horizon",
+            "type": "string"
+          },
+          "n_obs": {
+            "title": "N Obs",
+            "type": "integer"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "r_squared": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "R Squared"
+          }
+        },
+        "required": [
+          "factor_series",
+          "beta_usd_per_bp",
+          "beta_se",
+          "beta_ci",
+          "alpha_usd",
+          "alpha_se",
+          "r_squared",
+          "n_obs",
+          "hac_lags",
+          "book_gross",
+          "as_of"
+        ],
+        "title": "BookRegressionResponse",
+        "type": "object"
+      },
       "BookSnapshotOut": {
         "properties": {
           "base_currency": {
@@ -831,6 +1129,198 @@
           "matrix"
         ],
         "title": "Correlation",
+        "type": "object"
+      },
+      "CurveBlock": {
+        "properties": {
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "spread_2s10s_m1": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spread 2S10S M1"
+          },
+          "spread_2s10s_m3": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spread 2S10S M3"
+          },
+          "spread_2s10s_today": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spread 2S10S Today"
+          },
+          "tenors": {
+            "items": {
+              "$ref": "#/components/schemas/CurveTenor"
+            },
+            "title": "Tenors",
+            "type": "array"
+          }
+        },
+        "required": [
+          "tenors",
+          "spread_2s10s_today",
+          "spread_2s10s_m1",
+          "spread_2s10s_m3",
+          "note"
+        ],
+        "title": "CurveBlock",
+        "type": "object"
+      },
+      "CurveTenor": {
+        "properties": {
+          "m1": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "M1"
+          },
+          "m3": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "M3"
+          },
+          "tenor": {
+            "title": "Tenor",
+            "type": "string"
+          },
+          "today": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Today"
+          },
+          "years": {
+            "title": "Years",
+            "type": "number"
+          }
+        },
+        "required": [
+          "tenor",
+          "years",
+          "today",
+          "m1",
+          "m3"
+        ],
+        "title": "CurveTenor",
+        "type": "object"
+      },
+      "DeltaOut": {
+        "description": "Hypothetical \u2212 current, CRN-paired (identical books \u21d2 exactly 0.0).",
+        "properties": {
+          "ann_vol": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ann Vol"
+          },
+          "beta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta"
+          },
+          "es_975": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Es 975"
+          },
+          "p5": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P5"
+          },
+          "p50": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50"
+          },
+          "p95": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95"
+          }
+        },
+        "required": [
+          "beta",
+          "es_975",
+          "ann_vol",
+          "p5",
+          "p50",
+          "p95"
+        ],
+        "title": "DeltaOut",
         "type": "object"
       },
       "ExpiryBucketsOut": {
@@ -1145,6 +1635,28 @@
             ],
             "title": "Beta"
           },
+          "borrow_proxy_annual": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Borrow Proxy Annual"
+          },
+          "carry_drag_annual": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Carry Drag Annual"
+          },
           "corr_stability": {
             "anyOf": [
               {
@@ -1155,6 +1667,39 @@
               }
             ],
             "title": "Corr Stability"
+          },
+          "cost_annual": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Annual"
+          },
+          "delta_es_ci_high": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delta Es Ci High"
+          },
+          "delta_es_ci_low": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delta Es Ci Low"
           },
           "es_after": {
             "anyOf": [
@@ -1200,6 +1745,17 @@
             ],
             "title": "Hedge Qty"
           },
+          "n_obs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N Obs"
+          },
           "protection": {
             "anyOf": [
               {
@@ -1210,6 +1766,17 @@
               }
             ],
             "title": "Protection"
+          },
+          "protection_per_cost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protection Per Cost"
           },
           "residual_beta": {
             "anyOf": [
@@ -1226,6 +1793,39 @@
             "title": "Symbol",
             "type": "string"
           },
+          "tail_mean_book": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tail Mean Book"
+          },
+          "tail_mean_hedged": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tail Mean Hedged"
+          },
+          "tail_n_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tail N Days"
+          },
           "unusable": {
             "title": "Unusable",
             "type": "boolean"
@@ -1240,8 +1840,18 @@
           "es_before",
           "es_after",
           "protection",
+          "carry_drag_annual",
+          "borrow_proxy_annual",
+          "cost_annual",
+          "protection_per_cost",
+          "delta_es_ci_low",
+          "delta_es_ci_high",
+          "tail_n_days",
+          "tail_mean_book",
+          "tail_mean_hedged",
           "residual_beta",
-          "corr_stability"
+          "corr_stability",
+          "n_obs"
         ],
         "title": "HedgeCandidateOut",
         "type": "object"
@@ -1319,6 +1929,17 @@
             ],
             "title": "As Of"
           },
+          "bench_expected_return_annual": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bench Expected Return Annual"
+          },
           "benchmark": {
             "title": "Benchmark",
             "type": "string"
@@ -1352,6 +1973,14 @@
             "title": "Candidates",
             "type": "array"
           },
+          "ci_note": {
+            "title": "Ci Note",
+            "type": "string"
+          },
+          "cost_note": {
+            "title": "Cost Note",
+            "type": "string"
+          },
           "es_before": {
             "anyOf": [
               {
@@ -1363,12 +1992,67 @@
             ],
             "title": "Es Before"
           },
+          "es_note": {
+            "title": "Es Note",
+            "type": "string"
+          },
           "n_candidates_evaluated": {
             "title": "N Candidates Evaluated",
             "type": "integer"
           },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
           "objective": {
             "$ref": "#/components/schemas/Objective"
+          },
+          "option_chain_as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Option Chain As Of"
+          },
+          "option_hedges": {
+            "items": {
+              "$ref": "#/components/schemas/OptionHedgeOut"
+            },
+            "title": "Option Hedges",
+            "type": "array"
+          },
+          "option_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Option Note"
+          },
+          "option_underlier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Option Underlier"
+          },
+          "tail_note": {
+            "title": "Tail Note",
+            "type": "string"
           }
         },
         "required": [
@@ -1377,8 +2061,17 @@
           "book_value",
           "book_beta",
           "es_before",
+          "bench_expected_return_annual",
           "n_candidates_evaluated",
           "candidates",
+          "option_underlier",
+          "option_chain_as_of",
+          "option_hedges",
+          "option_note",
+          "es_note",
+          "cost_note",
+          "ci_note",
+          "tail_note",
           "as_of"
         ],
         "title": "HedgeResponse",
@@ -1652,6 +2345,8 @@
           "seed": {
             "anyOf": [
               {
+                "maximum": 2147483647.0,
+                "minimum": 0.0,
                 "type": "integer"
               },
               {
@@ -1780,6 +2475,16 @@
             ],
             "title": "As Of"
           },
+          "curve": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CurveBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "factors": {
             "items": {
               "$ref": "#/components/schemas/RotationRow"
@@ -1804,12 +2509,43 @@
               }
             ]
           },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "regime_rotation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RegimeRotationBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "sectors": {
             "items": {
               "$ref": "#/components/schemas/RotationRow"
             },
             "title": "Sectors",
             "type": "array"
+          },
+          "sensitivity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SensitivityBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "yields": {
             "anyOf": [
@@ -1824,9 +2560,12 @@
         },
         "required": [
           "yields",
+          "curve",
           "net_liquidity",
           "sectors",
           "factors",
+          "regime_rotation",
+          "sensitivity",
           "as_of",
           "missing"
         ],
@@ -1837,6 +2576,10 @@
         "properties": {
           "histogram": {
             "$ref": "#/components/schemas/Histogram"
+          },
+          "horizon_days": {
+            "title": "Horizon Days",
+            "type": "integer"
           },
           "n_nonfinite": {
             "title": "N Nonfinite",
@@ -1874,6 +2617,10 @@
               }
             ],
             "title": "P95"
+          },
+          "seed": {
+            "title": "Seed",
+            "type": "integer"
           }
         },
         "required": [
@@ -1881,7 +2628,9 @@
           "p5",
           "p50",
           "p95",
-          "n_nonfinite"
+          "n_nonfinite",
+          "seed",
+          "horizon_days"
         ],
         "title": "MonteCarloOut",
         "type": "object"
@@ -1905,6 +2654,8 @@
           "seed": {
             "anyOf": [
               {
+                "maximum": 2147483647.0,
+                "minimum": 0.0,
                 "type": "integer"
               },
               {
@@ -1936,6 +2687,8 @@
           "seed": {
             "anyOf": [
               {
+                "maximum": 2147483647.0,
+                "minimum": 0.0,
                 "type": "integer"
               },
               {
@@ -2174,6 +2927,255 @@
         "title": "Objective",
         "type": "object"
       },
+      "OptionHedgeOut": {
+        "properties": {
+          "contracts": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contracts"
+          },
+          "cost_annual": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Annual"
+          },
+          "delta_es_ci_high": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delta Es Ci High"
+          },
+          "delta_es_ci_low": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delta Es Ci Low"
+          },
+          "es_after": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Es After"
+          },
+          "es_before": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Es Before"
+          },
+          "expiry": {
+            "title": "Expiry",
+            "type": "string"
+          },
+          "expiry_years": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiry Years"
+          },
+          "kind": {
+            "enum": [
+              "protective_put",
+              "put_spread",
+              "collar"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "legs": {
+            "items": {
+              "$ref": "#/components/schemas/OptionLegOut"
+            },
+            "title": "Legs",
+            "type": "array"
+          },
+          "n_obs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N Obs"
+          },
+          "net_premium_per_contract": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Net Premium Per Contract"
+          },
+          "protection": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protection"
+          },
+          "protection_per_cost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protection Per Cost"
+          },
+          "tail_mean_book": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tail Mean Book"
+          },
+          "tail_mean_hedged": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tail Mean Hedged"
+          },
+          "tail_n_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tail N Days"
+          }
+        },
+        "required": [
+          "kind",
+          "expiry",
+          "expiry_years",
+          "legs",
+          "contracts",
+          "net_premium_per_contract",
+          "cost_annual",
+          "es_before",
+          "es_after",
+          "protection",
+          "protection_per_cost",
+          "delta_es_ci_low",
+          "delta_es_ci_high",
+          "tail_n_days",
+          "tail_mean_book",
+          "tail_mean_hedged",
+          "n_obs"
+        ],
+        "title": "OptionHedgeOut",
+        "type": "object"
+      },
+      "OptionLegOut": {
+        "properties": {
+          "action": {
+            "enum": [
+              "long",
+              "short"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price"
+          },
+          "right": {
+            "enum": [
+              "C",
+              "P"
+            ],
+            "title": "Right",
+            "type": "string"
+          },
+          "strike": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strike"
+          }
+        },
+        "required": [
+          "action",
+          "strike",
+          "right",
+          "price"
+        ],
+        "title": "OptionLegOut",
+        "type": "object"
+      },
       "OptionQuoteOut": {
         "properties": {
           "ask": {
@@ -2342,6 +3344,219 @@
           "score"
         ],
         "title": "OtherSideOut",
+        "type": "object"
+      },
+      "PairRequest": {
+        "properties": {
+          "x_symbol": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "X Symbol",
+            "type": "string"
+          },
+          "y_symbol": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Y Symbol",
+            "type": "string"
+          },
+          "years": {
+            "default": 5,
+            "maximum": 25.0,
+            "minimum": 1.0,
+            "title": "Years",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "y_symbol",
+          "x_symbol"
+        ],
+        "title": "PairRequest",
+        "type": "object"
+      },
+      "PairResponse": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "coint_pvalue": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coint Pvalue"
+          },
+          "current_z": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Z"
+          },
+          "dates": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Dates",
+            "type": "array"
+          },
+          "fit": {
+            "$ref": "#/components/schemas/FitResponse"
+          },
+          "half_life_ci": {
+            "anyOf": [
+              {
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ],
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Half Life Ci"
+          },
+          "half_life_days": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Half Life Days"
+          },
+          "hedge_ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hedge Ratio"
+          },
+          "hedge_ratio_se": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hedge Ratio Se"
+          },
+          "horizon": {
+            "const": "daily",
+            "default": "daily",
+            "title": "Horizon",
+            "type": "string"
+          },
+          "is_cointegrated": {
+            "title": "Is Cointegrated",
+            "type": "boolean"
+          },
+          "mean_reversion_established": {
+            "title": "Mean Reversion Established",
+            "type": "boolean"
+          },
+          "mu": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mu"
+          },
+          "n_obs": {
+            "title": "N Obs",
+            "type": "integer"
+          },
+          "spread": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Spread",
+            "type": "array"
+          },
+          "stationary_sigma": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stationary Sigma"
+          },
+          "x_symbol": {
+            "title": "X Symbol",
+            "type": "string"
+          },
+          "y_symbol": {
+            "title": "Y Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "y_symbol",
+          "x_symbol",
+          "coint_pvalue",
+          "hedge_ratio",
+          "hedge_ratio_se",
+          "is_cointegrated",
+          "dates",
+          "spread",
+          "mu",
+          "stationary_sigma",
+          "current_z",
+          "half_life_days",
+          "half_life_ci",
+          "mean_reversion_established",
+          "fit",
+          "n_obs",
+          "as_of"
+        ],
+        "title": "PairResponse",
         "type": "object"
       },
       "PnlHistogram": {
@@ -2628,6 +3843,137 @@
           "r_squared"
         ],
         "title": "R2Step",
+        "type": "object"
+      },
+      "RegimeBucketOut": {
+        "properties": {
+          "bucket": {
+            "title": "Bucket",
+            "type": "string"
+          },
+          "hi": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hi"
+          },
+          "lo": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lo"
+          },
+          "n_days": {
+            "title": "N Days",
+            "type": "integer"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/RegimeSymbolStat"
+            },
+            "title": "Rows",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bucket",
+          "lo",
+          "hi",
+          "n_days",
+          "rows"
+        ],
+        "title": "RegimeBucketOut",
+        "type": "object"
+      },
+      "RegimeRotationBlock": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/RegimeBucketOut"
+            },
+            "title": "Buckets",
+            "type": "array"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "regime_note": {
+            "title": "Regime Note",
+            "type": "string"
+          }
+        },
+        "required": [
+          "regime_note",
+          "buckets",
+          "as_of"
+        ],
+        "title": "RegimeRotationBlock",
+        "type": "object"
+      },
+      "RegimeSymbolStat": {
+        "properties": {
+          "mean_daily": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mean Daily"
+          },
+          "se_daily": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Se Daily"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "mean_daily",
+          "se_daily"
+        ],
+        "title": "RegimeSymbolStat",
         "type": "object"
       },
       "RegressionResponse": {
@@ -3195,6 +4541,181 @@
         "title": "ScatterPoint",
         "type": "object"
       },
+      "SensitivityBlock": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "book_gross": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book Gross"
+          },
+          "book_ref": {
+            "title": "Book Ref",
+            "type": "string"
+          },
+          "excluded": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Excluded",
+            "type": "array"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/SensitivityRow"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "window_note": {
+            "title": "Window Note",
+            "type": "string"
+          }
+        },
+        "required": [
+          "book_ref",
+          "book_gross",
+          "excluded",
+          "rows",
+          "window_note",
+          "as_of"
+        ],
+        "title": "SensitivityBlock",
+        "type": "object"
+      },
+      "SensitivityRow": {
+        "properties": {
+          "beta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta"
+          },
+          "ci_high": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ci High"
+          },
+          "ci_low": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ci Low"
+          },
+          "dollar_response": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dollar Response"
+          },
+          "driver": {
+            "title": "Driver",
+            "type": "string"
+          },
+          "group": {
+            "title": "Group",
+            "type": "string"
+          },
+          "n_obs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N Obs"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "se": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Se"
+          },
+          "shock_label": {
+            "title": "Shock Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "driver",
+          "group",
+          "shock_label",
+          "dollar_response",
+          "se",
+          "ci_low",
+          "ci_high",
+          "beta",
+          "n_obs"
+        ],
+        "title": "SensitivityRow",
+        "type": "object"
+      },
       "SeriesPoint": {
         "properties": {
           "date": {
@@ -3267,6 +4788,8 @@
           "seed": {
             "anyOf": [
               {
+                "maximum": 2147483647.0,
+                "minimum": 0.0,
                 "type": "integer"
               },
               {
@@ -3520,6 +5043,110 @@
           "job_id"
         ],
         "title": "SyncSubmitResponse",
+        "type": "object"
+      },
+      "TicketLineOut": {
+        "description": "One line of the current\u2192hypothetical trade ticket: the qty change on\na single leg, keyed on (symbol, strike, expiry, right, multiplier).",
+        "properties": {
+          "action": {
+            "enum": [
+              "BUY",
+              "SELL"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "expiry": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiry"
+          },
+          "multiplier": {
+            "title": "Multiplier",
+            "type": "number"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price"
+          },
+          "qty_delta": {
+            "title": "Qty Delta",
+            "type": "number"
+          },
+          "qty_from": {
+            "title": "Qty From",
+            "type": "number"
+          },
+          "qty_to": {
+            "title": "Qty To",
+            "type": "number"
+          },
+          "right": {
+            "anyOf": [
+              {
+                "enum": [
+                  "C",
+                  "P"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Right"
+          },
+          "sec_type": {
+            "enum": [
+              "STK",
+              "OPT"
+            ],
+            "title": "Sec Type",
+            "type": "string"
+          },
+          "strike": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strike"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "sec_type",
+          "strike",
+          "expiry",
+          "right",
+          "multiplier",
+          "qty_from",
+          "qty_to",
+          "qty_delta",
+          "action",
+          "price"
+        ],
+        "title": "TicketLineOut",
         "type": "object"
       },
       "Tile": {
@@ -3806,6 +5433,17 @@
       },
       "WeightOut": {
         "properties": {
+          "expiry": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiry"
+          },
           "market_value": {
             "anyOf": [
               {
@@ -3816,6 +5454,11 @@
               }
             ],
             "title": "Market Value"
+          },
+          "multiplier": {
+            "default": 1.0,
+            "title": "Multiplier",
+            "type": "number"
           },
           "price": {
             "anyOf": [
@@ -3831,6 +5474,41 @@
           "qty": {
             "title": "Qty",
             "type": "number"
+          },
+          "right": {
+            "anyOf": [
+              {
+                "enum": [
+                  "C",
+                  "P"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Right"
+          },
+          "sec_type": {
+            "default": "STK",
+            "enum": [
+              "STK",
+              "OPT"
+            ],
+            "title": "Sec Type",
+            "type": "string"
+          },
+          "strike": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strike"
           },
           "symbol": {
             "title": "Symbol",
@@ -3860,6 +5538,19 @@
       },
       "WhatIfRequest": {
         "properties": {
+          "base_book_ref": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Book Ref"
+          },
           "book_ref": {
             "anyOf": [
               {
@@ -3925,6 +5616,16 @@
             ],
             "title": "As Of"
           },
+          "base": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BaseRiskOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "benchmark": {
             "$ref": "#/components/schemas/BenchmarkOut"
           },
@@ -3938,6 +5639,16 @@
               }
             ],
             "title": "Beta"
+          },
+          "delta": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeltaOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "es_975": {
             "anyOf": [
@@ -3956,6 +5667,27 @@
           "n_obs": {
             "title": "N Obs",
             "type": "integer"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "trade_ticket": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/TicketLineOut"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trade Ticket"
           },
           "weights": {
             "items": {
@@ -4348,9 +6080,106 @@
         "summary": "Apply To Book Route"
       }
     },
+    "/api/lab/book-regression": {
+      "post": {
+        "operationId": "book_regression_api_lab_book_regression_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BookRegressionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookRegressionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Book Regression"
+      }
+    },
+    "/api/lab/pair": {
+      "post": {
+        "operationId": "pair_pipeline_api_lab_pair_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pair Pipeline"
+      }
+    },
     "/api/macro": {
       "get": {
         "operationId": "macro_api_macro_get",
+        "parameters": [
+          {
+            "description": "pinned book snapshot id \u2014 enables the book-sensitivity column",
+            "in": "query",
+            "name": "book_ref",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{12}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "pinned book snapshot id \u2014 enables the book-sensitivity column",
+              "title": "Book Ref"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -4361,6 +6190,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Macro"

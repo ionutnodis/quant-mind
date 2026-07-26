@@ -69,13 +69,25 @@ def iso(ts: pd.Timestamp) -> str:
 
 def downsample(seq: T, max_points: int) -> T:
     """Step-slice `seq` down to at most `max_points` elements, preserving the
-    first/last-ish spread rather than truncating. Works for anything that
-    supports `len()` and `[::step]` slicing — a `list` (risk.py's
-    `BetaPoint` points) or a `pd.Series` (macro.py's named series) alike."""
+    first AND the TRUE last element (batch-2 final review item 7f: `[::step]`
+    silently dropped the most recent point — the as-of anchor — unless
+    (len-1) % step == 0). Works for anything that supports `len()` and
+    `[::step]` slicing — a `list` (risk.py's `BetaPoint` points) or a
+    `pd.Series` (macro.py's named series, lab.py's pair spread) alike."""
     if len(seq) <= max_points:
         return seq
     step = math.ceil(len(seq) / max_points)
-    return seq[::step]
+    sampled = seq[::step]
+    if (len(seq) - 1) % step == 0:
+        return sampled  # stride already lands on the last element
+    if len(sampled) >= max_points:
+        # Make room for the true last element by dropping the last interior
+        # sample — the endpoints matter more than one interior point.
+        sampled = sampled[:-1]
+    tail = seq[len(seq) - 1:]
+    if isinstance(sampled, pd.Series):
+        return pd.concat([sampled, tail])
+    return sampled + tail
 
 
 def read_close_series(store, con_id: int, symbol: str, years: int) -> pd.Series:
@@ -130,6 +142,51 @@ class PositionIn(BaseModel):
             except ValueError:
                 continue
         raise ValueError(f"expiry must be YYYYMMDD or YYYY-MM-DD, got {v!r}")
+
+
+# The declared delta-one approximation for option legs in the returns-based
+# engines (whatif/hedge/lab book-regression) — surfaced in each response's
+# `notes`, never silent (Batch-2 final review item 2).
+DELTA_ONE_OPTION_NOTE = (
+    "Option legs are priced as delta-one underlier notional (qty x multiplier x spot) "
+    "in this returns-based engine — a declared approximation; Greeks-aware option risk "
+    "lives in the options layer (book-greeks)."
+)
+
+
+def _effective_multiplier(p: "PositionIn") -> float:
+    """PositionIn's convention (module docstring): multiplier has no baked-in
+    default so a bare equity leg is never silently 100x'd; an option leg
+    (right set) defaults to the standard 100, anything else to 1.0 (a plain
+    share). Moved from whatif.py (Batch-2 final review item 2) so hedge/lab's
+    book pricing shares the exact same convention."""
+    if p.multiplier is not None:
+        return p.multiplier
+    return 100.0 if p.right is not None else 1.0
+
+
+def _validate_option_legs(positions: list["PositionIn"], origin: str) -> None:
+    """Batch-2 final review item 1 (moved unchanged from whatif.py so the
+    guard is shared): strike/expiry/right are ALL-or-NONE on every leg, on
+    BOTH the inline and book_ref paths (parity with book.py's honest-refusal
+    guard for pinned OPT legs). A leg with `right` but no strike/expiry
+    cannot be priced (and used to slip through inline, silently valued at
+    100x underlier notional); a leg with strike/expiry but no `right` used
+    to key as a phantom separate STK line in the trade ticket. Refuse both
+    with a named 422, never a silent mispricing."""
+    for p in positions:
+        fields = {"strike": p.strike, "expiry": p.expiry, "right": p.right}
+        given = [k for k, v in fields.items() if v is not None]
+        if given and len(given) < len(fields):
+            missing = [k for k, v in fields.items() if v is None]
+            raise HTTPException(
+                422,
+                detail=(
+                    f"{origin} leg {p.symbol!r} has a partial option descriptor "
+                    f"(has {'/'.join(given)}, missing {'/'.join(missing)}) — "
+                    "strike/expiry/right must be given together (all or none)"
+                ),
+            )
 
 
 def weighted_portfolio_returns(returns: pd.DataFrame, symbols: list[str], weights: np.ndarray) -> pd.Series:
