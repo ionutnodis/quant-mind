@@ -30,7 +30,6 @@ from __future__ import annotations
 
 from typing import Literal
 
-import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
