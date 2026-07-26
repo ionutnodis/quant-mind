@@ -63,23 +63,171 @@
         "title": "BetaPoint",
         "type": "object"
       },
-      "BookPositionIn": {
+      "BookGreeksRequest": {
         "properties": {
+          "betas": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Betas",
+            "type": "object"
+          },
+          "book_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book Ref"
+          },
+          "positions": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PositionIn"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Positions"
+          }
+        },
+        "title": "BookGreeksRequest",
+        "type": "object"
+      },
+      "BookGreeksResponse": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "risk_free_rate_note": {
+            "title": "Risk Free Rate Note",
+            "type": "string"
+          },
+          "stress_grid": {
+            "$ref": "#/components/schemas/StressGridOut"
+          },
+          "underlyings": {
+            "items": {
+              "$ref": "#/components/schemas/UnderlyingGreeksOut"
+            },
+            "title": "Underlyings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "underlyings",
+          "stress_grid",
+          "risk_free_rate_note",
+          "as_of"
+        ],
+        "title": "BookGreeksResponse",
+        "type": "object"
+      },
+      "BookPinRequest": {
+        "properties": {
+          "positions": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PositionIn"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Positions"
+          }
+        },
+        "title": "BookPinRequest",
+        "type": "object"
+      },
+      "BookPositionOut": {
+        "properties": {
+          "con_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Con Id"
+          },
+          "multiplier": {
+            "title": "Multiplier",
+            "type": "number"
+          },
           "qty": {
             "title": "Qty",
             "type": "number"
           },
+          "sec_type": {
+            "title": "Sec Type",
+            "type": "string"
+          },
           "symbol": {
-            "minLength": 1,
             "title": "Symbol",
             "type": "string"
           }
         },
         "required": [
           "symbol",
-          "qty"
+          "qty",
+          "con_id",
+          "sec_type",
+          "multiplier"
         ],
-        "title": "BookPositionIn",
+        "title": "BookPositionOut",
+        "type": "object"
+      },
+      "BookSnapshotOut": {
+        "properties": {
+          "base_currency": {
+            "title": "Base Currency",
+            "type": "string"
+          },
+          "positions": {
+            "items": {
+              "$ref": "#/components/schemas/BookPositionOut"
+            },
+            "title": "Positions",
+            "type": "array"
+          },
+          "snapshot_id": {
+            "title": "Snapshot Id",
+            "type": "string"
+          },
+          "valuation_ts": {
+            "title": "Valuation Ts",
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "valuation_ts",
+          "base_currency",
+          "positions"
+        ],
+        "title": "BookSnapshotOut",
         "type": "object"
       },
       "BriefResponse": {
@@ -133,6 +281,168 @@
         "title": "BriefResponse",
         "type": "object"
       },
+      "Candle": {
+        "properties": {
+          "close": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Close"
+          },
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "high": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "High"
+          },
+          "low": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Low"
+          },
+          "open": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Open"
+          },
+          "volume": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volume"
+          }
+        },
+        "required": [
+          "date",
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume"
+        ],
+        "title": "Candle",
+        "type": "object"
+      },
+      "CandlesResponse": {
+        "properties": {
+          "candles": {
+            "items": {
+              "$ref": "#/components/schemas/Candle"
+            },
+            "title": "Candles",
+            "type": "array"
+          },
+          "days": {
+            "title": "Days",
+            "type": "integer"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "days",
+          "candles"
+        ],
+        "title": "CandlesResponse",
+        "type": "object"
+      },
+      "ChainResponse": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "missing": {
+            "title": "Missing",
+            "type": "boolean"
+          },
+          "quotes": {
+            "items": {
+              "$ref": "#/components/schemas/OptionQuoteOut"
+            },
+            "title": "Quotes",
+            "type": "array"
+          },
+          "smile": {
+            "items": {
+              "$ref": "#/components/schemas/ExpirySmile"
+            },
+            "title": "Smile",
+            "type": "array"
+          },
+          "spot": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spot"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "boolean"
+          },
+          "underlier": {
+            "title": "Underlier",
+            "type": "string"
+          }
+        },
+        "required": [
+          "underlier",
+          "as_of",
+          "spot",
+          "stale",
+          "quotes",
+          "smile",
+          "missing"
+        ],
+        "title": "ChainResponse",
+        "type": "object"
+      },
       "Correlation": {
         "properties": {
           "matrix": {
@@ -165,6 +475,27 @@
           "matrix"
         ],
         "title": "Correlation",
+        "type": "object"
+      },
+      "ExpirySmile": {
+        "properties": {
+          "expiry": {
+            "title": "Expiry",
+            "type": "string"
+          },
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/SmilePoint"
+            },
+            "title": "Points",
+            "type": "array"
+          }
+        },
+        "required": [
+          "expiry",
+          "points"
+        ],
+        "title": "ExpirySmile",
         "type": "object"
       },
       "ExposureRequest": {
@@ -288,17 +619,6 @@
             ],
             "title": "Beta"
           },
-          "coint_pvalue": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Coint Pvalue"
-          },
           "corr_stability": {
             "anyOf": [
               {
@@ -395,8 +715,7 @@
           "es_after",
           "protection",
           "residual_beta",
-          "corr_stability",
-          "coint_pvalue"
+          "corr_stability"
         ],
         "title": "HedgeCandidateOut",
         "type": "object"
@@ -404,13 +723,31 @@
       "HedgeRequest": {
         "properties": {
           "book": {
-            "items": {
-              "$ref": "#/components/schemas/BookPositionIn"
-            },
-            "maxItems": 50,
-            "minItems": 1,
-            "title": "Book",
-            "type": "array"
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PositionIn"
+                },
+                "maxItems": 50,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book"
+          },
+          "book_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book Ref"
           },
           "candidates": {
             "anyOf": [
@@ -438,7 +775,6 @@
           }
         },
         "required": [
-          "book",
           "objective"
         ],
         "title": "HedgeRequest",
@@ -544,6 +880,209 @@
           "counts"
         ],
         "title": "Histogram",
+        "type": "object"
+      },
+      "InstrumentResponse": {
+        "properties": {
+          "ann_vol": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ann Vol"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "beta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta"
+          },
+          "beta_benchmark": {
+            "title": "Beta Benchmark",
+            "type": "string"
+          },
+          "con_id": {
+            "title": "Con Id",
+            "type": "integer"
+          },
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
+          "exchange": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exchange"
+          },
+          "high_52w": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "High 52W"
+          },
+          "industry": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Industry"
+          },
+          "last_close": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Close"
+          },
+          "long_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Long Name"
+          },
+          "low_52w": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Low 52W"
+          },
+          "pct_from_52w_high": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pct From 52W High"
+          },
+          "pct_from_52w_low": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pct From 52W Low"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Region"
+          },
+          "sec_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sec Type"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "con_id",
+          "long_name",
+          "exchange",
+          "currency",
+          "sec_type",
+          "industry",
+          "region",
+          "provider",
+          "last_close",
+          "high_52w",
+          "low_52w",
+          "pct_from_52w_high",
+          "pct_from_52w_low",
+          "ann_vol",
+          "beta",
+          "beta_benchmark",
+          "as_of"
+        ],
+        "title": "InstrumentResponse",
         "type": "object"
       },
       "LabApplyRequest": {
@@ -1012,6 +1551,82 @@
         "title": "Objective",
         "type": "object"
       },
+      "OptionQuoteOut": {
+        "properties": {
+          "ask": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ask"
+          },
+          "bid": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bid"
+          },
+          "delta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delta"
+          },
+          "expiry": {
+            "title": "Expiry",
+            "type": "string"
+          },
+          "iv": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Iv"
+          },
+          "multiplier": {
+            "title": "Multiplier",
+            "type": "number"
+          },
+          "right": {
+            "title": "Right",
+            "type": "string"
+          },
+          "strike": {
+            "title": "Strike",
+            "type": "number"
+          }
+        },
+        "required": [
+          "expiry",
+          "strike",
+          "right",
+          "bid",
+          "ask",
+          "iv",
+          "delta",
+          "multiplier"
+        ],
+        "title": "OptionQuoteOut",
+        "type": "object"
+      },
       "PnlHistogram": {
         "properties": {
           "bin_edges": {
@@ -1072,10 +1687,59 @@
         "type": "object"
       },
       "PositionIn": {
+        "description": "A book leg: qty != 0 shares/contracts of `symbol`. See module\ndocstring for the option-leg fields' optionality/defaulting convention.",
         "properties": {
+          "expiry": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiry"
+          },
+          "multiplier": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Multiplier"
+          },
           "qty": {
             "title": "Qty",
             "type": "number"
+          },
+          "right": {
+            "anyOf": [
+              {
+                "enum": [
+                  "C",
+                  "P"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Right"
+          },
+          "strike": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strike"
           },
           "symbol": {
             "minLength": 1,
@@ -1415,6 +2079,73 @@
         "title": "SimulateResponse",
         "type": "object"
       },
+      "SmilePoint": {
+        "properties": {
+          "iv": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Iv"
+          },
+          "strike": {
+            "title": "Strike",
+            "type": "number"
+          }
+        },
+        "required": [
+          "strike",
+          "iv"
+        ],
+        "title": "SmilePoint",
+        "type": "object"
+      },
+      "StressGridOut": {
+        "properties": {
+          "pnl": {
+            "items": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "title": "Pnl",
+            "type": "array"
+          },
+          "spot_shocks": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Spot Shocks",
+            "type": "array"
+          },
+          "vol_shocks": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Vol Shocks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "vol_shocks",
+          "spot_shocks",
+          "pnl"
+        ],
+        "title": "StressGridOut",
+        "type": "object"
+      },
       "SyncStatusResponse": {
         "properties": {
           "error": {
@@ -1509,6 +2240,103 @@
           "n_positions"
         ],
         "title": "Totals",
+        "type": "object"
+      },
+      "UnderlyingGreeksOut": {
+        "properties": {
+          "delta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delta"
+          },
+          "dollar_delta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dollar Delta"
+          },
+          "gamma": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gamma"
+          },
+          "spot": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spot"
+          },
+          "spy_equivalent_notional": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spy Equivalent Notional"
+          },
+          "theta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Theta"
+          },
+          "underlier": {
+            "title": "Underlier",
+            "type": "string"
+          },
+          "vega": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vega"
+          }
+        },
+        "required": [
+          "underlier",
+          "spot",
+          "delta",
+          "gamma",
+          "vega",
+          "theta",
+          "dollar_delta",
+          "spy_equivalent_notional"
+        ],
+        "title": "UnderlyingGreeksOut",
         "type": "object"
       },
       "ValidationError": {
@@ -1607,17 +2435,35 @@
       },
       "WhatIfRequest": {
         "properties": {
+          "book_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book Ref"
+          },
           "mc": {
             "$ref": "#/components/schemas/MonteCarloParams"
           },
           "positions": {
-            "items": {
-              "$ref": "#/components/schemas/PositionIn"
-            },
-            "maxItems": 50,
-            "minItems": 1,
-            "title": "Positions",
-            "type": "array"
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PositionIn"
+                },
+                "maxItems": 50,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Positions"
           },
           "years": {
             "default": 5,
@@ -1627,9 +2473,6 @@
             "type": "integer"
           }
         },
-        "required": [
-          "positions"
-        ],
         "title": "WhatIfRequest",
         "type": "object"
       },
@@ -1785,6 +2628,101 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/book/current": {
+      "get": {
+        "operationId": "get_current_book_api_book_current_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookSnapshotOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Current Book"
+      }
+    },
+    "/api/book/pin": {
+      "post": {
+        "operationId": "pin_book_api_book_pin_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BookPinRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookSnapshotOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pin Book"
+      }
+    },
+    "/api/book/{snapshot_id}": {
+      "get": {
+        "operationId": "get_book_api_book__snapshot_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "title": "Snapshot Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookSnapshotOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Book"
+      }
+    },
     "/api/brief": {
       "get": {
         "operationId": "brief_api_brief_get",
@@ -1855,6 +2793,96 @@
           }
         },
         "summary": "Hedge"
+      }
+    },
+    "/api/instruments/{symbol}": {
+      "get": {
+        "operationId": "instrument_api_instruments__symbol__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "symbol",
+            "required": true,
+            "schema": {
+              "title": "Symbol",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstrumentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Instrument"
+      }
+    },
+    "/api/instruments/{symbol}/candles": {
+      "get": {
+        "operationId": "candles_api_instruments__symbol__candles_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "symbol",
+            "required": true,
+            "schema": {
+              "title": "Symbol",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 180,
+              "maximum": 3650,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CandlesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Candles"
       }
     },
     "/api/lab/apply": {
@@ -2025,6 +3053,83 @@
           }
         },
         "summary": "Simulate"
+      }
+    },
+    "/api/options/book-greeks": {
+      "post": {
+        "operationId": "book_greeks_api_options_book_greeks_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BookGreeksRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookGreeksResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Book Greeks"
+      }
+    },
+    "/api/options/{underlier}/chain": {
+      "get": {
+        "operationId": "get_chain_api_options__underlier__chain_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "underlier",
+            "required": true,
+            "schema": {
+              "title": "Underlier",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChainResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Chain"
       }
     },
     "/api/portfolio": {

@@ -4,6 +4,57 @@
  */
 
 export interface paths {
+    "/api/book/current": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Current Book */
+        get: operations["get_current_book_api_book_current_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/book/pin": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Pin Book */
+        post: operations["pin_book_api_book_pin_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/book/{snapshot_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Book */
+        get: operations["get_book_api_book__snapshot_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/brief": {
         parameters: {
             query?: never;
@@ -49,6 +100,40 @@ export interface paths {
         put?: never;
         /** Hedge */
         post: operations["hedge_api_hedge_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/instruments/{symbol}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Instrument */
+        get: operations["instrument_api_instruments__symbol__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/instruments/{symbol}/candles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Candles */
+        get: operations["candles_api_instruments__symbol__candles_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -134,6 +219,40 @@ export interface paths {
         put?: never;
         /** Simulate */
         post: operations["simulate_api_models__name__simulate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/options/book-greeks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Book Greeks */
+        post: operations["book_greeks_api_options_book_greeks_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/options/{underlier}/chain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Chain */
+        get: operations["get_chain_api_options__underlier__chain_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -262,12 +381,55 @@ export interface components {
             /** Date */
             date: string;
         };
-        /** BookPositionIn */
-        BookPositionIn: {
+        /** BookGreeksRequest */
+        BookGreeksRequest: {
+            /** Betas */
+            betas?: {
+                [key: string]: number;
+            };
+            /** Book Ref */
+            book_ref?: string | null;
+            /** Positions */
+            positions?: components["schemas"]["PositionIn"][] | null;
+        };
+        /** BookGreeksResponse */
+        BookGreeksResponse: {
+            /** As Of */
+            as_of: string | null;
+            /** Risk Free Rate Note */
+            risk_free_rate_note: string;
+            stress_grid: components["schemas"]["StressGridOut"];
+            /** Underlyings */
+            underlyings: components["schemas"]["UnderlyingGreeksOut"][];
+        };
+        /** BookPinRequest */
+        BookPinRequest: {
+            /** Positions */
+            positions?: components["schemas"]["PositionIn"][] | null;
+        };
+        /** BookPositionOut */
+        BookPositionOut: {
+            /** Con Id */
+            con_id: number | null;
+            /** Multiplier */
+            multiplier: number;
             /** Qty */
             qty: number;
+            /** Sec Type */
+            sec_type: string;
             /** Symbol */
             symbol: string;
+        };
+        /** BookSnapshotOut */
+        BookSnapshotOut: {
+            /** Base Currency */
+            base_currency: string;
+            /** Positions */
+            positions: components["schemas"]["BookPositionOut"][];
+            /** Snapshot Id */
+            snapshot_id: string;
+            /** Valuation Ts */
+            valuation_ts: string;
         };
         /** BriefResponse */
         BriefResponse: {
@@ -279,12 +441,60 @@ export interface components {
             /** Tiles */
             tiles: components["schemas"]["Tile"][];
         };
+        /** Candle */
+        Candle: {
+            /** Close */
+            close: number | null;
+            /** Date */
+            date: string;
+            /** High */
+            high: number | null;
+            /** Low */
+            low: number | null;
+            /** Open */
+            open: number | null;
+            /** Volume */
+            volume: number | null;
+        };
+        /** CandlesResponse */
+        CandlesResponse: {
+            /** Candles */
+            candles: components["schemas"]["Candle"][];
+            /** Days */
+            days: number;
+            /** Symbol */
+            symbol: string;
+        };
+        /** ChainResponse */
+        ChainResponse: {
+            /** As Of */
+            as_of: string | null;
+            /** Missing */
+            missing: boolean;
+            /** Quotes */
+            quotes: components["schemas"]["OptionQuoteOut"][];
+            /** Smile */
+            smile: components["schemas"]["ExpirySmile"][];
+            /** Spot */
+            spot: number | null;
+            /** Stale */
+            stale: boolean;
+            /** Underlier */
+            underlier: string;
+        };
         /** Correlation */
         Correlation: {
             /** Matrix */
             matrix: (number | null)[][];
             /** Symbols */
             symbols: string[];
+        };
+        /** ExpirySmile */
+        ExpirySmile: {
+            /** Expiry */
+            expiry: string;
+            /** Points */
+            points: components["schemas"]["SmilePoint"][];
         };
         /** ExposureRequest */
         ExposureRequest: {
@@ -336,8 +546,6 @@ export interface components {
         HedgeCandidateOut: {
             /** Beta */
             beta: number | null;
-            /** Coint Pvalue */
-            coint_pvalue: number | null;
             /** Corr Stability */
             corr_stability: number | null;
             /** Es After */
@@ -360,7 +568,9 @@ export interface components {
         /** HedgeRequest */
         HedgeRequest: {
             /** Book */
-            book: components["schemas"]["BookPositionIn"][];
+            book?: components["schemas"]["PositionIn"][] | null;
+            /** Book Ref */
+            book_ref?: string | null;
             /** Candidates */
             candidates?: string[] | null;
             objective: components["schemas"]["Objective"];
@@ -394,6 +604,45 @@ export interface components {
             bin_edges: number[];
             /** Counts */
             counts: number[];
+        };
+        /** InstrumentResponse */
+        InstrumentResponse: {
+            /** Ann Vol */
+            ann_vol: number | null;
+            /** As Of */
+            as_of: string | null;
+            /** Beta */
+            beta: number | null;
+            /** Beta Benchmark */
+            beta_benchmark: string;
+            /** Con Id */
+            con_id: number;
+            /** Currency */
+            currency: string | null;
+            /** Exchange */
+            exchange: string | null;
+            /** High 52W */
+            high_52w: number | null;
+            /** Industry */
+            industry: string | null;
+            /** Last Close */
+            last_close: number | null;
+            /** Long Name */
+            long_name: string | null;
+            /** Low 52W */
+            low_52w: number | null;
+            /** Pct From 52W High */
+            pct_from_52w_high: number | null;
+            /** Pct From 52W Low */
+            pct_from_52w_low: number | null;
+            /** Provider */
+            provider: string | null;
+            /** Region */
+            region: string | null;
+            /** Sec Type */
+            sec_type: string | null;
+            /** Symbol */
+            symbol: string;
         };
         /** LabApplyRequest */
         LabApplyRequest: {
@@ -533,6 +782,25 @@ export interface components {
             /** Value */
             value: number;
         };
+        /** OptionQuoteOut */
+        OptionQuoteOut: {
+            /** Ask */
+            ask: number | null;
+            /** Bid */
+            bid: number | null;
+            /** Delta */
+            delta: number | null;
+            /** Expiry */
+            expiry: string;
+            /** Iv */
+            iv: number | null;
+            /** Multiplier */
+            multiplier: number;
+            /** Right */
+            right: string;
+            /** Strike */
+            strike: number;
+        };
         /** PnlHistogram */
         PnlHistogram: {
             /** Bin Edges */
@@ -552,10 +820,22 @@ export interface components {
             /** Valuation Ts */
             valuation_ts: string;
         };
-        /** PositionIn */
+        /**
+         * PositionIn
+         * @description A book leg: qty != 0 shares/contracts of `symbol`. See module
+         *     docstring for the option-leg fields' optionality/defaulting convention.
+         */
         PositionIn: {
+            /** Expiry */
+            expiry?: string | null;
+            /** Multiplier */
+            multiplier?: number | null;
             /** Qty */
             qty: number;
+            /** Right */
+            right?: ("C" | "P") | null;
+            /** Strike */
+            strike?: number | null;
             /** Symbol */
             symbol: string;
         };
@@ -652,6 +932,22 @@ export interface components {
             /** Sample Paths */
             sample_paths: number[][];
         };
+        /** SmilePoint */
+        SmilePoint: {
+            /** Iv */
+            iv: number | null;
+            /** Strike */
+            strike: number;
+        };
+        /** StressGridOut */
+        StressGridOut: {
+            /** Pnl */
+            pnl: (number | null)[][];
+            /** Spot Shocks */
+            spot_shocks: number[];
+            /** Vol Shocks */
+            vol_shocks: number[];
+        };
         /** SyncStatusResponse */
         SyncStatusResponse: {
             /** Error */
@@ -682,6 +978,25 @@ export interface components {
             /** N Positions */
             n_positions: number;
         };
+        /** UnderlyingGreeksOut */
+        UnderlyingGreeksOut: {
+            /** Delta */
+            delta: number | null;
+            /** Dollar Delta */
+            dollar_delta: number | null;
+            /** Gamma */
+            gamma: number | null;
+            /** Spot */
+            spot: number | null;
+            /** Spy Equivalent Notional */
+            spy_equivalent_notional: number | null;
+            /** Theta */
+            theta: number | null;
+            /** Underlier */
+            underlier: string;
+            /** Vega */
+            vega: number | null;
+        };
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -710,9 +1025,11 @@ export interface components {
         };
         /** WhatIfRequest */
         WhatIfRequest: {
+            /** Book Ref */
+            book_ref?: string | null;
             mc?: components["schemas"]["MonteCarloParams"];
             /** Positions */
-            positions: components["schemas"]["PositionIn"][];
+            positions?: components["schemas"]["PositionIn"][] | null;
             /**
              * Years
              * @default 5
@@ -760,6 +1077,90 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    get_current_book_api_book_current_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BookSnapshotOut"];
+                };
+            };
+        };
+    };
+    pin_book_api_book_pin_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BookPinRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BookSnapshotOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_book_api_book__snapshot_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                snapshot_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BookSnapshotOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     brief_api_brief_get: {
         parameters: {
             query?: never;
@@ -820,6 +1221,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HedgeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    instrument_api_instruments__symbol__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                symbol: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstrumentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    candles_api_instruments__symbol__candles_get: {
+        parameters: {
+            query?: {
+                days?: number;
+            };
+            header?: never;
+            path: {
+                symbol: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CandlesResponse"];
                 };
             };
             /** @description Validation Error */
@@ -963,6 +1428,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SimulateResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    book_greeks_api_options_book_greeks_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BookGreeksRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BookGreeksResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_chain_api_options__underlier__chain_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                underlier: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChainResponse"];
                 };
             };
             /** @description Validation Error */
