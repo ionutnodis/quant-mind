@@ -11,5 +11,6 @@ from quantmind.api.routers.sync import router as sync_router
 from quantmind.api.routers.book import router as book_router
 from quantmind.api.routers.instruments import router as instruments_router
 from quantmind.api.routers.options import router as options_router
+from quantmind.api.routers.news import router as news_router
 
-ROUTERS = [portfolio_router, risk_router, lab_router, macro_router, whatif_router, hedge_router, sync_router, book_router, instruments_router, options_router]
+ROUTERS = [portfolio_router, risk_router, lab_router, macro_router, whatif_router, hedge_router, sync_router, book_router, instruments_router, options_router, news_router]
