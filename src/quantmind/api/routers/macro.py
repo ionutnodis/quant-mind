@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from quantmind.api.routers._shared import clean, downsample, iso, weighted_portfolio_returns
@@ -175,6 +175,10 @@ class MacroResponse(BaseModel):
     sensitivity: SensitivityBlock | None
     as_of: str | None
     missing: list[str]
+    # Batch-2 final review item 4: set when a well-formed but UNKNOWN
+    # book_ref was posted — the sensitivity column degrades to null with
+    # this recovery note instead of 422ing the whole market page.
+    note: str | None = None
 
 
 def _series_points(series: pd.Series, max_points: int) -> list[SeriesPoint]:
@@ -356,6 +360,20 @@ def _sensitivity_block(
             continue
         closes[symbol] = close
 
+    # Batch-2 final review item 7d: the inner join below truncates the whole
+    # aligned window to the OLDEST last bar among the legs — name that
+    # culprit in the as-of/window note rather than silently serving a stale
+    # as_of with no explanation.
+    window_note = _SENS_WINDOW_NOTE
+    if closes:
+        last_dates = {s: c.index[-1] for s, c in closes.items()}
+        culprit = min(last_dates, key=last_dates.get)
+        if last_dates[culprit] < max(last_dates.values()):
+            window_note += (
+                f"; book pricing as-of limited by {culprit} "
+                f"(last bar {last_dates[culprit].strftime('%Y-%m-%d')})"
+            )
+
     if not closes:
         return _empty_sensitivity(book_ref, excluded, "no priceable legs in this book — sync bars or re-pin")
 
@@ -408,7 +426,7 @@ def _sensitivity_block(
         book_gross=clean(gross),
         excluded=excluded,
         rows=rows,
-        window_note=_SENS_WINDOW_NOTE,
+        window_note=window_note,
         as_of=as_of,
     )
 
@@ -492,11 +510,15 @@ def macro(
 
     # Book sensitivity (the amber column) — only with a pinned book.
     sensitivity_block: SensitivityBlock | None = None
+    top_note: str | None = None
     if book_ref is not None:
         drivers: list[tuple[str, Shock, pd.Series]] = []
         for key, name in (("us10y", "US10Y"), ("us2y", "US2Y")):
             if key in yield_series:
                 drivers.append(("rates", rate_shock(name), yield_series[key]))
+        # Batch-2 final review item 7b: US3M has no standard shock driver
+        # (documented narrowing) — its row below says so explicitly rather
+        # than leaving the tenor silently absent from the strip.
         for symbol in SECTORS:
             if symbol in sector_closes:
                 drivers.append(("sectors", return_shock(symbol), sector_closes[symbol]))
@@ -505,7 +527,33 @@ def macro(
                 drivers.append(("factors", return_shock(symbol), factor_closes[symbol]))
         if vix_close is not None:
             drivers.append(("vol", vol_shock(VOL_SYMBOL), vix_close))
-        sensitivity_block = _sensitivity_block(store, symbol_map, book_ref, drivers)
+        try:
+            sensitivity_block = _sensitivity_block(store, symbol_map, book_ref, drivers)
+        except HTTPException as e:
+            # Batch-2 final review item 4: a well-formed but UNKNOWN ref
+            # (stale bookmark, cleared pins) must not 422 the whole market
+            # page — degrade the sensitivity column with a recovery note.
+            # Every other 422 (corrupted snapshot, partial legacy legs)
+            # still propagates: those need the user to see the real error.
+            if isinstance(e.detail, str) and e.detail.startswith("unknown book_ref"):
+                sensitivity_block = None
+                top_note = (
+                    f"unknown book_ref {book_ref!r} — re-pin from What-If or Portfolio"
+                )
+            else:
+                raise
+        if sensitivity_block is not None and sensitivity_block.rows and "us3m" in yield_series:
+            sensitivity_block.rows.append(
+                SensitivityRow(
+                    driver="US3M", group="rates", shock_label="—",
+                    dollar_response=None, se=None, ci_low=None, ci_high=None,
+                    beta=None, n_obs=None,
+                    note=(
+                        "no standard shock driver applies to the 3M tenor "
+                        "(curve display only) — rate shocks cover US10Y/US2Y"
+                    ),
+                )
+            )
 
     as_of = iso(max(latest_dates)) if latest_dates else None
 
@@ -519,4 +567,5 @@ def macro(
         sensitivity=sensitivity_block,
         as_of=as_of,
         missing=missing,
+        note=top_note,
     )

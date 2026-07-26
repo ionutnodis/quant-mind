@@ -295,6 +295,55 @@ test("with ?book_ref pinned, amber sensitivity figures render with CIs", async (
   expect(screen.queryByText(/pin a book to see sensitivities/i)).not.toBeInTheDocument();
 });
 
+test("unknown book_ref degrade note renders where the strip would be", async () => {
+  // Batch-2 final review item 4: the backend now returns 200 with a
+  // top-level note for a stale/unknown ref — the page renders it instead of
+  // the generic pin-a-book empty state.
+  window.history.replaceState(null, "", `/?book_ref=${BOOK_REF}`);
+  server.use(
+    http.get("/api/macro", () =>
+      HttpResponse.json({
+        ...FULL,
+        sensitivity: null,
+        note: `unknown book_ref '${BOOK_REF}' — re-pin from What-If or Portfolio`,
+      })
+    )
+  );
+  renderMacro();
+  await screen.findAllByText("4.50%");
+  expect(screen.getByText(/re-pin from What-If or Portfolio/i)).toBeInTheDocument();
+});
+
+test("sensitivity strip renders even when the yields block is missing", async () => {
+  // Batch-2 final review item 7a: the strip/disclosure block must not be
+  // gated on yields availability.
+  window.history.replaceState(null, "", `/?book_ref=${BOOK_REF}`);
+  server.use(
+    http.get("/api/macro", () =>
+      HttpResponse.json({
+        ...FULL,
+        yields: null,
+        missing: ["US10Y", "US2Y", "US3M"],
+        sensitivity: { ...SENSITIVITY, excluded: ["SPY (option leg)"] },
+      })
+    )
+  );
+  renderMacro();
+  expect(await screen.findByText(/no yields cached yet/i)).toBeInTheDocument();
+  // rates/vol strip rows + the excluded-legs disclosure still render
+  expect(screen.getByText("-$1,235")).toBeInTheDocument();
+  expect(screen.getByText(/excluded: SPY \(option leg\)/i)).toBeInTheDocument();
+});
+
+test("Book column header is hidden when no sensitivity block is present", async () => {
+  // Batch-2 final review item 7e: a header over an all-dash column implied
+  // a broken feature rather than an absent book.
+  server.use(http.get("/api/macro", () => HttpResponse.json(FULL)));
+  renderMacro();
+  await screen.findAllByText("4.50%");
+  expect(screen.queryByText(/Book \//i)).not.toBeInTheDocument();
+});
+
 test("amber never leaks onto market data: return cells are up/down, not text-you", async () => {
   server.use(http.get("/api/macro", () => HttpResponse.json(FULL)));
   renderMacro();

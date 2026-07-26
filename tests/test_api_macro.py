@@ -308,9 +308,21 @@ def test_macro_without_book_ref_sensitivity_is_null(full_store):
     assert body["sensitivity"] is None  # frontend: "pin a book to see sensitivities"
 
 
-def test_macro_unknown_book_ref_is_422(full_store):
+def test_macro_unknown_book_ref_degrades_to_note_never_422(full_store):
+    # Batch-2 final review item 4: a stale/unpinned (but well-formed) ref must
+    # not take down the market panels — sensitivity degrades to null with a
+    # top-level note telling the user how to recover.
     r = _client(full_store).get("/api/macro", params={"book_ref": "abcdefabcdef"})
-    assert r.status_code == 422
+    assert r.status_code == 200
+    body = r.json()
+    assert body["sensitivity"] is None
+    assert body["note"] is not None
+    assert "abcdefabcdef" in body["note"]
+    assert "re-pin" in body["note"]
+    # market panels survive intact
+    assert body["yields"] is not None
+    assert len(body["sectors"]) == len(SECTORS)
+    assert body["regime_rotation"] is not None
 
 
 def test_macro_malformed_book_ref_is_422_not_path_traversal(full_store):
@@ -390,6 +402,50 @@ def test_macro_sensitivity_option_leg_excluded_honestly(noisy_store):
     con_id = noisy_store.read_symbol_map()["XLF"]
     bars, _ = noisy_store.read_bars(con_id=con_id, bar_size="1d")
     assert sens["book_gross"] == pytest.approx(5.0 * float(bars["close"].iloc[-1]), rel=1e-9)
+
+
+def test_macro_sensitivity_us3m_row_notes_no_shock_driver(noisy_store):
+    # Batch-2 final review item 7b: US3M appears in the curve but has no
+    # standard shock driver — say so explicitly on its own row (documented
+    # narrowing), never leave the tenor silently absent from the strip.
+    client = _client(noisy_store)
+    ref = client.post("/api/book/pin", json={"positions": [{"symbol": "XLK", "qty": 10}]}).json()[
+        "snapshot_id"
+    ]
+    sens = client.get("/api/macro", params={"book_ref": ref}).json()["sensitivity"]
+    rows = {(row["group"], row["driver"]): row for row in sens["rows"]}
+    us3m = rows[("rates", "US3M")]
+    assert us3m["dollar_response"] is None
+    assert us3m["note"] is not None
+    assert "shock" in us3m["note"].lower()
+
+
+def test_macro_sensitivity_as_of_note_names_the_stale_culprit_symbol(noisy_store):
+    # Batch-2 final review item 7d: the book-pricing panel inner-joins every
+    # leg's bars, so ONE stale symbol truncates the whole aligned window —
+    # the as-of note must name that culprit, not leave the truncation silent.
+    client = _client(noisy_store)
+    # Rewrite XLF's bars to end 10 trading days earlier than the rest.
+    con_id = noisy_store.read_symbol_map()["XLF"]
+    bars, meta = noisy_store.read_bars(con_id=con_id, bar_size="1d")
+    noisy_store.write_bars(con_id=con_id, bar_size="1d", bars=bars.iloc[:-10], meta=meta)
+
+    ref = client.post(
+        "/api/book/pin",
+        json={"positions": [{"symbol": "XLK", "qty": 10}, {"symbol": "XLF", "qty": 5}]},
+    ).json()["snapshot_id"]
+    sens = client.get("/api/macro", params={"book_ref": ref}).json()["sensitivity"]
+    assert sens is not None
+    stale_last = bars.index[-11].strftime("%Y-%m-%d")
+    assert "XLF" in sens["window_note"]
+    assert stale_last in sens["window_note"]
+
+    # A book with no stale leg carries no culprit note.
+    ref_clean = client.post(
+        "/api/book/pin", json={"positions": [{"symbol": "XLK", "qty": 10}]}
+    ).json()["snapshot_id"]
+    sens_clean = client.get("/api/macro", params={"book_ref": ref_clean}).json()["sensitivity"]
+    assert "limited by" not in sens_clean["window_note"]
 
 
 def test_macro_sensitivity_degenerate_book_never_500_and_never_ci_free(full_store):

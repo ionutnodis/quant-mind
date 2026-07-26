@@ -105,6 +105,9 @@ interface MacroResponse {
   sensitivity?: SensitivityBlock | null;
   as_of: string | null;
   missing: string[];
+  // Batch-2 final review item 4: set when the pinned book_ref is unknown —
+  // the sensitivity column degraded; rendered where the strip would be.
+  note?: string | null;
 }
 
 function getMacro(bookRef: string | null): Promise<MacroResponse> {
@@ -187,7 +190,10 @@ function RotationTable({
             <th className="text-right font-normal py-1">1D</th>
             <th className="text-right font-normal py-1">1M</th>
             <th className="text-right font-normal py-1">3M</th>
-            <th className="text-right font-normal py-1">Book / {shockLabel}</th>
+            {/* Batch-2 final review item 7e: no book pinned -> no Book
+                column at all (a header over an all-dash column implied a
+                broken feature rather than an absent book). */}
+            {hasBook && <th className="text-right font-normal py-1">Book / {shockLabel}</th>}
             <th className="text-right font-normal py-1">TradingView</th>
           </tr>
         </thead>
@@ -210,9 +216,11 @@ function RotationTable({
                 <td className="text-right py-1.5">
                   <ReturnCell value={row.ret_3m} />
                 </td>
-                <td className="text-right py-1.5">
-                  {hasBook && sens ? <SensValue row={sens} /> : <span className="num text-muted">—</span>}
-                </td>
+                {hasBook && (
+                  <td className="text-right py-1.5">
+                    {sens ? <SensValue row={sens} /> : <span className="num text-muted">—</span>}
+                  </td>
+                )}
                 <td className="text-right py-1.5">
                   <a
                     href={tradingViewUrl(row.symbol)}
@@ -234,8 +242,17 @@ function RotationTable({
 }
 
 // Book response to rate/vol standard shocks, shown under the yields numbers.
-function BookSensitivityStrip({ sensitivity }: { sensitivity: SensitivityBlock | null }) {
-  if (!sensitivity) return <p className="text-muted text-[11px] mt-3">{PIN_A_BOOK}</p>;
+// `fallbackNote` is the backend's top-level degrade note (unknown book_ref,
+// batch-2 final review item 4) — rendered where the strip would be.
+function BookSensitivityStrip({
+  sensitivity,
+  fallbackNote,
+}: {
+  sensitivity: SensitivityBlock | null;
+  fallbackNote?: string | null;
+}) {
+  if (!sensitivity)
+    return <p className="text-muted text-[11px] mt-3">{fallbackNote ?? PIN_A_BOOK}</p>;
   const rows = sensitivity.rows.filter((r) => r.group === "rates" || r.group === "vol");
   return (
     <div className="mt-3 border-t border-hairline pt-2 space-y-1">
@@ -446,11 +463,15 @@ export function Macro() {
                 </div>
               </div>
               <SeriesChart points={data.yields.series.us10y} label="US10Y" colorToken="market" />
-              <BookSensitivityStrip sensitivity={sensitivity} />
             </>
           ) : (
             <p className="text-muted text-[12px]">No yields cached yet — sync US10Y/US2Y/US3M.</p>
           )}
+          {/* Batch-2 final review item 7a: the book-sensitivity strip (and
+              its excluded-legs disclosure / degrade note) renders whether or
+              not the yields block resolved — the book column must never
+              vanish just because a rates series is missing. */}
+          <BookSensitivityStrip sensitivity={sensitivity} fallbackNote={data.note} />
         </Panel>
 
         <Panel
