@@ -174,6 +174,115 @@ def client_with_zero_close(tmp_path):
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 
+def _named_series(n=300, seed=1, start=0.04, scale=0.0005):
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range(end="2026-07-24", periods=n)
+    levels = start + np.cumsum(rng.normal(0, scale, n))
+    return pd.Series(levels, index=idx)
+
+
+@pytest.fixture
+def client_with_named_series(tmp_path):
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)
+    store.write_bars(con_id=2, bar_size="1d", bars=_bars(seed=2), meta=meta)
+    store.write_symbol_map({"SPY": 1, "MTUM": 2})
+    store.write_series("US10Y", _named_series(seed=3))
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+
+
+def test_regression_single_factor_capm_shape(client_with_named_series):
+    r = client_with_named_series.get(
+        "/api/risk/MTUM/regression", params={"factors": "SPY", "years": 1}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["symbol"] == "MTUM"
+    assert body["factors"] == ["SPY"]
+    assert body["n_obs"] > 0
+    assert body["hac_lags"] >= 0
+    assert len(body["scatter"]) > 0
+    assert all("date" in p and "asset" in p and "factor" in p for p in body["scatter"])
+    assert body["fit_line"]["factor"] == "SPY"
+    assert body["betas"][0]["factor"] == "SPY"
+    assert body["betas"][0]["ci_low"] <= body["betas"][0]["beta"] <= body["betas"][0]["ci_high"]
+    assert body["r_squared"] is not None
+    assert len(body["r_squared_progression"]) == 1
+    names = {row["name"] for row in body["variance_decomposition"]}
+    assert names == {"SPY", "idiosyncratic"}
+    shares = [row["share"] for row in body["variance_decomposition"] if row["share"] is not None]
+    assert sum(shares) == pytest.approx(1.0, abs=1e-3)
+    attribution_names = {row["name"] for row in body["attribution"]}
+    assert attribution_names == {"alpha", "SPY", "idiosyncratic"}
+    assert len(body["residuals"]) > 0
+    assert body["as_of"]
+
+
+def test_regression_multi_factor_includes_named_rate_series(client_with_named_series):
+    r = client_with_named_series.get(
+        "/api/risk/MTUM/regression", params={"factors": "SPY,US10Y", "years": 1}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["factors"] == ["SPY", "US10Y"]
+    assert {b["factor"] for b in body["betas"]} == {"SPY", "US10Y"}
+    assert [step["factor_added"] for step in body["r_squared_progression"]] == ["SPY", "US10Y"]
+    # Adding a factor can only raise (never lower) in-sample R^2.
+    assert body["r_squared_progression"][1]["r_squared"] >= body["r_squared_progression"][0]["r_squared"] - 1e-9
+    # The scatter/fit-line stay pinned to the first factor even with two factors requested.
+    assert body["fit_line"]["factor"] == "SPY"
+
+
+def test_regression_unknown_factor_is_422_not_500(client_with_named_series):
+    r = client_with_named_series.get("/api/risk/MTUM/regression", params={"factors": "NOPE"})
+    assert r.status_code == 422
+    assert "detail" in r.json()
+
+
+def test_regression_duplicate_factor_names_is_422(client_with_named_series):
+    r = client_with_named_series.get("/api/risk/MTUM/regression", params={"factors": "SPY,SPY"})
+    assert r.status_code == 422
+
+
+def test_regression_unknown_symbol_is_422_not_500(client_with_named_series):
+    r = client_with_named_series.get("/api/risk/NOPE/regression", params={"factors": "SPY"})
+    assert r.status_code == 422
+
+
+def test_regression_window_param_trims_observations(client_with_named_series):
+    full = client_with_named_series.get(
+        "/api/risk/MTUM/regression", params={"factors": "SPY", "years": 1}
+    ).json()
+    windowed = client_with_named_series.get(
+        "/api/risk/MTUM/regression", params={"factors": "SPY", "years": 1, "window": 40}
+    ).json()
+    assert windowed["n_obs"] == 40
+    assert windowed["n_obs"] < full["n_obs"]
+    assert windowed["window"] == 40
+    assert full["window"] is None
+
+
+def test_regression_window_bounds_reject_out_of_range(client_with_named_series):
+    r = client_with_named_series.get(
+        "/api/risk/MTUM/regression", params={"factors": "SPY", "window": 1}
+    )
+    assert r.status_code == 422
+    r2 = client_with_named_series.get(
+        "/api/risk/MTUM/regression", params={"factors": "SPY", "window": 100_000}
+    )
+    assert r2.status_code == 422
+
+
+def test_regression_insufficient_overlap_is_422_not_500(client_with_named_series):
+    r = client_with_named_series.get(
+        "/api/risk/MTUM/regression", params={"factors": "SPY", "years": 1, "window": 20}
+    )
+    assert r.status_code == 422
+    assert "detail" in r.json()
+
+
 def test_montecarlo_zero_close_never_500s_and_reports_n_nonfinite(client_with_zero_close):
     # Reproduces the finite-guard gap: np.histogram used to raise ValueError
     # (autodetected range of [nan, nan] is not finite) -> unhandled -> 500.

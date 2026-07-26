@@ -16,11 +16,13 @@ export function FanChart({
   p5,
   p50,
   p95,
+  horizon,
 }: {
   histogram: Histogram;
   p5: number | null;
   p50: number | null;
   p95: number | null;
+  horizon?: number;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -58,12 +60,13 @@ export function FanChart({
     const node = ref.current;
     return () => Plotly.purge(node);
   }, [histogram, p5, p50, p95]);
+  const horizonLabel = horizon ? `${horizon}-day ` : "";
   return (
     <div
       ref={ref}
       data-testid="fan-chart"
       role="img"
-      aria-label="Monte Carlo terminal return distribution with p5, p50, p95 markers"
+      aria-label={`Monte Carlo ${horizonLabel}terminal return distribution with p5, p50, p95 markers`}
     />
   );
 }
