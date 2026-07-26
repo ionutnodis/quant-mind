@@ -55,9 +55,11 @@ interface HedgeCandidate {
 
 interface OptionHedgeLeg {
   action: "long" | "short";
-  strike: number;
+  // Nullable as the backend's NaN->null insurance (fix round 1) — a healthy
+  // chain always yields finite values here.
+  strike: number | null;
   right: "C" | "P";
-  price: number;
+  price: number | null;
 }
 
 interface OptionHedge {
@@ -132,7 +134,8 @@ function ci(lo: number | null, hi: number | null): string {
   return `[${pct(lo)}, ${pct(hi)}]`;
 }
 
-function fmtStrike(s: number): string {
+function fmtStrike(s: number | null): string {
+  if (s === null || !Number.isFinite(s)) return "—";
   return s.toLocaleString("en-US", { maximumFractionDigits: 2 });
 }
 

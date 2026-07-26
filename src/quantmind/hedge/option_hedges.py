@@ -83,16 +83,19 @@ def _select_expiry(chain: pd.DataFrame, as_of: date, min_days: int) -> tuple[str
 
 
 def _usable(row: pd.Series, side: Literal["long", "short"]) -> bool:
+    """A quote is tradable only if the traded-side price, IV, strike AND
+    multiplier are all finite (and positive where zero is nonsense). The
+    strike/multiplier checks are fix-round-1 hardening: a corrupt NaN-strike
+    row iterated first used to poison the closest-strike comparison (every
+    later `dist < nan` is False) and leak NaN into the structure."""
     price = row["ask"] if side == "long" else row["bid"]
     iv = row["iv"]
-    return (
-        price is not None
-        and iv is not None
-        and math.isfinite(float(price))
-        and float(price) > 0
-        and math.isfinite(float(iv))
-        and float(iv) > 0
-    )
+    strike = row["strike"]
+    multiplier = row["multiplier"]
+    for value in (price, iv, strike, multiplier):
+        if value is None or not math.isfinite(float(value)) or float(value) <= 0:
+            return False
+    return True
 
 
 def _pick_leg(

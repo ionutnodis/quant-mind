@@ -16,7 +16,7 @@ from quantmind.api.app import create_app
 from quantmind.datastore.options_store import OptionsSnapshotMeta, OptionsStore
 from quantmind.datastore.store import BarMeta, BarStore
 from quantmind.hedge.cost import BORROW_PROXY_RATE
-from quantmind.risk.returns import rolling_beta
+from quantmind.risk.returns import historical_es, rolling_beta
 
 
 def _bars(n=300, seed=1):
@@ -582,9 +582,11 @@ def test_hedge_option_note_when_no_cached_chain(client):
     assert "chain" in body["option_note"].lower()
 
 
-def _option_client(tmp_path, qty=1000):
+def _option_client(tmp_path, qty=1000, poison_nan_strike=False):
     """Client whose store carries BOTH bars and a cached SPY chain with
-    strikes placed relative to the fixture's actual last close."""
+    strikes placed relative to the fixture's actual last close.
+    `poison_nan_strike` prepends a corrupt NaN-strike put row FIRST (the
+    order that used to let it win closest-strike selection — fix round 1)."""
     store = BarStore(tmp_path)
     meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
     spy_bars = _bars(seed=1)
@@ -599,6 +601,11 @@ def _option_client(tmp_path, qty=1000):
 
     spot = float(spy_bars["close"].iloc[-1])
     rows = []
+    if poison_nan_strike:
+        rows.append(
+            {"expiry": "20261218", "strike": np.nan, "right": "P",
+             "bid": 5.0, "ask": 5.4, "iv": 0.20, "delta": -0.3, "multiplier": 100.0}
+        )
     for frac, bid, ask in [(0.80, 2.0, 2.2), (0.85, 3.0, 3.3), (0.95, 6.0, 6.4)]:
         rows.append(
             {"expiry": "20261218", "strike": round(frac * spot, 2), "right": "P",
@@ -708,3 +715,154 @@ def test_hedge_horizon_labels_present(client):
     # Every risk number renders with its horizon (wave-3 Global Constraint).
     assert "daily" in body["es_note"].lower()
     assert "/yr" in body["cost_note"] or "per year" in body["cost_note"].lower() or "annual" in body["cost_note"].lower()
+
+
+# --- fix round 1 ---
+
+
+def test_hedge_displayed_protection_shares_one_window_with_its_ci(tmp_path):
+    """MUST-FIX regression (review round 1): a candidate whose cached history
+    is a strict, CALMER subset of the book's window must not show phantom
+    protection driven purely by window truncation. The displayed ΔES, its
+    bootstrap CI, protection_per_cost and the tail stats must all share the
+    book∩candidate window; the full-window ES stays the book-level headline
+    only. Pre-fix, protection = es_before(full window, crash days included)
+    − es_after(calm subset) — a Δ that lies entirely OUTSIDE its own 95% CI."""
+    rng = np.random.default_rng(21)
+    idx = pd.bdate_range(end="2026-07-24", periods=300)
+    spy_ret = rng.normal(0.0, 0.01, 300)
+    # Crash days land INSIDE the 1y book window (last 252 bars = idx 48..299)
+    # but BEFORE the candidate's history begins (last 150 bars = idx 150..299).
+    spy_ret[60:130:10] = -0.05
+    spy_close = 100 * np.cumprod(1 + spy_ret)
+    spy_bars = pd.DataFrame(
+        {"open": spy_close, "high": spy_close, "low": spy_close, "close": spy_close, "volume": 1000.0},
+        index=idx,
+    )
+
+    # Candidate: correlated (beta 0.8) with SPY over its own 150-day history.
+    spy_close_s = pd.Series(spy_close, index=idx)
+    sub_ret = spy_close_s.iloc[150:].pct_change().dropna().to_numpy()
+    cand_ret = 0.8 * sub_ret + rng.normal(0, 0.002, len(sub_ret))
+    cand_close = np.empty(150)
+    cand_close[0] = 100.0
+    cand_close[1:] = 100.0 * np.cumprod(1 + cand_ret)
+    cand_bars = pd.DataFrame(
+        {"open": cand_close, "high": cand_close, "low": cand_close, "close": cand_close, "volume": 1000.0},
+        index=idx[150:],
+    )
+
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(con_id=1, bar_size="1d", bars=spy_bars, meta=meta)
+    store.write_bars(con_id=2, bar_size="1d", bars=cand_bars, meta=meta)
+    store.write_symbol_map({"SPY": 1, "NEWER": 2})
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    client = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+
+    r = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "SPY", "qty": 10}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["NEWER"],
+            "years": 1,
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    cand = body["candidates"][0]
+    assert cand["unusable"] is False
+
+    # Hand-recompute the ALIGNED-window ES of the un-hedged book: book returns
+    # (1y window) inner-joined with the candidate's return days.
+    book_ret = spy_close_s.iloc[-252:].pct_change().dropna()
+    cand_ret_s = pd.Series(cand_close, index=idx[150:]).pct_change().dropna()
+    aligned = pd.concat({"book": book_ret, "cand": cand_ret_s}, axis=1).dropna()
+    es_before_aligned = historical_es(aligned["book"], confidence=0.975)
+
+    # The headline stays the full crash-laden window; the candidate row's
+    # es_before is the window-consistent (calmer) one — they must differ here.
+    assert body["es_before"] > es_before_aligned + 0.005
+    assert cand["es_before"] == pytest.approx(es_before_aligned, rel=1e-9)
+
+    # (a) the displayed protection lies inside its own 95% CI…
+    assert cand["protection"] == pytest.approx(cand["es_before"] - cand["es_after"], rel=1e-9)
+    assert cand["delta_es_ci_low"] <= cand["protection"] <= cand["delta_es_ci_high"]
+    # …and the ranking key inherits the window-consistent Δ.
+    assert cand["protection_per_cost"] is None or cand["protection_per_cost"] == pytest.approx(
+        cand["protection"] / cand["cost_annual"], rel=1e-9
+    )
+
+    # (b) the OLD mismatched-window Δ (full-window es_before − aligned
+    # es_after) is the phantom the reviewer described: it falls entirely
+    # outside the CI of the statistic it pretended to be.
+    phantom = body["es_before"] - cand["es_after"]
+    assert not (cand["delta_es_ci_low"] <= phantom <= cand["delta_es_ci_high"])
+
+
+def test_hedge_nan_strike_chain_row_never_reaches_the_response(tmp_path):
+    """Bundled minor 1: a corrupt NaN-strike chain row must not win leg
+    selection, and no leg float may reach the JSON un-cleaned (NaN is not
+    valid JSON)."""
+    client, spot = _option_client(tmp_path, poison_nan_strike=True)
+    r = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "SPY", "qty": 1000}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["QQQ"],
+            "years": 1,
+        },
+    )
+    assert r.status_code == 200
+    assert "NaN" not in r.text  # invalid-JSON NaN literal must never be emitted
+    body = r.json()
+    assert body["option_hedges"], "structures must still build from the healthy rows"
+    for o in body["option_hedges"]:
+        for leg in o["legs"]:
+            assert leg["strike"] is not None and math.isfinite(leg["strike"])
+            assert leg["price"] is not None and math.isfinite(leg["price"])
+    # The healthy 0.95*spot put must be the long leg, not the poison row.
+    pp = next(o for o in body["option_hedges"] if o["kind"] == "protective_put")
+    assert pp["legs"][0]["strike"] == pytest.approx(round(0.95 * spot, 2))
+
+
+def test_hedge_option_note_distinguishes_no_overlap_from_no_payoff(tmp_path):
+    """Bundled minor 2: when the book's return window and the dominant
+    underlier's bars have NO overlapping days, the degrade note must say so —
+    not falsely claim the structures had 'no payoff at the stress node'."""
+    import inspect
+
+    from quantmind.api.routers.hedge import _build_option_hedges
+
+    store = BarStore(tmp_path)
+    spot = 452.0
+    rows = [
+        {"expiry": "20261218", "strike": round(0.95 * spot, 2), "right": "P",
+         "bid": 6.0, "ask": 6.4, "iv": 0.20, "delta": -0.3, "multiplier": 100.0},
+    ]
+    OptionsStore(store.root).write_chain(
+        "SPY", pd.DataFrame(rows), OptionsSnapshotMeta(as_of="2026-07-24", spot=spot)
+    )
+
+    dom_idx = pd.bdate_range(end="2026-07-24", periods=50)
+    book_idx = pd.bdate_range(end="2020-01-03", periods=50)  # disjoint, years earlier
+    kwargs = dict(
+        store=store,
+        dominant="SPY",
+        mv_dominant=452_000.0,
+        dominant_prices=pd.Series(np.linspace(440.0, 452.0, 50), index=dom_idx),
+        book_returns=pd.Series(0.001, index=book_idx),
+        bench_returns=pd.Series(0.001, index=book_idx),
+        book_gross=452_000.0,
+    )
+    # Signature-agnostic: the round-1 fix drops the now-unused es_before
+    # parameter; the red run (pre-fix) still needs to pass it.
+    if "es_before" in inspect.signature(_build_option_hedges).parameters:
+        kwargs["es_before"] = 0.02
+    hedges, note, _chain_as_of = _build_option_hedges(**kwargs)
+    assert hedges == []
+    assert note is not None
+    assert "overlap" in note.lower()
+    assert "stress node" not in note.lower()

@@ -276,6 +276,34 @@ def test_build_structures_skips_unquotable_structure_with_note():
     assert notes == []
 
 
+def test_build_structures_ignores_nan_strike_and_nan_multiplier_rows():
+    """Fix round 1 (bundled minor): a corrupt chain row with a NaN strike (or
+    NaN multiplier) must never win leg selection. Pre-fix, a NaN-strike row
+    iterated FIRST poisoned the closest-strike comparison (every later
+    `dist < nan` is False) and its NaN leaked into the structure."""
+    import math as _math
+
+    poison = pd.DataFrame(
+        [
+            {"expiry": _EXPIRY, "strike": np.nan, "right": "P", "bid": 5.0, "ask": 5.4,
+             "iv": 0.20, "delta": -0.3, "multiplier": 100.0},
+            {"expiry": _EXPIRY, "strike": 435.0, "right": "P", "bid": 7.0, "ask": 7.4,
+             "iv": 0.20, "delta": -0.3, "multiplier": np.nan},
+        ]
+    )
+    chain = pd.concat([poison, _chain()], ignore_index=True)  # poison rows FIRST
+    structures, _notes = build_structures(chain, spot=_SPOT, as_of=_AS_OF)
+    assert structures
+    for s in structures:
+        for leg in s.legs:
+            assert _math.isfinite(leg.strike)
+            assert _math.isfinite(leg.multiplier)
+    # The healthy 430P (closest usable to 0.95*spot; the NaN-multiplier 435P
+    # is closer but corrupt) is still the long leg everywhere.
+    pp = next(s for s in structures if s.kind == "protective_put")
+    assert pp.legs[0].strike == 430.0
+
+
 def test_build_structures_empty_chain_returns_note():
     structures, notes = build_structures(_chain().iloc[0:0], spot=_SPOT, as_of=_AS_OF)
     assert structures == []

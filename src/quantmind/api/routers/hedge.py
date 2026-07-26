@@ -184,9 +184,12 @@ class HedgeCandidateOut(BaseModel):
 
 class OptionLegOut(BaseModel):
     action: Literal["long", "short"]
-    strike: float
+    # Nullable purely as NaN->null insurance (fix round 1): chain selection
+    # refuses non-finite strikes/prices, and clean() here guarantees a NaN
+    # can never serialize as an invalid JSON literal.
+    strike: float | None
     right: Literal["C", "P"]
-    price: float  # per-share premium at the traded side (ask long / bid short)
+    price: float | None  # per-share premium at the traded side (ask long / bid short)
 
 
 class OptionHedgeOut(BaseModel):
@@ -378,6 +381,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         unusable = beta_cand is None or not math.isfinite(beta_cand) or abs(beta_cand) < _MIN_BETA_ABS
 
         hedge_qty = hedge_notional = es_after = protection = residual_beta = None
+        es_before_aligned = None
         carry_drag = borrow_proxy = cost_annual = ppc = None
         ci_low = ci_high = None
         tail_n_days = tail_mean_book = tail_mean_hedged = None
@@ -406,8 +410,25 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                         es_after = clean(historical_es(hedged_returns, confidence=0.975))
                     except InsufficientDataError:
                         es_after = None
-                    if es_before is not None and es_after is not None:
-                        protection = es_before - es_after
+
+                    # Window consistency (fix round 1): the DISPLAYED ΔES must
+                    # be computed on the SAME book∩candidate window as
+                    # es_after, the bootstrap CI and the tail stats. Using the
+                    # full-window es_before here manufactured phantom
+                    # protection for any candidate with shorter cached history
+                    # (the truncated window simply misses the book's worst
+                    # days) — a Δ that could fall entirely outside its own CI
+                    # and poison protection_per_cost, THE ranking key. The
+                    # full-window es_before remains the response-level
+                    # headline only.
+                    try:
+                        es_before_aligned = clean(
+                            historical_es(aligned_overlay["book"], confidence=0.975)
+                        )
+                    except InsufficientDataError:
+                        es_before_aligned = None
+                    if es_before_aligned is not None and es_after is not None:
+                        protection = es_before_aligned - es_after
 
                     # Cost columns (hedge/cost.py): carry drag + borrow
                     # proxy, fractions of the ORIGINAL gross per year.
@@ -457,7 +478,10 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                 unusable=unusable,
                 hedge_qty=clean(hedge_qty),
                 hedge_notional=clean(hedge_notional),
-                es_before=es_before,
+                # Window-consistent (fix round 1): the candidate row's
+                # es_before shares es_after/CI/tail's book∩candidate window;
+                # the full-window number is the response-level headline.
+                es_before=es_before_aligned,
                 es_after=es_after,
                 protection=clean(protection),
                 carry_drag_annual=carry_drag,
@@ -501,7 +525,6 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         book_returns=book_returns,
         bench_returns=bench_returns,
         book_gross=book_gross,
-        es_before=es_before,
     )
     option_hedges.sort(key=lambda o: _rank_key(o.protection_per_cost, o.protection))
 
@@ -571,7 +594,6 @@ def _build_option_hedges(
     book_returns: pd.Series,
     bench_returns: pd.Series,
     book_gross: float,
-    es_before: float | None,
 ) -> tuple[list[OptionHedgeOut], str | None, str | None]:
     """(option_hedges, option_note, chain_as_of): protective structures on
     the dominant underlier from the cached chain. Every degrade path returns
@@ -607,10 +629,20 @@ def _build_option_hedges(
 
     dom_returns = dominant_prices.pct_change().dropna()
     aligned = pd.concat({"book": book_returns, "dom": dom_returns}, axis=1).dropna()
+    # Distinct degrade cause (fix round 1): an empty overlap window is a DATA
+    # gap, not a payoff property of the structures — say so honestly instead
+    # of blaming the stress node.
+    if len(aligned) == 0:
+        return (
+            [],
+            f"no overlapping trading days between the book's return window and "
+            f"{dominant}'s cached bars — option overlay unavailable",
+            meta.as_of,
+        )
 
     out: list[OptionHedgeOut] = []
     for st in structures:
-        entry = _price_structure(st, mv_dominant, spot, aligned, bench_returns, book_gross, es_before)
+        entry = _price_structure(st, mv_dominant, spot, aligned, bench_returns, book_gross)
         if entry is None:
             notes.append(f"{st.kind}: no payoff at the {_OPTION_SHOCK:+.0%} stress node — unsized")
             continue
@@ -633,10 +665,12 @@ def _price_structure(
     aligned: pd.DataFrame,
     bench_returns: pd.Series,
     book_gross: float,
-    es_before: float | None,
 ) -> OptionHedgeOut | None:
+    """None means exactly one thing: the sized structure has no payoff at the
+    stress node (the caller's note says so). The empty-overlap case is
+    handled — and named — by the caller before this runs (fix round 1)."""
     contracts = size_contracts(st, mv_underlier=mv_dominant, spot=spot, shock=_OPTION_SHOCK)
-    if contracts is None or len(aligned) == 0:
+    if contracts is None:
         return None
 
     pnl = structure_daily_pnl(st, contracts=contracts, spot=spot, underlier_returns=aligned["dom"])
@@ -648,7 +682,18 @@ def _price_structure(
         es_after = clean(historical_es(hedged_returns, confidence=0.975))
     except InsufficientDataError:
         es_after = None
-    protection = es_before - es_after if es_before is not None and es_after is not None else None
+    # Window consistency (fix round 1): same discipline as the linear
+    # candidates — the displayed ΔES shares es_after/CI/tail's book∩dominant
+    # window, never the full-window headline.
+    try:
+        es_before_aligned = clean(historical_es(aligned["book"], confidence=0.975))
+    except InsufficientDataError:
+        es_before_aligned = None
+    protection = (
+        es_before_aligned - es_after
+        if es_before_aligned is not None and es_after is not None
+        else None
+    )
 
     cost_annual = clean(
         premium_annual_drag(st.net_premium_per_contract, contracts, book_gross, st.expiry_years)
@@ -669,13 +714,18 @@ def _price_structure(
         expiry=st.expiry,
         expiry_years=clean(st.expiry_years),
         legs=[
-            OptionLegOut(action=leg.action, strike=leg.strike, right=leg.right, price=leg.price)
+            # clean() is defense-in-depth (fix round 1): build_structures'
+            # _usable already refuses non-finite strikes/prices, but a NaN
+            # must never reach the JSON layer even if a future path slips.
+            OptionLegOut(
+                action=leg.action, strike=clean(leg.strike), right=leg.right, price=clean(leg.price)
+            )
             for leg in st.legs
         ],
         contracts=clean(contracts),
         net_premium_per_contract=clean(st.net_premium_per_contract),
         cost_annual=cost_annual,
-        es_before=es_before,
+        es_before=es_before_aligned,
         es_after=es_after,
         protection=clean(protection),
         protection_per_cost=clean(ppc),
