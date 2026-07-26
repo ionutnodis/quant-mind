@@ -124,8 +124,14 @@ test("renders positions table with cost basis, unrealized P&L, and totals from t
   expect(table.getAllByText("100.00").length).toBeGreaterThan(0); // last_close and unrealized_pnl both 100.00
   expect(table.getByText("1000.00")).toBeInTheDocument();
   expect(table.getByText("2500.00")).toBeInTheDocument();
-  // cost basis / unrealized P&L
+  // cost basis / unrealized P&L — book P&L renders AMBER regardless of sign
+  // (DESIGN.md amber law + Lab Apply-to-Book / WhatIf precedent); green/red
+  // stays reserved for market up/down data.
   expect(table.getByText("90.00")).toBeInTheDocument();
+  const totalsUnrealized = table.getByTestId("totals-unrealized-pnl");
+  expect(totalsUnrealized).toHaveClass("text-you");
+  expect(totalsUnrealized).not.toHaveClass("text-up");
+  expect(totalsUnrealized).not.toHaveClass("text-down");
   // weight formatting
   expect(table.getByText("28.6%")).toBeInTheDocument();
   expect(table.getByText("71.4%")).toBeInTheDocument();
@@ -248,4 +254,11 @@ test("attribution renders core/overlay split and chart when available", async ()
   expect(await screen.findByTestId("portfolio-attribution-chart-stub")).toBeInTheDocument();
   expect(screen.getByText("Core (beta x bench)")).toBeInTheDocument();
   expect(screen.getByText("Overlay (residual)")).toBeInTheDocument();
+  // total book P&L is AMBER regardless of sign (DESIGN.md amber law:
+  // "P&L attribution" is book data; Lab/WhatIf precedent).
+  const total = screen.getByTestId("attribution-total-pnl");
+  expect(total).toHaveTextContent("400");
+  expect(total).toHaveClass("text-you");
+  expect(total).not.toHaveClass("text-up");
+  expect(total).not.toHaveClass("text-down");
 });

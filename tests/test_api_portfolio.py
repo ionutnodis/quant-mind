@@ -387,6 +387,63 @@ def test_options_sleeve_populated_via_book_ref_with_chain_data(store):
     assert exp["net_delta"] != pytest.approx(0.0)
 
 
+def test_multi_leg_book_ref_market_values_are_per_position_not_per_conid(store):
+    # Fix-round-1 CRITICAL (reviewer live repro): a book_ref book's legs all
+    # share the synthetic con_id (= symbol_map[underlier]), so any con_id-
+    # keyed dict in the ledger path collapses a multi-leg book — a 2-leg SPY
+    # book (qty 1 @ 105c, qty 5 @ 110c, underlier close 100.0) reported BOTH
+    # positions as market_value 50000.0 / weight 1.0 and totals 50000.0.
+    # Correct: 10000 / 50000, weights 1/6 / 5/6, total 60000.
+    expiry = _expiry_str(45)
+    rows = [
+        {
+            "expiry": expiry, "strike": strike, "right": "C", "con_id": 3000 + i,
+            "bid": 1.0, "ask": 1.2, "iv": 0.25, "delta": 0.5, "multiplier": 100.0,
+        }
+        for i, strike in enumerate((105.0, 110.0))
+    ]
+    _write_chain(store, "SPY", rows, spot=100.0)
+
+    client = _client(store, broker=None)
+    pin = client.post(
+        "/api/book/pin",
+        json={
+            "positions": [
+                {"symbol": "SPY", "qty": 1, "strike": 105.0, "expiry": expiry, "right": "C"},
+                {"symbol": "SPY", "qty": 5, "strike": 110.0, "expiry": expiry, "right": "C"},
+            ]
+        },
+    )
+    assert pin.status_code == 200
+    snapshot_id = pin.json()["snapshot_id"]
+
+    body = client.get("/api/portfolio", params={"book_ref": snapshot_id}).json()
+    assert len(body["positions"]) == 2
+
+    by_qty = {p["qty"]: p for p in body["positions"]}
+    assert by_qty[1]["market_value"] == pytest.approx(1 * 100.0 * 100.0)  # 10000, NOT 50000
+    assert by_qty[5]["market_value"] == pytest.approx(5 * 100.0 * 100.0)  # 50000
+    assert body["totals"]["market_value"] == pytest.approx(60000.0)
+    assert by_qty[1]["weight"] == pytest.approx(10000.0 / 60000.0)
+    assert by_qty[5]["weight"] == pytest.approx(50000.0 / 60000.0)
+
+
+def test_options_sleeve_distinct_reason_when_option_underlier_not_in_cache(store):
+    # Fix-round-1 MINOR: an OPT position whose underlier has no symbol-map
+    # entry (or no cached bars) used to fall through to the generic "chain
+    # not ingested" reason — it must name the real problem instead.
+    portfolio = Portfolio(
+        positions=(Position(con_id=555, symbol="NOPE", qty=1, sec_type="OPT", multiplier=100.0),),
+        as_of="2026-07-24",
+    )
+    client = _client(store, broker=FakeBroker(portfolio))
+    body = client.get("/api/portfolio").json()
+    sleeve = body["options_sleeve"]
+    assert sleeve["available"] is False
+    assert "NOPE" in sleeve["reason"]
+    assert sleeve["reason"] != "chain not ingested — run options_sync"
+
+
 # --- Expiry buckets ---
 
 

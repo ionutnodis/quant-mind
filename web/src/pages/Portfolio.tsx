@@ -129,10 +129,11 @@ function fmtPct(v: number | null, digits = 1): string {
   return v === null || !Number.isFinite(v) ? "—" : `${(v * 100).toFixed(digits)}%`;
 }
 
-function pnlClass(v: number | null): string {
-  if (v === null || !Number.isFinite(v) || v === 0) return "text-muted";
-  return v > 0 ? "text-up" : "text-down";
-}
+// Book P&L values are AMBER, sign carried by the number itself (fix-round-1:
+// DESIGN.md's amber law covers "P&L attribution", and the established
+// precedent — Lab's Apply-to-Book results, WhatIf's book-risk blocks — wraps
+// book P&L in text-you regardless of sign; green/red stays reserved for
+// market up/down data, e.g. Today's overnight strip).
 
 const EXPIRY_BUCKETS: { key: keyof ExpiryBuckets; label: string }[] = [
   { key: "le_7d", label: "≤ 7d" },
@@ -211,7 +212,7 @@ export function Portfolio() {
                   <td className="num py-1.5 text-right">{fmtNum(p.qty, 0)}</td>
                   <td className="num py-1.5 text-right">{fmtNum(p.last_close)}</td>
                   <td className="num py-1.5 text-right">{fmtNum(p.avg_cost)}</td>
-                  <td className={`num py-1.5 text-right ${pnlClass(p.unrealized_pnl)}`}>{fmtNum(p.unrealized_pnl)}</td>
+                  <td className="num py-1.5 text-right text-you">{fmtNum(p.unrealized_pnl)}</td>
                   <td className="num py-1.5 text-right text-you">{fmtNum(p.market_value)}</td>
                   <td className="num py-1.5 text-right text-you">{fmtWeight(p.weight)}</td>
                 </tr>
@@ -225,7 +226,7 @@ export function Portfolio() {
                 <td />
                 <td />
                 <td />
-                <td className={`num py-1.5 text-right ${pnlClass(data.totals.unrealized_pnl)}`}>
+                <td className="num py-1.5 text-right text-you" data-testid="totals-unrealized-pnl">
                   {fmtNum(data.totals.unrealized_pnl)}
                 </td>
                 <td className="num py-1.5 text-right text-you">{fmtNum(data.totals.market_value)}</td>
@@ -338,7 +339,7 @@ export function Portfolio() {
             <div className="grid grid-cols-3 gap-x-4 gap-y-2">
               <div>
                 <div className="text-[10px] tracking-wider uppercase text-muted">Total P&L</div>
-                <div className={`num text-lg ${pnlClass(data.attribution.total_pnl)}`}>{fmtNum(data.attribution.total_pnl, 0)}</div>
+                <div className="num text-lg text-you" data-testid="attribution-total-pnl">{fmtNum(data.attribution.total_pnl, 0)}</div>
               </div>
               <div>
                 <div className="text-[10px] tracking-wider uppercase text-muted">Core (beta x bench)</div>

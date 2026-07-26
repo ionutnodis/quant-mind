@@ -376,14 +376,16 @@ def _bucket_expiry_legs(rows: list[ExpiryLegOut]) -> ExpiryBucketsOut:
 
 
 def _book_return_series(
-    close_series: dict[int, pd.Series], market_values: dict[int, float | None]
+    close_series: dict[int, pd.Series], market_values: dict[int, float]
 ) -> tuple[pd.Series, float] | None:
-    """Weighted daily return series over every priced position (weights are
+    """Weighted daily return series over every priced conId (weights are
     fractions of GROSS |market value| — hedge.py's `_portfolio_returns`
     convention), plus the gross value the caller must use as the dollar
     scale for any per-book-dollar quantity built from this series (module
     docstring's normalization convention, same one routers/hedge.py's
-    overlay math documents)."""
+    overlay math documents). `market_values` is per-CONID (the caller sums
+    per-position values into it — multiple legs sharing a conId share one
+    return column, so their dollar weights add)."""
     con_ids = [cid for cid, series in close_series.items() if market_values.get(cid) is not None]
     if not con_ids:
         return None
@@ -403,7 +405,7 @@ def _book_return_series(
 def _compute_attribution(
     store,
     close_series: dict[int, pd.Series],
-    market_values: dict[int, float | None],
+    market_values: dict[int, float],
     benchmark: str,
     symbol_map: dict[str, int],
     window_days: int,
@@ -506,25 +508,33 @@ async def get_portfolio(
     if book_ref is None and broker is not None:
         avg_costs = await _resolve_avg_costs(broker)
 
+    # Per-POSITION lists, positionally aligned with portfolio.positions —
+    # never keyed by con_id (fix-round-1 CRITICAL, reviewer live-reproduced):
+    # a book_ref book's legs all share the synthetic con_id
+    # (= symbol_map[underlier], the same collapse already fixed for
+    # exposure/expiry_buckets), so a con_id-keyed dict here made every leg
+    # of a multi-leg book overwrite the last — a 2-leg SPY book reported
+    # both positions at the LAST leg's market value and weight 1.0 each.
+    # `close_series` alone stays con_id-keyed: the price SERIES really is
+    # per-conId (every leg on one underlier reads the same bars).
     close_series: dict[int, pd.Series] = {}
-    last_closes: dict[int, float | None] = {}
-    market_values: dict[int, float | None] = {}
+    last_closes: list[float | None] = []
+    market_values: list[float | None] = []
     for p in portfolio.positions:
-        series = _close_series(store, p.con_id)
-        if series is not None:
-            close_series[p.con_id] = series
-        last_close = _last_close(series)
-        last_closes[p.con_id] = last_close
-        market_values[p.con_id] = clean(p.qty * p.multiplier * last_close) if last_close is not None else None
+        if p.con_id not in close_series:
+            series = _close_series(store, p.con_id)
+            if series is not None:
+                close_series[p.con_id] = series
+        last_close = _last_close(close_series.get(p.con_id))
+        last_closes.append(last_close)
+        market_values.append(clean(p.qty * p.multiplier * last_close) if last_close is not None else None)
 
-    known_mvs = [mv for mv in market_values.values() if mv is not None]
+    known_mvs = [mv for mv in market_values if mv is not None]
     total_mv = sum(known_mvs) if known_mvs else None
 
     positions_out: list[PositionOut] = []
     unrealized_values: list[float] = []
-    for p in portfolio.positions:
-        last_close = last_closes[p.con_id]
-        mv = market_values[p.con_id]
+    for p, last_close, mv in zip(portfolio.positions, last_closes, market_values):
         avg_cost = clean(avg_costs.get(p.con_id))
         unrealized = (
             clean((last_close - avg_cost) * p.qty * p.multiplier)
@@ -568,15 +578,25 @@ async def get_portfolio(
     has_option_positions = any(p.sec_type == "OPT" for p in portfolio.positions)
     book_legs: list[BookLeg] = []
     priced_option_underliers: set[str] = set()
+    # Option underliers dropped BEFORE the chain lookup (no symbol-map entry
+    # or no cached bars) — the sleeve's honest-empty reason must name them
+    # rather than blame the chain (fix-round-1 minor: an unknown-symbol OPT
+    # leg used to fall through to the generic "chain not ingested" reason).
+    unpriceable_option_underliers: set[str] = set()
     expiry_rows: list[ExpiryLegOut] = []
     underlier_betas: dict[str, float | None] = {}
 
     for underlier, group in groups.items():
+        group_has_options = any(p.sec_type == "OPT" for p, _ in group)
         if underlier not in symbol_map:
+            if group_has_options:
+                unpriceable_option_underliers.add(underlier)
             continue
         spot_series = _close_series(store, symbol_map[underlier])
         spot = _last_close(spot_series)
         if spot is None:
+            if group_has_options:
+                unpriceable_option_underliers.add(underlier)
             continue
 
         if underlier == benchmark:
@@ -621,9 +641,14 @@ async def get_portfolio(
     if not has_option_positions:
         options_sleeve = OptionsSleeveOut(available=False, reason="no option positions", underlyings=[], stress_grid=None)
     elif not priced_option_underliers:
-        options_sleeve = OptionsSleeveOut(
-            available=False, reason="chain not ingested — run options_sync", underlyings=[], stress_grid=None
-        )
+        if unpriceable_option_underliers:
+            reason = (
+                f"option underliers not in cached universe: {sorted(unpriceable_option_underliers)} — "
+                "sync bars first"
+            )
+        else:
+            reason = "chain not ingested — run options_sync"
+        options_sleeve = OptionsSleeveOut(available=False, reason=reason, underlyings=[], stress_grid=None)
     else:
         sleeve_legs = [leg for leg in book_legs if leg.underlier in priced_option_underliers]
         grid = aggregate_book_stress_grid(sleeve_legs)
@@ -644,8 +669,18 @@ async def get_portfolio(
 
     expiry_buckets = _bucket_expiry_legs(expiry_rows)
 
+    # Attribution's book-return series IS per-conId (one price series per
+    # conId), so per-position market values are SUMMED into a per-conId
+    # dollar weight — legs sharing a conId share a return column, and their
+    # dollar exposures simply add (the same weights-add convention
+    # _shared.weighted_portfolio_returns documents for repeated symbols).
+    mv_by_conid: dict[int, float] = {}
+    for p, mv in zip(portfolio.positions, market_values):
+        if mv is not None:
+            mv_by_conid[p.con_id] = mv_by_conid.get(p.con_id, 0.0) + mv
+
     attribution = _compute_attribution(
-        store, close_series, market_values, benchmark, symbol_map, attribution_days
+        store, close_series, mv_by_conid, benchmark, symbol_map, attribution_days
     )
 
     return PortfolioResponse(
