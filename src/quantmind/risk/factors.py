@@ -40,9 +40,12 @@ from quantmind.risk.returns import InsufficientDataError
 
 # Rule-of-thumb dof cushion: require at least this many observations per
 # fitted parameter (intercept + one per factor), floored so a single-factor
-# CAPM fit still demands a reasonable minimum sample.
+# CAPM fit still demands a reasonable minimum sample. MIN_FACTOR_WINDOW is
+# public: routers/risk.py's `window` Query floor points at this SAME constant
+# so the API can never accept a window the core is guaranteed to reject
+# (batch-1 final review adjudication d).
 _MIN_OBS_PER_PARAM = 10
-_MIN_OBS_FLOOR = 30
+MIN_FACTOR_WINDOW = 30
 
 
 def _require(condition: bool, message: str) -> None:
@@ -106,10 +109,14 @@ def factor_regression(
     """
     _require(len(factors) > 0, "factor_regression requires at least one factor")
     names = list(factors.keys())
-    aligned = pd.concat({"y": y, **factors}, axis=1).dropna()
+    # Non-finite observations (a zero close upstream makes pct_change emit
+    # +/-inf) are missing data: dropna() alone doesn't drop inf, and leaving
+    # them in makes statsmodels raise MissingDataError instead of fitting
+    # (batch-1 final review F2).
+    aligned = pd.concat({"y": y, **factors}, axis=1).replace([np.inf, -np.inf], np.nan).dropna()
     n_obs = len(aligned)
     k = len(names)
-    min_obs = max(_MIN_OBS_FLOOR, _MIN_OBS_PER_PARAM * (k + 1))
+    min_obs = max(MIN_FACTOR_WINDOW, _MIN_OBS_PER_PARAM * (k + 1))
     _require(
         n_obs >= min_obs,
         f"{n_obs} overlapping observations insufficient for a {k}-factor regression (need >= {min_obs})",

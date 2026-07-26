@@ -197,6 +197,26 @@ def test_empty_store_never_500(tmp_path):
     assert len(body["missing"]) == 10
 
 
+def test_all_constant_close_universe_never_500s(tmp_path):
+    # >= 3 constant-close symbols over the window make EVERY pairwise
+    # correlation NaN (zero variance), so cluster_order's avg-corr idxmax()
+    # used to raise ValueError on an all-NaN series -> 500 (batch-1 final
+    # review F1). It must fall back to column order and serve the honest
+    # all-null matrix instead.
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    for i, symbol in enumerate(["E", "F", "G"], start=1):
+        store.write_bars(con_id=i, bar_size="1d", bars=_bars_from_returns(np.zeros(N_BARS)), meta=meta)
+    store.write_symbol_map({"E": 1, "F": 2, "G": 3})
+
+    r = _client(store).post("/api/rotation", json={"universe": "custom", "symbols": ["E", "F", "G"]})
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body["symbols"]) == {"E", "F", "G"}
+    # zero-variance correlations serialize as honest nulls, never NaN tokens
+    assert all(v is None for row in body["matrix"] for v in row)
+
+
 # --- cluster_order unit tests (pure helper, hand-computed) ---
 
 
@@ -248,6 +268,16 @@ def test_cluster_order_handles_nan_without_crashing():
     corr = _corr_df(labels, matrix)
     order = cluster_order(corr)
     assert set(order) == set(labels)
+
+
+def test_cluster_order_all_nan_corr_falls_back_to_column_order():
+    # No "most central" symbol exists when every correlation is NaN (e.g.
+    # all-constant closes) — column order is the honest deterministic
+    # fallback, not a ValueError from idxmax() (F1).
+    labels = ["A", "B", "C"]
+    matrix = [[np.nan] * 3 for _ in range(3)]
+    corr = _corr_df(labels, matrix)
+    assert cluster_order(corr) == labels
 
 
 # --- rank_other_side unit tests (pure helper, hand-built rows) ---

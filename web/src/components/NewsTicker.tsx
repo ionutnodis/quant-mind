@@ -141,6 +141,17 @@ export function NewsTicker() {
           <NewsRow key={`b-${item.time}-${i}`} item={item} />
         ))}
       </div>
+      {/* as-of stamp (DESIGN.md: every data panel carries one — F7) —
+          pinned subtly over the scrolling track, surface-backed so it stays
+          readable as headlines pass underneath. */}
+      {data.as_of && (
+        <span
+          data-testid="news-as-of"
+          className="num absolute bottom-0 right-0 z-10 bg-surface px-1 text-[9px] text-muted"
+        >
+          as of {hhmm(data.as_of)}
+        </span>
+      )}
     </div>
   );
 }

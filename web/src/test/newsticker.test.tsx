@@ -47,6 +47,8 @@ test("renders headlines with source/symbol from the API", async () => {
   expect(screen.getAllByText("SPY").length).toBeGreaterThan(0);
   // items render twice (seamless loop track)
   expect(screen.getAllByTestId("news-item").length).toBe(4);
+  // as-of stamp (DESIGN.md: every data panel carries one) — subtle, in-ticker
+  expect(screen.getByTestId("news-as-of")).toHaveTextContent("as of 12:00Z");
 });
 
 test("click-through renders as a link when url is present, plain row otherwise", async () => {

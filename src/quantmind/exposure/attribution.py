@@ -54,7 +54,9 @@ def decompose_book_pnl(
     and routers/hedge.py's alignment convention elsewhere in the repo).
     Raises InsufficientDataError (never returns a silently empty frame) when
     the two series share no observations."""
-    aligned = pd.concat({"book": book_returns, "bench": bench_returns}, axis=1).dropna()
+    # sort=True pins today's union-index sorting explicitly (pandas 4 flips
+    # concat's default to sort=False; silences Pandas4Warning — F11).
+    aligned = pd.concat({"book": book_returns, "bench": bench_returns}, axis=1, sort=True).dropna()
     if aligned.empty:
         raise InsufficientDataError("no overlapping book/benchmark return observations")
 

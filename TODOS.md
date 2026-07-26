@@ -49,6 +49,14 @@
 - **What:** Breakpoint behavior for sidebar, tile strip, and panels below ~1024px.
 - **Why:** Desktop-first is deliberate (personal tool, external monitor), but a laptop-width squeeze currently gets no accommodations.
 
+## Deferred from Batch-1 final review
+- **BookBuilder pinned-state chip** — show which pinned `book_ref` a builder is editing (Batch 2).
+- **BookBuilder option-leg inputs** — strike/expiry/right rows in the shared builder (Batch 2 What-If spec).
+- **Cosmetics** — dead `rng` fixture and aligned-sample comment cleanups flagged in review.
+- **Drift-artifact commit-ordering process note (F9)** — regenerate `openapi.json` + `web/src/lib/api-types.ts` in the SAME commit as the schema change, per-commit not per-batch, so no intermediate commit fails the drift gate.
+- **Radix vs plain-div popovers** — InstrumentHover/Sheet are plain positioned divs today; adopting Radix primitives (DESIGN.md component base) is pending user decision.
+- **NewsTicker relevance-filter tuning** — keyword/symbol filter precision beyond the new "showing latest broadtape" fallback.
+
 ## Pre-wave-3 consolidation pass (final-review mandated, 2026-07-25)
 - **What:** Extract shared `api/routers/_shared.py` (`_clean`, `_iso`, `_read_close_series`, the qty-nonzero PositionIn model — currently 7/4/2/2 duplicated copies); shared `BookBuilder` React component (Hedge's string-qty variant as base — WhatIf and Hedge have diverging row-builders); align Hedge's degenerate-input 422s (gross<=0, non-finite closes) with WhatIf's named-422 policy; narrow the Engle-Granger broad except.
 - **Why:** Wave-2's exclusive-file-ownership rules tripled helper duplication (right tradeoff then, wrong to keep); any NaN-policy change now needs 7 edits; a third row-builder copy in wave 3 locks in drift.

@@ -182,6 +182,17 @@ test("delta-adjusted exposure table renders per-underlier rows", async () => {
   expect(rows.length).toBeGreaterThan(0);
 });
 
+test("data panels carry the ledger as-of stamp and the beta window label", async () => {
+  server.use(http.get("/api/portfolio", () => HttpResponse.json(TWO_POSITIONS)));
+  renderPortfolio();
+  await screen.findByTestId("positions-table");
+  // Ledger note + Exposure/Sleeve/Buckets/Attribution panel notes all carry
+  // the ledger as-of (DESIGN.md: every data panel carries one — F7).
+  expect(screen.getAllByText(/as of 2026-07-25/).length).toBeGreaterThanOrEqual(5);
+  // Beta column labeled with its window, matching Today's convention (F8).
+  expect(screen.getByText("Beta (60d)")).toBeInTheDocument();
+});
+
 test("options sleeve shows honest empty reason when unavailable", async () => {
   server.use(http.get("/api/portfolio", () => HttpResponse.json(TWO_POSITIONS)));
   renderPortfolio();

@@ -64,6 +64,11 @@ _YEARS_OF_HISTORY = 5
 _MAX_ATTRIBUTION_POINTS = 500
 _EXPIRY_BUCKET_DAYS = (7, 30, 90)
 
+# Never-500 law, news.py's request-failed-note pattern for the same
+# Gateway-death condition (batch-1 final review F3): the flagship page
+# degrades to an honest empty book + note when the broker dies mid-session.
+_BROKER_FAILED_NOTE = "book request failed — Gateway connection error; showing empty book"
+
 
 class PositionOut(BaseModel):
     con_id: int
@@ -258,9 +263,13 @@ async def _resolve_account(broker, book_ref: str | None) -> tuple[AccountOut | N
         return None, "broker does not report account summary"
     try:
         summary = await get_account_summary()
+        # Construction lives INSIDE the try (F6): a partial dict raises
+        # ValidationError -> honest null account, never a 500; clean() keeps
+        # a NaN/Inf float from ever reaching the serialized response.
+        account = AccountOut(**{k: clean(v) for k, v in summary.items()})
     except Exception:
-        return None, "account summary unavailable (broker request failed)"
-    return AccountOut(**summary), None
+        return None, "account summary unavailable (broker request failed or malformed summary)"
+    return account, None
 
 
 def _book_from_book_ref(store, book_ref: str) -> tuple[Portfolio, list[object | None]]:
@@ -488,6 +497,7 @@ async def get_portfolio(
 
     valuation_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    broker_failed = False
     if book_ref is not None:
         portfolio, option_legs = _book_from_book_ref(store, book_ref)
         valuation_ts = portfolio.as_of
@@ -495,7 +505,13 @@ async def get_portfolio(
         portfolio = Portfolio(positions=(), as_of=valuation_ts)
         option_legs = []
     else:
-        portfolio = await broker.get_portfolio()
+        try:
+            portfolio = await broker.get_portfolio()
+        except Exception:
+            # Gateway death mid-session (F3): degrade exactly like
+            # broker=None, but say so honestly via _BROKER_FAILED_NOTE.
+            portfolio = Portfolio(positions=(), as_of=valuation_ts)
+            broker_failed = True
         # Live-broker positions never carry strike/expiry (module docstring)
         # — one `None` leg per position, positionally aligned like the
         # book_ref path.
@@ -505,7 +521,7 @@ async def get_portfolio(
 
     # --- ledger essentials: price, cost basis, unrealized P&L ---
     avg_costs: dict[int, float] = {}
-    if book_ref is None and broker is not None:
+    if book_ref is None and broker is not None and not broker_failed:
         avg_costs = await _resolve_avg_costs(broker)
 
     # Per-POSITION lists, positionally aligned with portfolio.positions —
@@ -564,7 +580,10 @@ async def get_portfolio(
         unrealized_pnl=(sum(unrealized_values) if unrealized_values else None),
     )
 
-    account, account_note = await _resolve_account(broker, book_ref)
+    if broker_failed:
+        account, account_note = None, _BROKER_FAILED_NOTE
+    else:
+        account, account_note = await _resolve_account(broker, book_ref)
 
     # --- delta-adjusted exposure + options sleeve + expiry buckets ---
     symbol_map = store.read_symbol_map()

@@ -6,6 +6,7 @@ missing/empty book -> structured empty, never a 500.
 
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 
 import numpy as np
@@ -511,3 +512,64 @@ def test_attribution_available_with_sufficient_history(rich_store):
     for point in attribution["series"]:
         assert point["date"].endswith("Z")
         assert point["total_pnl"] == pytest.approx(point["core_pnl"] + point["overlay_pnl"], abs=1e-6)
+
+
+# --- Never-500 guards: broker death mid-session + account summary hygiene ---
+
+
+class DeadBroker:
+    """Gateway died mid-session: every broker call raises (batch-1 final
+    review F3 — the flagship page must degrade to an honest empty book +
+    note, never a 500)."""
+
+    async def get_portfolio(self) -> Portfolio:
+        raise ConnectionError("gateway dropped")
+
+    async def get_account_summary(self):
+        raise ConnectionError("gateway dropped")
+
+
+def test_broker_get_portfolio_failure_degrades_to_empty_book_not_500(store):
+    client = _client(store, broker=DeadBroker())
+    r = client.get("/api/portfolio")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["positions"] == []
+    assert body["totals"]["n_positions"] == 0
+    assert body["account"] is None
+    assert body["account_note"]
+    assert "failed" in body["account_note"]
+
+
+def test_account_summary_nan_value_serializes_as_null_not_nan_token(store):
+    # F6: AccountOut floats bypassed clean() — a NaN from the broker
+    # serialized as a bare NaN token (invalid JSON). parse_constant trips
+    # if any non-finite token sneaks into the body.
+    summary = {
+        "net_liquidation": float("nan"),
+        "total_cash_value": 20000.0,
+        "gross_position_value": 105000.5,
+        "buying_power": 60000.0,
+    }
+    broker = FakeBroker(Portfolio(positions=(), as_of="2026-07-24"), account_summary=summary)
+    r = _client(store, broker=broker).get("/api/portfolio")
+    assert r.status_code == 200
+    body = json.loads(
+        r.text, parse_constant=lambda tok: pytest.fail(f"non-finite JSON token {tok!r} in body")
+    )
+    assert body["account"]["net_liquidation"] is None
+    assert body["account"]["total_cash_value"] == pytest.approx(20000.0)
+
+
+def test_account_summary_missing_key_degrades_to_null_account_not_500(store):
+    # F6: AccountOut(**summary) was built OUTSIDE the try — a partial dict
+    # raised ValidationError -> 500. It must degrade to a null account + note.
+    broker = FakeBroker(
+        Portfolio(positions=(), as_of="2026-07-24"),
+        account_summary={"net_liquidation": 125000.5},
+    )
+    r = _client(store, broker=broker).get("/api/portfolio")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["account"] is None
+    assert body["account_note"]

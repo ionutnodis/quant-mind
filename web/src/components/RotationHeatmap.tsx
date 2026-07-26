@@ -13,7 +13,7 @@
 // (negative corr) x (positive recent return) — "where is the money
 // flowing?" — typically clicked on a symbol that's down, though nothing
 // here enforces that; the ranking is honest either way.
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { request } from "../lib/api";
 import { CorrelationHeatmap } from "./CorrelationHeatmap";
@@ -73,7 +73,7 @@ function num4(x: number | null): string {
   return x.toFixed(4);
 }
 
-export function RotationHeatmap() {
+export function RotationHeatmap({ onAsOf }: { onAsOf?: (asOf: string | null) => void } = {}) {
   const [universe, setUniverse] = useState<Universe>("sectors");
   const [corrWindow, setCorrWindow] = useState<CorrWindow>(60);
   const [returnDays, setReturnDays] = useState(5);
@@ -117,6 +117,13 @@ export function RotationHeatmap() {
     staleTime: 30 * 1000,
     retry: false,
   });
+
+  // Report the data's as-of upward so Today's Rotation Panel note can carry
+  // the stamp (DESIGN.md: every data panel carries one — F7).
+  const asOf = data?.as_of ?? null;
+  useEffect(() => {
+    onAsOf?.(asOf);
+  }, [asOf, onAsOf]);
 
   return (
     <div data-testid="rotation-heatmap">
@@ -218,7 +225,8 @@ export function RotationHeatmap() {
                     onClick={() => setAnchor(r.symbol)}
                     title="Find the other side of the trade"
                     className={`num text-[11px] ${
-                      isAnchor ? "text-ink" : isUp ? "text-up" : "text-down"
+                      // null return is missing data, not a loss (F5)
+                      isAnchor ? "text-ink" : r.ret === null ? "text-muted" : isUp ? "text-up" : "text-down"
                     }`}
                   >
                     {pct(r.ret)}
@@ -244,7 +252,7 @@ export function RotationHeatmap() {
                       <span>{row.symbol}</span>
                     </InstrumentHover>
                     <span className="num text-muted">corr {row.corr === null ? "—" : row.corr.toFixed(2)}</span>
-                    <span className={`num ${row.ret !== null && row.ret >= 0 ? "text-up" : "text-down"}`}>
+                    <span className={`num ${row.ret === null ? "text-muted" : row.ret >= 0 ? "text-up" : "text-down"}`}>
                       {pct(row.ret)}
                     </span>
                     <span className="num text-market">score {num4(row.score)}</span>

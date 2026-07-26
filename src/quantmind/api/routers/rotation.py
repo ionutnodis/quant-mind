@@ -113,8 +113,14 @@ def cluster_order(corr: pd.DataFrame) -> list[str]:
         v = corr.loc[a, b]
         return float(v) if pd.notna(v) else -2.0
 
-    avg_corr = corr.apply(lambda col: np.nanmean(col.to_numpy()), axis=0)
-    start = avg_corr.idxmax()
+    # skipna column means (pandas' mean is NaN-tolerant like np.nanmean but
+    # silent on an all-NaN column instead of RuntimeWarning-ing).
+    avg_corr = corr.mean(axis=0).dropna()
+    # An all-NaN matrix (>= 3 constant-close symbols over the window: every
+    # pairwise correlation is undefined) leaves no "most central" symbol —
+    # fall back to column order rather than letting idxmax() raise ValueError
+    # on an empty series (never-500, batch-1 final review F1).
+    start = avg_corr.idxmax() if not avg_corr.empty else symbols[0]
     order = [start]
     remaining = set(symbols)
     remaining.remove(start)

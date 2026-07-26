@@ -50,6 +50,7 @@ const INSTRUMENT = {
   pct_from_52w_low: 0.1184,
   ann_vol: 0.21,
   beta: 0.85,
+  beta_window_days: 60,
   beta_benchmark: "SPY",
   as_of: "2026-07-24T00:00:00Z",
 };
@@ -75,6 +76,8 @@ test("hovering the trigger shows name/type/exchange/1d/vol/beta tooltip", async 
   expect(screen.getByText("1.20%")).toBeInTheDocument(); // 1D from change1d prop
   expect(screen.getByText("21.00%")).toBeInTheDocument(); // ann vol
   expect(screen.getByText("0.85")).toBeInTheDocument(); // beta
+  // beta labeled with the window the estimate ACTUALLY used (F8)
+  expect(screen.getByText(/β·SPY \(60d\)/)).toBeInTheDocument();
 
   fireEvent.mouseLeave(trigger.parentElement!);
   await waitFor(() => expect(screen.queryByTestId("instrument-hover-EEM")).not.toBeInTheDocument());
@@ -90,6 +93,7 @@ test("tooltip renders honestly when instrument metadata is missing (nulls)", asy
         currency: null,
         ann_vol: null,
         beta: null,
+        beta_window_days: null,
       })
     )
   );

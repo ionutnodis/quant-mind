@@ -302,3 +302,56 @@ def test_montecarlo_zero_close_never_500s_and_reports_n_nonfinite(client_with_ze
         assert sum(hist["counts"]) == 2000 - body["n_nonfinite"]
     else:
         assert "detail" in r.json()
+
+
+@pytest.fixture
+def client_with_zero_close_regression(tmp_path):
+    """SPY normal, ZERO carries a single zero close — one +/-inf daily
+    return that dropna() alone never removes (batch-1 final review F2)."""
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)
+    store.write_bars(con_id=2, bar_size="1d", bars=_bars_with_zero_close(seed=2), meta=meta)
+    store.write_symbol_map({"SPY": 1, "ZERO": 2})
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+
+
+def test_regression_zero_close_inf_return_never_500s(client_with_zero_close_regression):
+    # The zero close's inf return reaches factor_regression (the router's
+    # dropna() doesn't drop inf); statsmodels raised MissingDataError —
+    # which `except InsufficientDataError` misses — -> 500. The pure core
+    # must treat non-finite rows as missing data instead.
+    r = client_with_zero_close_regression.get(
+        "/api/risk/ZERO/regression", params={"factors": "SPY", "years": 2}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["r_squared"] is not None
+    assert body["n_obs"] > 0
+
+
+def test_regression_factor_list_capped_at_10(client_with_named_series):
+    # Resource guard (F10): the factors list length is bounded like every
+    # other tunable — 11 factors is a structured 422, not an open-ended fit.
+    factors = ",".join(f"F{i:02d}" for i in range(11))
+    r = client_with_named_series.get("/api/risk/MTUM/regression", params={"factors": factors})
+    assert r.status_code == 422
+    assert "at most 10" in str(r.json()["detail"])
+
+
+def test_regression_window_floor_matches_core_minimum(client_with_named_series):
+    # The Query floor now IS the core's 30-obs minimum (single shared
+    # constant — adjudication d): windows 20-29 used to pass validation and
+    # then ALWAYS 422 as a data error. Now they're rejected as input.
+    r = client_with_named_series.get(
+        "/api/risk/MTUM/regression", params={"factors": "SPY", "window": 29}
+    )
+    assert r.status_code == 422
+    assert isinstance(r.json()["detail"], list)  # FastAPI input validation, not a data error
+
+    r2 = client_with_named_series.get(
+        "/api/risk/MTUM/regression", params={"factors": "SPY", "years": 1, "window": 30}
+    )
+    assert r2.status_code == 200
+    assert r2.json()["n_obs"] == 30

@@ -35,6 +35,27 @@ test("renders vol/spot axis headers and pnl cells", () => {
   expect(screen.getByText("0")).toBeInTheDocument();
 });
 
+test("cells are amber book P&L — sign carried by the number, never up/down colors", () => {
+  // Amber law (DESIGN.md + commit 4b00125's precedent on this same page):
+  // the stress grid is the book's own scenario P&L, so cell text is
+  // text-you regardless of sign; green/red stays reserved for market data.
+  // The magnitude opacity ramp survives, in amber.
+  render(
+    <PortfolioStressGrid
+      grid={{
+        vol_shocks: [0.0],
+        spot_shocks: [-0.1, 0.1],
+        pnl: [[-500, 500]],
+      }}
+    />
+  );
+  for (const cell of [screen.getByText("-500"), screen.getByText("500")]) {
+    expect(cell.className).toMatch(/\btext-you\b/);
+    expect(cell.className).not.toMatch(/\btext-up\b|\btext-down\b/);
+    expect(cell.getAttribute("style") ?? "").not.toMatch(/--color-(up|down)/);
+  }
+});
+
 test("null cells render as em-dash placeholders, not crashes", () => {
   render(
     <PortfolioStressGrid

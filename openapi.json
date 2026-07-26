@@ -1447,6 +1447,17 @@
             "title": "Beta Benchmark",
             "type": "string"
           },
+          "beta_window_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta Window Days"
+          },
           "con_id": {
             "title": "Con Id",
             "type": "integer"
@@ -1605,6 +1616,7 @@
           "pct_from_52w_low",
           "ann_vol",
           "beta",
+          "beta_window_days",
           "beta_benchmark",
           "as_of"
         ],
@@ -4754,7 +4766,7 @@
               "anyOf": [
                 {
                   "maximum": 2520,
-                  "minimum": 20,
+                  "minimum": 30,
                   "type": "integer"
                 },
                 {

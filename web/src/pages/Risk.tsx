@@ -167,7 +167,9 @@ function ciText(lo: number | null, hi: number | null, fmt: (x: number | null) =>
 }
 
 const YEARS_BOUNDS = { min: 1, max: 25 };
-const REG_WINDOW_BOUNDS = { min: 20, max: 2520 };
+// min matches the backend's shared _MIN_FACTOR_WINDOW (the core's 30-obs
+// regression minimum) — 20-29 used to be accepted here and always 422.
+const REG_WINDOW_BOUNDS = { min: 30, max: 2520 };
 const HORIZON_BOUNDS = { min: 1, max: 2520 };
 const PATHS_BOUNDS = { min: 1, max: 200_000 };
 const TAIL_HORIZON_PRESETS = [1, 10, 21, 252];
@@ -270,6 +272,12 @@ export function Risk() {
 
   const tailHistorical =
     risk60.data?.es_975 != null ? risk60.data.es_975 * Math.sqrt(horizon) : null;
+
+  // Shared as-of stamp for the regression-derived sub-panels (DESIGN.md:
+  // every data panel carries one — F7).
+  const regressionAsOf = regression.data?.as_of
+    ? `as of ${regression.data.as_of.slice(0, 10)}`
+    : undefined;
 
   return (
     <div className="space-y-3 max-w-[1400px]">
@@ -455,7 +463,7 @@ export function Risk() {
       </div>
 
       <div className="grid grid-cols-3 gap-3">
-        <Panel title="Per-factor betas (multi-factor, HAC 95% CI)">
+        <Panel title="Per-factor betas (multi-factor, HAC 95% CI)" note={regressionAsOf}>
           {regression.data ? (
             <table className="w-full text-[12px]">
               <thead>
@@ -480,7 +488,10 @@ export function Risk() {
           )}
         </Panel>
 
-        <Panel title="Variance decomposition" note="systematic vs idiosyncratic">
+        <Panel
+          title="Variance decomposition"
+          note={[regressionAsOf, "systematic vs idiosyncratic"].filter(Boolean).join(" · ")}
+        >
           {regression.data ? (
             <div className="space-y-2">
               <div className="flex h-3 w-full overflow-hidden border border-hairline">
@@ -505,7 +516,8 @@ export function Risk() {
               </table>
               <p className="text-muted text-[10px]">
                 Exact decomposition of R²: each factor's share is beta × Cov(factor, {symbol}) / Var(
-                {symbol}); idiosyncratic is the residual share (1 − R²). Sums to 100%.
+                {symbol}); idiosyncratic is the residual share (1 − R²). Sums to 100%. A negative
+                share means the factor offsets (hedges) the others.
               </p>
             </div>
           ) : (
@@ -513,7 +525,10 @@ export function Risk() {
           )}
         </Panel>
 
-        <Panel title="R² progression" note="as factors are added">
+        <Panel
+          title="R² progression"
+          note={[regressionAsOf, "as factors are added"].filter(Boolean).join(" · ")}
+        >
           {regression.data ? (
             <table className="w-full text-[12px]">
               <thead>
@@ -537,7 +552,10 @@ export function Risk() {
         </Panel>
       </div>
 
-      <Panel title="Return attribution" note="daily mean return split by source">
+      <Panel
+        title="Return attribution"
+        note={[regressionAsOf, "daily mean return split by source"].filter(Boolean).join(" · ")}
+      >
         {regression.data ? (
           <table className="w-full text-[12px]">
             <thead>

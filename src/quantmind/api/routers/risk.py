@@ -23,7 +23,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from quantmind.api.routers._shared import clean, downsample, iso
-from quantmind.risk.factors import bp_change_series, factor_regression, r_squared_progression
+from quantmind.risk.factors import MIN_FACTOR_WINDOW, bp_change_series, factor_regression, r_squared_progression
 from quantmind.risk.montecarlo import simulate_terminal_returns
 from quantmind.risk.returns import (
     InsufficientDataError,
@@ -250,8 +250,13 @@ def montecarlo(request: Request, req: MonteCarloRequest):
 
 # --- /risk/{symbol}/regression: the decomposition workbench ---------------
 
-_MIN_FACTOR_WINDOW = 20
+# Query floor == the core's own minimum sample (single shared constant,
+# adjudication d): a window of 20-29 used to pass validation here and then
+# ALWAYS 422 inside factor_regression's 30-obs floor.
+_MIN_FACTOR_WINDOW = MIN_FACTOR_WINDOW
 _MAX_FACTOR_WINDOW = 2520
+# Resource guard (F10): factors list is bounded like every other tunable.
+_MAX_FACTORS = 10
 
 
 class ScatterPoint(BaseModel):
@@ -346,6 +351,10 @@ def regression(
         raise HTTPException(422, detail="factors must name at least one factor")
     if len(factor_names) != len(set(factor_names)):
         raise HTTPException(422, detail=f"duplicate factor names: {factors!r}")
+    if len(factor_names) > _MAX_FACTORS:
+        raise HTTPException(
+            422, detail=f"{len(factor_names)} factors requested; at most {_MAX_FACTORS} supported"
+        )
 
     asset_returns = simple_returns(_price_series(request, symbol, years))
     factor_series = {name: _resolve_factor_series(request, name, years) for name in factor_names}

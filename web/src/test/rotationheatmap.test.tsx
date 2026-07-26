@@ -5,7 +5,7 @@
  * needs real canvas/WebGL), and clicking a symbol's return badge enters
  * "other side of the trade" mode with the anchor-scored ranking.
  */
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
@@ -149,6 +149,47 @@ test("clicking a symbol's return sets it as anchor and shows the other-side rank
 
   fireEvent.click(screen.getByTestId("rotation-clear-anchor"));
   await waitFor(() => expect(screen.queryByTestId("rotation-other-side")).not.toBeInTheDocument());
+});
+
+test("null return renders muted, not styled as a down-move", async () => {
+  // pct(null) is "—" — an unknown return is missing data, not a loss (F5).
+  server.use(
+    http.post("/api/rotation", () =>
+      HttpResponse.json({
+        ...BASE_RESPONSE,
+        returns: [
+          { symbol: "XLK", ret: null },
+          { symbol: "XLF", ret: -0.015 },
+        ],
+      })
+    )
+  );
+  renderRotation();
+  const nullBadge = await screen.findByTestId("rotation-symbol-XLK");
+  expect(nullBadge).toHaveTextContent("—");
+  expect(nullBadge.className).toMatch(/\btext-muted\b/);
+  expect(nullBadge.className).not.toMatch(/\btext-up\b|\btext-down\b/);
+});
+
+test("other-side row with a null return renders muted, not as a down-move", async () => {
+  server.use(
+    http.post("/api/rotation", async ({ request }) => {
+      const body = (await request.json()) as { anchor?: string };
+      return HttpResponse.json(
+        body.anchor
+          ? { ...OTHER_SIDE_RESPONSE, other_side: [{ symbol: "XLK", corr: null, ret: null, score: null }] }
+          : BASE_RESPONSE
+      );
+    })
+  );
+  renderRotation();
+  await screen.findByTestId("corr-heatmap-stub");
+  fireEvent.click(screen.getByTestId("rotation-symbol-XLF"));
+
+  const row = await screen.findByTestId("rotation-other-side-XLK");
+  const retSpan = within(row).getByText("—", { selector: "span" });
+  expect(retSpan.className).toMatch(/\btext-muted\b/);
+  expect(retSpan.className).not.toMatch(/\btext-up\b|\btext-down\b/);
 });
 
 test("honest empty state when the universe has no cached data", async () => {

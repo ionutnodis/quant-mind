@@ -160,7 +160,10 @@ def test_sorted_newest_first_and_capped_at_50(store):
     assert body["items"][0]["headline"] == "Fed headline 59"
 
 
-def test_no_matches_after_filtering_says_no_relevant_headlines(store):
+def test_irrelevant_only_headlines_fall_back_to_latest_broadtape(store):
+    # Batch-1 final review adjudication (a): when the relevance filter passes
+    # zero items but the raw tape isn't empty, an empty ticker reads as
+    # broken — show the latest broadtape and say so honestly instead.
     broker = FakeBroker(
         FakeIb(
             providers=[NewsProvider(code="BRFG", name="x")],
@@ -168,6 +171,23 @@ def test_no_matches_after_filtering_says_no_relevant_headlines(store):
         )
     )
     r = _client(store, broker=broker).get("/api/news")
+    assert r.status_code == 200
     body = r.json()
-    assert body["items"] == []
-    assert body["note"] == "no relevant headlines"
+    assert len(body["items"]) == 1
+    assert body["items"][0]["headline"] == "Local bakery wins a pastry award"
+    assert body["note"] == "no book-relevant headlines — showing latest broadtape"
+    assert body["as_of"] == body["items"][0]["time"]
+
+
+def test_broadtape_fallback_sorted_newest_first_and_capped_at_50(store):
+    # The fallback path honors the same cap/ordering as the filtered path.
+    items = [
+        _hn(f"Pastry award {i}", article_id=f"b{i}", when=datetime(2026, 7, 26, 0, 0, tzinfo=timezone.utc) + pd.Timedelta(minutes=i))
+        for i in range(60)
+    ]
+    broker = FakeBroker(FakeIb(providers=[NewsProvider(code="BRFG", name="x")], historical_news=items))
+    r = _client(store, broker=broker).get("/api/news")
+    body = r.json()
+    assert len(body["items"]) == 50
+    assert body["items"][0]["headline"] == "Pastry award 59"
+    assert "showing latest broadtape" in body["note"]

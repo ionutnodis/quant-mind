@@ -134,6 +134,9 @@ export function Today() {
     staleTime: 60 * 60 * 1000,
   });
   const models = useQuery({ queryKey: ["models"], queryFn: api.models, staleTime: Infinity });
+  // RotationHeatmap owns its own fetch; it reports its data's as-of upward
+  // so the Panel note can carry the stamp (DESIGN.md: every data panel — F7).
+  const [rotationAsOf, setRotationAsOf] = useState<string | null>(null);
 
   if (isLoading)
     return (
@@ -241,8 +244,11 @@ export function Today() {
             positions exist.
           </p>
         </Panel>
-        <Panel title="Rotation" note="click a mover for the other side of the trade">
-          <RotationHeatmap />
+        <Panel
+          title="Rotation"
+          note={`${rotationAsOf ? `as of ${rotationAsOf.slice(0, 10)} · ` : ""}click a mover for the other side of the trade`}
+        >
+          <RotationHeatmap onAsOf={setRotationAsOf} />
         </Panel>
       </div>
 

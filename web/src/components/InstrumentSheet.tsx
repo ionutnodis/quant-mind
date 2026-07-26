@@ -133,7 +133,9 @@ export function InstrumentSheet({ symbol, onClose }: { symbol: string; onClose: 
                 </div>
                 <div className="col-span-2">
                   <div className="text-[9px] tracking-wider uppercase text-muted">
+                    {/* window labeled like the hover's "β (Nd)" (F8) */}
                     β vs {instrument.data?.beta_benchmark ?? "—"}
+                    {instrument.data?.beta_window_days != null ? ` (${instrument.data.beta_window_days}d)` : ""}
                   </div>
                   <div className="num text-market">{num(instrument.data?.beta ?? null)}</div>
                 </div>

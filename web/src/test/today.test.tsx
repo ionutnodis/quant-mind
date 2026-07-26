@@ -22,9 +22,19 @@ import { vi } from "vitest";
 // their own dedicated component tests (rotationheatmap.test.tsx,
 // newsticker.test.tsx, glancecharts.test.tsx); Today's own test stays
 // scoped to what /api/brief + /api/models drive.
-vi.mock("../components/RotationHeatmap", () => ({
-  RotationHeatmap: () => <div data-testid="rotation-heatmap-stub" />,
-}));
+vi.mock("../components/RotationHeatmap", async () => {
+  const { useEffect } = await import("react");
+  return {
+    // The stub reports an as-of like the real component so Today's Rotation
+    // panel note (F7 as-of stamp) is exercised here.
+    RotationHeatmap: ({ onAsOf }: { onAsOf?: (asOf: string | null) => void }) => {
+      useEffect(() => {
+        onAsOf?.("2026-07-24T00:00:00Z");
+      }, [onAsOf]);
+      return <div data-testid="rotation-heatmap-stub" />;
+    },
+  };
+});
 vi.mock("../components/NewsTicker", () => ({
   NewsTicker: () => <div data-testid="news-ticker-stub" />,
 }));
@@ -68,7 +78,11 @@ test("renders tiles with direction glyphs and ES from the API", async () => {
   expect(screen.getByText("Your book")).toBeInTheDocument();
   expect(screen.getByText(/ranked by move/i)).toBeInTheDocument();
   expect(await screen.findByText(/Ornstein-Uhlenbeck/)).toBeInTheDocument();
-  expect(screen.getByText(/as of 2026-07-24/)).toBeInTheDocument();
+  expect(screen.getAllByText(/as of 2026-07-24/).length).toBeGreaterThan(0);
+  // Rotation panel note carries the rotation data's own as-of (F7)
+  expect(
+    await screen.findByText(/as of 2026-07-24 · click a mover for the other side of the trade/)
+  ).toBeInTheDocument();
   // wave-3B additions are wired into the page (each component's behavior is
   // covered by its own dedicated test file — here just prove Today mounts them)
   expect(screen.getByTestId("news-ticker-stub")).toBeInTheDocument();

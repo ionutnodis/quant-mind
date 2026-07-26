@@ -9,12 +9,11 @@ Constraints). Unknown symbol -> 422 (pattern: routers/risk.py).
 
 from __future__ import annotations
 
-import math
-
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from quantmind.api.routers._shared import clean, iso
 from quantmind.risk.returns import InsufficientDataError, annualized_vol, rolling_beta, simple_returns
 
 router = APIRouter()
@@ -22,22 +21,6 @@ router = APIRouter()
 _52W_TRADING_DAYS = 252
 _BETA_WINDOW = 60
 _MAX_CANDLES = 3650
-
-
-def _clean(x: float | None) -> float | None:
-    if x is None:
-        return None
-    try:
-        xf = float(x)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(xf):
-        return None
-    return xf
-
-
-def _iso(ts: pd.Timestamp) -> str:
-    return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _bars_for(request: Request, symbol: str) -> tuple[pd.DataFrame, int]:
@@ -53,29 +36,34 @@ def _bars_for(request: Request, symbol: str) -> tuple[pd.DataFrame, int]:
     return bars, con_id
 
 
-def _beta_vs_benchmark(store, close: pd.Series, symbol: str, benchmark: str) -> float | None:
+def _beta_vs_benchmark(store, close: pd.Series, symbol: str, benchmark: str) -> tuple[float | None, int | None]:
+    """Beta plus the window ACTUALLY used (batch-1 final review F8): short
+    history silently shrinks the 60d window to as few as 5 obs, so the
+    response reports the real one and the hover can label "β (Nd)" honestly.
+    The benchmark's definitional self-beta of 1.0 has no rolling window."""
     if symbol == benchmark:
-        return 1.0
+        return 1.0, None
     symbol_map = store.read_symbol_map()
     bench_con_id = symbol_map.get(benchmark)
     if bench_con_id is None:
-        return None
+        return None, None
     try:
         bench_bars, _ = store.read_bars(con_id=bench_con_id, bar_size="1d")
     except FileNotFoundError:
-        return None
+        return None, None
     aligned = pd.concat({"a": close, "b": bench_bars["close"]}, axis=1).dropna()
     window = min(_BETA_WINDOW, len(aligned) - 2)
     if window < 5:
-        return None
+        return None, None
     a_ret = simple_returns(aligned["a"])
     b_ret = simple_returns(aligned["b"])
     try:
         beta_series = rolling_beta(a_ret, b_ret, window=window)
     except InsufficientDataError:
-        return None
+        return None, None
     valid = beta_series.dropna()
-    return _clean(valid.iloc[-1]) if len(valid) else None
+    beta = clean(valid.iloc[-1]) if len(valid) else None
+    return beta, (window if beta is not None else None)
 
 
 class InstrumentResponse(BaseModel):
@@ -95,6 +83,9 @@ class InstrumentResponse(BaseModel):
     pct_from_52w_low: float | None
     ann_vol: float | None
     beta: float | None
+    # The rolling window the beta estimate actually used (F8) — None when
+    # beta is None or definitional (symbol == benchmark).
+    beta_window_days: int | None
     beta_benchmark: str
     as_of: str | None
 
@@ -121,23 +112,23 @@ def instrument(request: Request, symbol: str) -> InstrumentResponse:
     bars, con_id = _bars_for(request, symbol)
     close = bars["close"]
 
-    last = _clean(close.iloc[-1]) if len(close) else None
+    last = clean(close.iloc[-1]) if len(close) else None
     window = close.iloc[-_52W_TRADING_DAYS:] if len(close) else close
-    high_52w = _clean(window.max()) if len(window) else None
-    low_52w = _clean(window.min()) if len(window) else None
+    high_52w = clean(window.max()) if len(window) else None
+    low_52w = clean(window.min()) if len(window) else None
     pct_from_high = (
-        _clean(last / high_52w - 1.0) if last is not None and high_52w not in (None, 0) else None
+        clean(last / high_52w - 1.0) if last is not None and high_52w not in (None, 0) else None
     )
     pct_from_low = (
-        _clean(last / low_52w - 1.0) if last is not None and low_52w not in (None, 0) else None
+        clean(last / low_52w - 1.0) if last is not None and low_52w not in (None, 0) else None
     )
 
     try:
-        vol = _clean(annualized_vol(simple_returns(close)))
+        vol = clean(annualized_vol(simple_returns(close)))
     except InsufficientDataError:
         vol = None
 
-    beta = _beta_vs_benchmark(store, close, symbol, benchmark)
+    beta, beta_window_days = _beta_vs_benchmark(store, close, symbol, benchmark)
 
     meta = store.read_instrument_metadata(symbol) or {}
 
@@ -158,8 +149,9 @@ def instrument(request: Request, symbol: str) -> InstrumentResponse:
         pct_from_52w_low=pct_from_low,
         ann_vol=vol,
         beta=beta,
+        beta_window_days=beta_window_days,
         beta_benchmark=benchmark,
-        as_of=_iso(close.index[-1]) if len(close) else None,
+        as_of=iso(close.index[-1]) if len(close) else None,
     )
 
 
@@ -173,12 +165,12 @@ def candles(
     window = bars.iloc[-days:]
     out = [
         Candle(
-            date=_iso(idx),
-            open=_clean(row["open"]),
-            high=_clean(row["high"]),
-            low=_clean(row["low"]),
-            close=_clean(row["close"]),
-            volume=_clean(row["volume"]),
+            date=iso(idx),
+            open=clean(row["open"]),
+            high=clean(row["high"]),
+            low=clean(row["low"]),
+            close=clean(row["close"]),
+            volume=clean(row["volume"]),
         )
         for idx, row in window.iterrows()
     ]

@@ -162,6 +162,20 @@ test("renders symbol picker, factor builder, and single-factor regression stats 
   expect(screen.getAllByText(/0\.980/).length).toBeGreaterThan(0); // R^2 (single + all-factor)
   expect(screen.getByText(/98\.00%/)).toBeInTheDocument(); // variance share for SPY
   expect(screen.getByText(/2\.00%/)).toBeInTheDocument(); // idiosyncratic share
+  // variance caption explains a negative share (final-review adjudication b)
+  expect(screen.getByText(/negative share means the factor offsets/i)).toBeInTheDocument();
+});
+
+test("regression sub-panels each carry the regression as-of stamp", async () => {
+  mockHappyPath();
+  renderRisk();
+  await screen.findByTestId("regression-scatter");
+  // Fit statistics + Per-factor betas + Variance decomposition + R²
+  // progression + Return attribution + rolling-beta panel all stamp
+  // as-of 2026-07-24 (DESIGN.md: every data panel carries one).
+  await waitFor(() =>
+    expect(screen.getAllByText(/as of 2026-07-24/).length).toBeGreaterThanOrEqual(6)
+  );
 });
 
 test("empty cache shows structured empty state, not a crash", async () => {
@@ -266,7 +280,8 @@ test("years/regression-window/horizon/paths controls are bounded matching backen
 
   fireEvent.click(screen.getByRole("checkbox", { name: /trim to window/i }));
   const regWindowInput = await screen.findByLabelText(/regression window/i) as HTMLInputElement;
-  expect(regWindowInput.min).toBe("20");
+  // floor == backend's shared _MIN_FACTOR_WINDOW (the core's 30-obs minimum)
+  expect(regWindowInput.min).toBe("30");
   expect(regWindowInput.max).toBe("2520");
 
   const horizonInput = screen.getByLabelText(/^horizon/i) as HTMLInputElement;

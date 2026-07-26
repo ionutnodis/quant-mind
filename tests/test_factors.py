@@ -166,3 +166,30 @@ def test_factor_regression_result_is_frozen_dataclass():
     assert isinstance(result, FactorRegressionResult)
     with pytest.raises(Exception):
         result.alpha = 1.0  # type: ignore[misc]
+
+
+def test_factor_regression_drops_non_finite_rows_instead_of_crashing():
+    # A zero close upstream turns a pct_change observation into +/-inf, which
+    # dropna() alone does NOT remove — statsmodels then raised
+    # MissingDataError (not an InsufficientDataError, so routers 500'd —
+    # batch-1 final review F2). Non-finite rows must be excluded from the
+    # fit exactly like missing data.
+    n = 300
+    bench = _rand(n, seed=3)
+    y = 0.0002 + 1.2 * bench
+    y.iloc[10] = np.inf
+    y.iloc[11] = -np.inf
+    result = factor_regression(y, {"SPY": bench})
+    assert result.n_obs == n - 2
+    assert result.betas["SPY"] == pytest.approx(1.2, abs=1e-9)
+
+
+def test_factor_regression_drops_inf_in_factor_series_too():
+    n = 300
+    bench = _rand(n, seed=4)
+    y = 0.5 * bench
+    factor = bench.copy()
+    factor.iloc[5] = np.inf
+    result = factor_regression(y, {"SPY": factor})
+    assert result.n_obs == n - 1
+    assert result.betas["SPY"] == pytest.approx(0.5, abs=1e-9)

@@ -806,6 +806,8 @@ export interface components {
             beta: number | null;
             /** Beta Benchmark */
             beta_benchmark: string;
+            /** Beta Window Days */
+            beta_window_days: number | null;
             /** Con Id */
             con_id: number;
             /** Currency */

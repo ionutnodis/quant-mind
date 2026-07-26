@@ -154,7 +154,10 @@ export function Portfolio() {
   if (error) return <p className="text-down">Portfolio unavailable: {String(error)}</p>;
   if (!data) return null;
 
-  const note = `snapshot ${data.snapshot_id} · as of ${data.valuation_ts.slice(0, 10)}${bookRef ? ` · book_ref ${bookRef}` : ""}`;
+  // Ledger as-of, carried into every data panel's note (DESIGN.md: every
+  // data panel carries an as-of stamp — F7).
+  const asOfNote = `as of ${data.valuation_ts.slice(0, 10)}`;
+  const note = `snapshot ${data.snapshot_id} · ${asOfNote}${bookRef ? ` · book_ref ${bookRef}` : ""}`;
 
   return (
     <div className="space-y-3 max-w-[1600px]">
@@ -238,7 +241,7 @@ export function Portfolio() {
       )}
 
       {/* Delta-adjusted exposure */}
-      <Panel title="Delta-Adjusted Exposure" note="per underlier · shares + option legs">
+      <Panel title="Delta-Adjusted Exposure" note={`per underlier · shares + option legs · ${asOfNote}`}>
         {data.exposure.length === 0 ? (
           <p className="text-muted text-[12px]">No priceable positions yet.</p>
         ) : (
@@ -249,7 +252,8 @@ export function Portfolio() {
                 <th className="text-right py-1.5 font-normal">Spot</th>
                 <th className="text-right py-1.5 font-normal">Net delta</th>
                 <th className="text-right py-1.5 font-normal">Dollar delta</th>
-                <th className="text-right py-1.5 font-normal">Beta</th>
+                {/* window labeled to match Today's "Beta (60d)" convention (F8) */}
+                <th className="text-right py-1.5 font-normal">Beta (60d)</th>
                 <th className="text-right py-1.5 font-normal">SPY-equiv notional</th>
               </tr>
             </thead>
@@ -272,7 +276,7 @@ export function Portfolio() {
       </Panel>
 
       {/* Options sleeve: per-underlying Greeks + stress grid */}
-      <Panel title="Options Sleeve" note="Γ / vega / θ · spot x vol stress">
+      <Panel title="Options Sleeve" note={`Γ / vega / θ · spot x vol stress · ${asOfNote}`}>
         {!data.options_sleeve.available ? (
           <p className="text-muted text-[12px]">{data.options_sleeve.reason}</p>
         ) : (
@@ -303,7 +307,7 @@ export function Portfolio() {
       </Panel>
 
       {/* Expiry buckets */}
-      <Panel title="Expiry Buckets" note="option legs by days-to-expiry">
+      <Panel title="Expiry Buckets" note={`option legs by days-to-expiry · ${asOfNote}`}>
         <div className="grid grid-cols-4 gap-3">
           {EXPIRY_BUCKETS.map(({ key, label }) => {
             const legs = data.expiry_buckets[key];
@@ -330,7 +334,11 @@ export function Portfolio() {
       {/* Core-vs-overlay P&L attribution */}
       <Panel
         title="Core vs Overlay P&L"
-        note={data.attribution.available ? `${data.attribution.window_days}d window · beta ${fmtNum(data.attribution.beta, 2)}` : undefined}
+        note={
+          data.attribution.available
+            ? `${data.attribution.window_days}d window · beta (60d) ${fmtNum(data.attribution.beta, 2)} · ${asOfNote}`
+            : asOfNote
+        }
       >
         {!data.attribution.available ? (
           <p className="text-muted text-[12px]">{data.attribution.reason}</p>

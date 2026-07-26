@@ -171,3 +171,27 @@ def test_instrument_beta_of_benchmark_series_correlates_when_identical(tmp_path)
     r = client.get("/api/instruments/CLONE")
     assert r.status_code == 200
     assert r.json()["beta"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_instrument_reports_actual_beta_window_days(client):
+    # Full-history fixture -> the standard 60d window. The response must say
+    # which window the beta actually used (batch-1 final review F8: the
+    # silent shrink to as few as 5 obs was invisible behind the hover's "β").
+    body = client.get("/api/instruments/EEM").json()
+    assert body["beta"] is not None
+    assert body["beta_window_days"] == 60
+    # the benchmark's definitional self-beta of 1.0 has no rolling window
+    assert client.get("/api/instruments/SPY").json()["beta_window_days"] is None
+
+
+def test_instrument_short_history_reports_shrunken_beta_window(tmp_path):
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(con_id=1, bar_size="1d", bars=_bars(n=40, seed=1), meta=meta)
+    store.write_bars(con_id=2, bar_size="1d", bars=_bars(n=40, seed=2), meta=meta)
+    store.write_symbol_map({"SPY": 1, "EEM": 2})
+    app = _make_app(store, benchmark="SPY")
+    client = TestClient(app, base_url="http://127.0.0.1")
+    body = client.get("/api/instruments/EEM").json()
+    assert body["beta"] is not None
+    assert body["beta_window_days"] == 38  # min(60, 40 aligned obs - 2)

@@ -48,6 +48,7 @@ _NO_PROVIDERS_NOTE = (
     "no entitled news providers on this session — check paper-account data sharing"
 )
 _NO_RELEVANT_NOTE = "no relevant headlines"
+_NO_RELEVANT_FALLBACK_NOTE = "no book-relevant headlines — showing latest broadtape"
 _REQUEST_FAILED_NOTE = "news request failed — Gateway connection error"
 
 # Macro keywords (lowercase, matched as substrings of the lowercased
@@ -134,11 +135,25 @@ async def get_news(request: Request) -> NewsResponse:
 
     symbols = set(store.read_symbol_map().keys())
     items = [item for item in (_to_item(h, symbols) for h in headlines) if item is not None]
+    note = None
     if not items:
-        # Entitled providers exist but nothing in the window matched (or the
-        # feed returned nothing at all) — quiet tape, not a broken pipe.
-        return _empty(_NO_RELEVANT_NOTE)
+        if not headlines:
+            # Entitled providers exist but the feed returned nothing at all
+            # in the window — quiet tape, not a broken pipe.
+            return _empty(_NO_RELEVANT_NOTE)
+        # The relevance filter passed zero items but the tape ISN'T empty
+        # (batch-1 final review adjudication a): an empty ticker reads as
+        # broken, so fall back to the latest broadtape — same cap/ordering
+        # as the filtered path — and say so honestly.
+        items = [
+            NewsItemOut(
+                time=_iso(h.time), source=h.source, headline=h.headline,
+                symbol=_matched_symbol(h.headline, symbols), url=h.url,
+            )
+            for h in headlines
+        ]
+        note = _NO_RELEVANT_FALLBACK_NOTE
 
     items.sort(key=lambda i: i.time, reverse=True)
     items = items[:_MAX_ITEMS]
-    return NewsResponse(items=items, as_of=items[0].time, note=None)
+    return NewsResponse(items=items, as_of=items[0].time, note=note)

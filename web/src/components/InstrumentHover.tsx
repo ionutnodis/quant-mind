@@ -27,6 +27,9 @@ export interface InstrumentSummary {
   pct_from_52w_low: number | null;
   ann_vol: number | null;
   beta: number | null;
+  // the rolling window the beta estimate actually used (F8) — null when
+  // beta is null or definitional (symbol == benchmark)
+  beta_window_days: number | null;
   beta_benchmark: string;
   as_of: string | null;
 }
@@ -112,7 +115,9 @@ export function InstrumentHover({
                 </div>
                 <div>
                   <div className="text-[9px] tracking-wider uppercase text-muted">
+                    {/* "β (Nd)" — the window the estimate ACTUALLY used (F8) */}
                     β·{data.beta_benchmark}
+                    {data.beta_window_days !== null ? ` (${data.beta_window_days}d)` : ""}
                   </div>
                   <div className="num text-market">{num(data.beta)}</div>
                 </div>
