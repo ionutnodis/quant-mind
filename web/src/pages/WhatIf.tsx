@@ -277,13 +277,20 @@ export function WhatIf() {
       setBaseAsOf(preload.data.valuation_ts);
     }
   }, [preload.data]);
+  // Stale-ref policy "notice + drop" (batch-2 final review item 5): the
+  // unpin below used to be invisible — state was cleared but the JSX never
+  // said why the pinned book vanished. The notice renders in the builder.
+  const [preloadNotice, setPreloadNotice] = useState<string | null>(null);
   useEffect(() => {
     // A stale/unknown URL ref must not wedge the page: unpin it honestly.
     if (preload.isError) {
       setBaseRef(null);
       writeActiveBookRef(null);
+      setPreloadNotice(
+        `pinned book ${initialBookRef} could not be loaded — unpinned; re-pin from Portfolio or Load current book`
+      );
     }
-  }, [preload.isError]);
+  }, [preload.isError, initialBookRef]);
 
   const compute = useMutation({
     mutationFn: () => {
@@ -421,6 +428,7 @@ export function WhatIf() {
 
       <Panel title="Book builder" note="clone the book, modify, watch risk recompute">
         <div className="space-y-2">
+          {preloadNotice && <p className="text-warning text-[11px]">{preloadNotice}</p>}
           {!baseRef && (
             <p className="text-muted text-[11px]">
               Start from your live book: <span className="text-ink">Load current book</span> pins it as the

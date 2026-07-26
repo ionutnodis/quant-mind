@@ -254,6 +254,10 @@ export function Lab() {
   const [exposureValue, setExposureValue] = useState(-610);
   const [pairY, setPairY] = useState("QQQ");
   const [pairX, setPairX] = useState("SPY");
+  // The resolved pinned ref, displayed on the Book Exposure panel (batch-2
+  // final review item 5): "uses ?book_ref= if pinned" alone left the user
+  // guessing WHICH book the regression would hit.
+  const [pinnedBookRef] = useState<string | null>(() => readActiveBookRef());
 
   const schema = useMemo(() => {
     if (!models.data || models.data.length === 0) return undefined;
@@ -634,7 +638,16 @@ export function Lab() {
         <div className="space-y-3">
           <p className="text-muted text-[11px]">
             Regresses your book&apos;s daily $P&amp;L on the daily bp change of US10Y
-            (Newey-West HAC SEs). Uses ?book_ref= if pinned, otherwise the live book.
+            (Newey-West HAC SEs). Uses ?book_ref= if pinned
+            {pinnedBookRef ? (
+              <>
+                {" "}
+                (pinned: <span className="num text-you">{pinnedBookRef}</span>)
+              </>
+            ) : (
+              ""
+            )}
+            , otherwise the live book.
           </p>
           <button
             type="button"

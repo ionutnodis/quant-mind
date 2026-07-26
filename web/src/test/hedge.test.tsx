@@ -351,6 +351,31 @@ test("book_ref URL param pre-loads the pinned book and runs by ref", async () =>
   await screen.findByTestId("candidates-table");
 });
 
+// --- Batch-2 final review item 5: chip parity + the edit-then-reload trap ---
+
+test("book_ref preload shows the pinned chip; unpin clears chip and URL", async () => {
+  window.history.replaceState(null, "", "/?book_ref=snap-abc123");
+  server.use(http.get("/api/book/snap-abc123", () => HttpResponse.json(CURRENT_BOOK)));
+  renderHedge();
+  const chip = await screen.findByTestId("book-pinned-chip", {}, BOOK_FETCH_TIMEOUT);
+  expect(chip.textContent).toContain("snap-abc123");
+  expect(chip.textContent).toContain("2026-07-24"); // as-of stamp (staleness law)
+  fireEvent.click(screen.getByLabelText(/unpin current book/i));
+  expect(screen.queryByTestId("book-pinned-chip")).not.toBeInTheDocument();
+  expect(window.location.search).not.toContain("book_ref");
+});
+
+test("editing a row strips ?book_ref= from the URL (edit-then-reload trap)", async () => {
+  // Pre-fix: editing reverted the RUN to inline positions but left the URL
+  // param behind — a reload re-loaded the stale pinned book over the edit.
+  window.history.replaceState(null, "", "/?book_ref=snap-abc123");
+  server.use(http.get("/api/book/snap-abc123", () => HttpResponse.json(CURRENT_BOOK)));
+  renderHedge();
+  await screen.findByDisplayValue("25", {}, BOOK_FETCH_TIMEOUT);
+  fireEvent.change(screen.getByDisplayValue("SPY"), { target: { value: "qqq" } });
+  expect(window.location.search).not.toContain("book_ref");
+});
+
 test("symbol input uppercases and add/remove row controls manage the book", async () => {
   renderHedge();
   const [firstSymbol] = screen.getAllByLabelText(/symbol/i);

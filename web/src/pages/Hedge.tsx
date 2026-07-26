@@ -149,20 +149,25 @@ export function Hedge() {
   // snapshot; cleared on any row edit (see WhatIf.tsx's identical pattern)
   // — an edited book submits its (now-inline) positions instead.
   const [bookRef, setBookRef] = useState<string | null>(null);
+  const [pinnedAsOf, setPinnedAsOf] = useState<string | null>(null);
   const [targetBeta, setTargetBeta] = useState(0);
   const [years, setYears] = useState(5);
 
   // Pre-load (wave-3B): the active snapshot id from the URL, read once.
+  // retry: false (batch-2 final review item 5) — a stale/unknown ref fails
+  // fast into the visible notice below instead of spinning through retries.
   const [initialBookRef] = useState<string | null>(() => readActiveBookRef());
   const preload = useQuery({
     queryKey: ["hedge-book-preload", initialBookRef],
     queryFn: () => getBook(initialBookRef as string),
     enabled: initialBookRef !== null,
+    retry: false,
   });
   useEffect(() => {
     if (preload.data) {
       setRows(snapshotToRows(preload.data));
       setBookRef(preload.data.snapshot_id);
+      setPinnedAsOf(preload.data.valuation_ts);
     }
   }, [preload.data]);
 
@@ -180,14 +185,26 @@ export function Hedge() {
   function handleRowsChange(next: BookRow[]) {
     setRows(next);
     setBookRef(null);
+    setPinnedAsOf(null);
+    // Batch-2 final review item 5 (edit-then-reload trap): an edited book is
+    // no longer the pinned snapshot — leaving ?book_ref= in the URL meant a
+    // reload silently re-loaded the stale pin over the edit.
+    writeActiveBookRef(null);
   }
 
   function handleUseCurrentBook(snapshot: BookSnapshotOut) {
     setRows(snapshotToRows(snapshot));
     setBookRef(snapshot.snapshot_id);
+    setPinnedAsOf(snapshot.valuation_ts);
     // Persist the spine: the loaded snapshot becomes the page's active
     // book_ref so a reload/share keeps the same pinned book in view.
     writeActiveBookRef(snapshot.snapshot_id);
+  }
+
+  function handleUnpin() {
+    setBookRef(null);
+    setPinnedAsOf(null);
+    writeActiveBookRef(null);
   }
 
   const data = run.data;
@@ -278,6 +295,9 @@ export function Hedge() {
             onRowsChange={handleRowsChange}
             onUseCurrentBook={handleUseCurrentBook}
             label="Positions"
+            pinnedBookRef={bookRef}
+            pinnedAsOf={pinnedAsOf}
+            onUnpin={handleUnpin}
           />
         </Panel>
 

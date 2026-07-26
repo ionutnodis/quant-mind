@@ -317,6 +317,21 @@ test("preloads the active book_ref from the URL and pins it as the base", async 
   await screen.findByTestId("whatif-weights");
 });
 
+test("stale ?book_ref= preload failure shows a one-line notice and unpins", async () => {
+  // Batch-2 final review item 5 (unified stale-ref policy "notice + drop"):
+  // the unpin used to happen invisibly — state was set but the JSX never
+  // showed it. The user must SEE why their pinned book vanished.
+  window.history.replaceState(null, "", "/?book_ref=snap-gone9999");
+  server.use(
+    http.get("/api/book/snap-gone9999", () =>
+      HttpResponse.json({ detail: "unknown book_ref 'snap-gone9999'" }, { status: 422 })
+    )
+  );
+  renderWhatIf();
+  expect(await screen.findByText(/could not be loaded/i)).toBeInTheDocument();
+  expect(window.location.search).not.toContain("book_ref");
+});
+
 test("load current book pins the base: chip + URL persistence + base_book_ref on compute", async () => {
   server.use(
     http.get("/api/book/current", () => HttpResponse.json(CURRENT_BOOK)),

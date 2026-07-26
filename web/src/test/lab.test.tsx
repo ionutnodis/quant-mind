@@ -360,3 +360,14 @@ test("unsupported exposure mapping surfaces the backend's refusing message, not 
   fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
   expect(await screen.findByText(/refusing/i)).toBeInTheDocument();
 });
+
+test("Book Exposure panel names the resolved pinned ref (batch-2 item 5)", async () => {
+  // "Uses ?book_ref= if pinned" alone left the user guessing WHICH book the
+  // regression would hit — the resolved ref must be displayed.
+  window.history.replaceState(null, "", "/?book_ref=snap-abc123");
+  server.use(http.get("/api/models", () => HttpResponse.json([MODEL_SCHEMA])));
+  renderLab();
+  await screen.findByText(/Ornstein-Uhlenbeck/);
+  expect(screen.getByText(/snap-abc123/)).toBeInTheDocument();
+  window.history.replaceState(null, "", "/");
+});
