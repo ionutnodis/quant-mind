@@ -53,6 +53,30 @@ and reported without a size/protection, never dropped from the response.
 pinned snapshot id instead of inline positions — see routers/book.py and
 routers/whatif.py's identical `book_ref` handling.
 
+Wave-3B "Hedge honest" (docs/plans/2026-07-25-wave3.md Batch 2): the page is
+honest about cost and uncertainty. All math is pure and golden-tested in
+src/quantmind/hedge/ — this router only wires it:
+- Cost columns per candidate: carry drag (β_h · E[r_bench], annualized from
+  the SAME cached bars/window) + a borrow-fee PROXY constant on short/inverse
+  notional (hedge/cost.py). Fractions of the original book's gross per year.
+- Ranking key is protection-per-cost (ΔES per unit of annual drag); a
+  candidate whose cost is non-positive (credit/tailwind) has no meaningful
+  ratio, so it falls back to raw-protection ordering after the costed ones.
+  Unusable candidates still sort last, still flagged, never dropped.
+- ΔES carries a 95% CI from a seeded PAIRED block bootstrap
+  (hedge/bootstrap.py, mirroring risk/montecarlo.py's block sampling) —
+  wave-3 Global Constraint: any bootstrap statistic shows its interval.
+- Tail-conditional protection: mean DAILY book return on the worst-decile
+  benchmark days in the window, with vs without each hedge (hedge/tail.py).
+- Option hedge candidates (protective put / put spread / collar) on the
+  book's DOMINANT underlier (largest |market value|), built from the CACHED
+  chain snapshot (OptionsStore — never a live IB call), sized off
+  risk/options.py's stress grid at the -20% node, premium expressed as an
+  annual % drag over time-to-expiry (hedge/option_hedges.py). A missing or
+  empty chain (SPY is empty upstream today) degrades to a structured
+  `option_note`, never a 500. The ES overlay uses THE SAME
+  original-book-gross denominator as the linear candidates.
+
 Serialization policy: UTC ISO Z timestamps, NaN/Inf -> null, unknown symbols
 or an empty candidate universe -> structured 422, never a 500 (pattern:
 routers/risk.py, routers/whatif.py).
@@ -61,6 +85,7 @@ routers/risk.py, routers/whatif.py).
 from __future__ import annotations
 
 import math
+from datetime import date, datetime
 from typing import Literal
 
 import numpy as np
@@ -71,6 +96,23 @@ from pydantic import BaseModel, Field, model_validator
 from quantmind.analytics.correlation import rolling_correlation
 from quantmind.api.routers._shared import PositionIn, clean, iso, read_close_series, weighted_portfolio_returns
 from quantmind.api.routers.book import read_book_positions
+from quantmind.datastore.options_store import OptionsStore
+from quantmind.hedge.bootstrap import delta_es_ci
+from quantmind.hedge.cost import (
+    BORROW_PROXY_RATE,
+    annualized_mean_return,
+    borrow_proxy_annual,
+    carry_drag_annual,
+    protection_per_cost,
+)
+from quantmind.hedge.option_hedges import (
+    OptionStructure,
+    build_structures,
+    premium_annual_drag,
+    size_contracts,
+    structure_daily_pnl,
+)
+from quantmind.hedge.tail import worst_decile_tail
 from quantmind.risk.returns import InsufficientDataError, historical_es, rolling_beta
 
 router = APIRouter()
@@ -79,6 +121,17 @@ _BETA_WINDOW = 60
 _MIN_BETA_ABS = 0.1
 _MAX_CANDIDATES_OUT = 20
 _MAX_BOOK_POSITIONS = 50
+
+# ΔES CI: seeded paired block bootstrap (hedge/bootstrap.py). The fixed seed
+# keeps identical requests byte-identical (book_ref-vs-inline equality is a
+# tested contract).
+_CI_N_BOOT = 500
+_CI_BLOCK_SIZE = 5
+_CI_SEED = 0
+_TAIL_DECILE = 0.10
+# Option-structure sizing node: the stress grid's standard worst spot shock.
+_OPTION_SHOCK = -0.20
+_OPTION_MIN_DAYS = 20
 
 
 class Objective(BaseModel):
@@ -113,9 +166,46 @@ class HedgeCandidateOut(BaseModel):
     es_before: float | None
     es_after: float | None
     protection: float | None
+    # Wave-3B "Hedge honest" — cost + uncertainty columns. All fractions of
+    # the ORIGINAL book's gross; cost fields are per YEAR, ES/tail are DAILY.
+    carry_drag_annual: float | None
+    borrow_proxy_annual: float | None
+    cost_annual: float | None
+    protection_per_cost: float | None  # THE ranking key: ΔES per unit annual drag
+    delta_es_ci_low: float | None
+    delta_es_ci_high: float | None
+    tail_n_days: int | None
+    tail_mean_book: float | None
+    tail_mean_hedged: float | None
     residual_beta: float | None
     # Diagnostic only (Engineering Constraint 12) — never the ranking key.
     corr_stability: float | None
+
+
+class OptionLegOut(BaseModel):
+    action: Literal["long", "short"]
+    strike: float
+    right: Literal["C", "P"]
+    price: float  # per-share premium at the traded side (ask long / bid short)
+
+
+class OptionHedgeOut(BaseModel):
+    kind: Literal["protective_put", "put_spread", "collar"]
+    expiry: str  # YYYYMMDD
+    expiry_years: float | None
+    legs: list[OptionLegOut]
+    contracts: float | None
+    net_premium_per_contract: float | None  # dollars per structure
+    cost_annual: float | None  # premium as % annual drag (fraction of gross / yr)
+    es_before: float | None
+    es_after: float | None
+    protection: float | None
+    protection_per_cost: float | None
+    delta_es_ci_low: float | None
+    delta_es_ci_high: float | None
+    tail_n_days: int | None
+    tail_mean_book: float | None
+    tail_mean_hedged: float | None
 
 
 class HedgeResponse(BaseModel):
@@ -124,8 +214,23 @@ class HedgeResponse(BaseModel):
     book_value: float | None
     book_beta: float | None
     es_before: float | None
+    # E[r_bench] annualized from the cached bars over the request window —
+    # the carry-drag factor, surfaced so the cost column is auditable.
+    bench_expected_return_annual: float | None
     n_candidates_evaluated: int
     candidates: list[HedgeCandidateOut]
+    # Option hedge candidates on the dominant underlier; empty + option_note
+    # when the chain is missing/empty or the sleeve is short (never a 500).
+    option_underlier: str | None
+    option_chain_as_of: str | None
+    option_hedges: list[OptionHedgeOut]
+    option_note: str | None
+    # Methodology/horizon labels (wave-3 Global Constraint: every risk number
+    # is horizon-labeled; the borrow constant is a labeled proxy).
+    es_note: str
+    cost_note: str
+    ci_note: str
+    tail_note: str
     as_of: str | None
 
 
@@ -228,6 +333,10 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     except InsufficientDataError:
         es_before = None
 
+    # E[r_bench] for the carry-drag column, annualized from the SAME cached
+    # bars/window everything else here uses (hedge/cost.py).
+    er_bench = clean(annualized_mean_return(bench_returns)) if len(bench_returns) else None
+
     if req.candidates is not None:
         candidate_pool = [s for s in dict.fromkeys(req.candidates) if s not in unique_book]
     else:
@@ -269,6 +378,9 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         unusable = beta_cand is None or not math.isfinite(beta_cand) or abs(beta_cand) < _MIN_BETA_ABS
 
         hedge_qty = hedge_notional = es_after = protection = residual_beta = None
+        carry_drag = borrow_proxy = cost_annual = ppc = None
+        ci_low = ci_high = None
+        tail_n_days = tail_mean_book = tail_mean_hedged = None
 
         if not unusable and book_beta is not None:
             price_cand_last = float(cand_prices.iloc[-1])
@@ -297,6 +409,35 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                     if es_before is not None and es_after is not None:
                         protection = es_before - es_after
 
+                    # Cost columns (hedge/cost.py): carry drag + borrow
+                    # proxy, fractions of the ORIGINAL gross per year.
+                    if er_bench is not None:
+                        carry_drag = clean(carry_drag_annual(hedge_notional, beta_cand, er_bench, book_gross))
+                        borrow_proxy = clean(borrow_proxy_annual(hedge_notional, beta_cand, book_gross))
+                        if carry_drag is not None and borrow_proxy is not None:
+                            cost_annual = carry_drag + borrow_proxy
+                    ppc = protection_per_cost(protection, cost_annual)
+
+                    # ΔES 95% CI: seeded PAIRED block bootstrap.
+                    ci = delta_es_ci(
+                        aligned_overlay["book"].to_numpy(),
+                        hedged_returns.to_numpy(),
+                        n_boot=_CI_N_BOOT,
+                        block_size=_CI_BLOCK_SIZE,
+                        seed=_CI_SEED,
+                    )
+                    if ci is not None:
+                        ci_low, ci_high = clean(ci[0]), clean(ci[1])
+
+                    # Tail-conditional protection: worst-decile bench days.
+                    tail = worst_decile_tail(
+                        aligned_overlay["book"], hedged_returns, bench_returns, decile=_TAIL_DECILE
+                    )
+                    if tail is not None:
+                        tail_n_days = tail.n_days
+                        tail_mean_book = clean(tail.mean_book)
+                        tail_mean_hedged = clean(tail.mean_hedged)
+
                     aligned_h = pd.concat({"book": hedged_returns, "bench": bench_returns}, axis=1).dropna()
                     if len(aligned_h) >= _BETA_WINDOW + 2:
                         try:
@@ -319,6 +460,15 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                 es_before=es_before,
                 es_after=es_after,
                 protection=clean(protection),
+                carry_drag_annual=carry_drag,
+                borrow_proxy_annual=borrow_proxy,
+                cost_annual=clean(cost_annual),
+                protection_per_cost=clean(ppc),
+                delta_es_ci_low=ci_low,
+                delta_es_ci_high=ci_high,
+                tail_n_days=tail_n_days,
+                tail_mean_book=tail_mean_book,
+                tail_mean_hedged=tail_mean_hedged,
                 residual_beta=residual_beta,
                 corr_stability=corr_stability,
             )
@@ -331,10 +481,29 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
             detail="no usable candidates: none of the candidate symbols had sufficient cached data",
         )
 
-    # Rank by protection descending (Engineering Constraint 12: cointegration
-    # is diagnostic only, never the ranking key); unusable/None-protection
-    # candidates sort last but are still returned, flagged.
-    results.sort(key=lambda r: (r.protection is None, -(r.protection if r.protection is not None else 0.0)))
+    # Rank by protection-per-cost descending (wave-3B "Hedge honest");
+    # candidates without a meaningful ratio (credit/tailwind cost, or no
+    # protection at all) fall back to raw-protection ordering after the
+    # costed ones; unusable candidates sort last but are still returned,
+    # flagged. (Engineering Constraint 12 still holds: correlation stability
+    # is diagnostic only, never the ranking key.)
+    results.sort(key=lambda r: _rank_key(r.protection_per_cost, r.protection))
+
+    # Option hedge candidates on the dominant underlier (largest |mv| book
+    # leg) from the CACHED chain — structured note on any degrade.
+    last_close = {s: float(series_map[s].iloc[-1]) for s in unique_book}
+    dominant = max(unique_book, key=lambda s: abs(qtys[s] * last_close[s]))
+    option_hedges, option_note, option_chain_as_of = _build_option_hedges(
+        store=store,
+        dominant=dominant,
+        mv_dominant=qtys[dominant] * last_close[dominant],
+        dominant_prices=series_map[dominant],
+        book_returns=book_returns,
+        bench_returns=bench_returns,
+        book_gross=book_gross,
+        es_before=es_before,
+    )
+    option_hedges.sort(key=lambda o: _rank_key(o.protection_per_cost, o.protection))
 
     return HedgeResponse(
         benchmark=benchmark,
@@ -342,7 +511,177 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         book_value=clean(book_value),
         book_beta=book_beta,
         es_before=es_before,
+        bench_expected_return_annual=er_bench,
         n_candidates_evaluated=n_evaluated,
         candidates=results[:_MAX_CANDIDATES_OUT],
+        option_underlier=dominant,
+        option_chain_as_of=option_chain_as_of,
+        option_hedges=option_hedges,
+        option_note=option_note,
+        es_note=(
+            f"ES = historical expected shortfall (97.5%) of DAILY returns over the "
+            f"{req.years}y window, as a fraction of book gross"
+        ),
+        cost_note=(
+            f"cost/yr = carry drag (β_h · E[r_bench]; E[r_bench] = "
+            f"{er_bench:+.2%}/yr from cached daily bars over the window) "
+            f"+ borrow proxy {BORROW_PROXY_RATE:.2%}/yr on short/inverse notional "
+            f"(a labeled PROXY, not a quoted borrow rate); option premium annualized "
+            f"over time-to-expiry; all fractions of book gross per year"
+            if er_bench is not None
+            else "cost/yr unavailable: benchmark expected return could not be estimated"
+        ),
+        ci_note=(
+            f"ΔES interval = 95% CI from a seeded paired block bootstrap "
+            f"(block={_CI_BLOCK_SIZE}, n={_CI_N_BOOT}) of daily returns"
+        ),
+        tail_note=(
+            f"tail panel = mean DAILY book return on the worst-decile {benchmark} "
+            f"days in the window, with vs without each hedge"
+        ),
         as_of=iso(book_prices.index[-1]) if len(book_prices) else None,
+    )
+
+
+def _rank_key(ppc: float | None, protection: float | None) -> tuple:
+    """Sort key shared by linear and option candidates: protection-per-cost
+    desc, then (for un-costed candidates) protection desc, unusable last."""
+    return (
+        ppc is None,
+        -(ppc if ppc is not None else 0.0),
+        protection is None,
+        -(protection if protection is not None else 0.0),
+    )
+
+
+def _chain_as_of_date(as_of: str) -> date:
+    """The chain snapshot's date, for time-to-expiry: option premiums/IVs are
+    only honest relative to WHEN they were snapped, not to today."""
+    try:
+        return datetime.strptime(as_of[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return date.today()
+
+
+def _build_option_hedges(
+    store,
+    dominant: str,
+    mv_dominant: float,
+    dominant_prices: pd.Series,
+    book_returns: pd.Series,
+    bench_returns: pd.Series,
+    book_gross: float,
+    es_before: float | None,
+) -> tuple[list[OptionHedgeOut], str | None, str | None]:
+    """(option_hedges, option_note, chain_as_of): protective structures on
+    the dominant underlier from the cached chain. Every degrade path returns
+    a structured note — never raises (never-500)."""
+    if mv_dominant <= 0:
+        return (
+            [],
+            f"dominant underlier {dominant} is a short/zero position — protective "
+            "put/spread/collar structures apply to a long sleeve only",
+            None,
+        )
+
+    options_store = OptionsStore(store.root)
+    if not options_store.has_chain(dominant):
+        return (
+            [],
+            f"no cached option chain for {dominant} — run options_sync_cli to snapshot "
+            "one (only synced underliers, e.g. QQQ, have chains today)",
+            None,
+        )
+    try:
+        chain_df, meta = options_store.read_chain(dominant)
+    except FileNotFoundError:
+        # TOCTOU-safe: the file vanished between has_chain and read_chain.
+        return [], f"no cached option chain for {dominant}", None
+
+    as_of_date = _chain_as_of_date(meta.as_of)
+    spot = meta.spot if math.isfinite(meta.spot) and meta.spot > 0 else float(dominant_prices.iloc[-1])
+
+    structures, notes = build_structures(chain_df, spot=spot, as_of=as_of_date, min_days=_OPTION_MIN_DAYS)
+    if not structures:
+        return [], "; ".join(notes) if notes else "no option structures could be built", meta.as_of
+
+    dom_returns = dominant_prices.pct_change().dropna()
+    aligned = pd.concat({"book": book_returns, "dom": dom_returns}, axis=1).dropna()
+
+    out: list[OptionHedgeOut] = []
+    for st in structures:
+        entry = _price_structure(st, mv_dominant, spot, aligned, bench_returns, book_gross, es_before)
+        if entry is None:
+            notes.append(f"{st.kind}: no payoff at the {_OPTION_SHOCK:+.0%} stress node — unsized")
+            continue
+        out.append(entry)
+
+    method = (
+        f"sized off the {_OPTION_SHOCK:+.0%} stress-grid node of the {dominant} sleeve; "
+        "overlay repriced at constant time-to-expiry and IV (theta/vol response are "
+        "carried by the premium-drag cost column, not the ES overlay); premiums pay "
+        "the spread (long at ask, short at bid)"
+    )
+    note = "; ".join([method, *notes]) if out else ("; ".join(notes) if notes else None)
+    return out, note, meta.as_of
+
+
+def _price_structure(
+    st: OptionStructure,
+    mv_dominant: float,
+    spot: float,
+    aligned: pd.DataFrame,
+    bench_returns: pd.Series,
+    book_gross: float,
+    es_before: float | None,
+) -> OptionHedgeOut | None:
+    contracts = size_contracts(st, mv_underlier=mv_dominant, spot=spot, shock=_OPTION_SHOCK)
+    if contracts is None or len(aligned) == 0:
+        return None
+
+    pnl = structure_daily_pnl(st, contracts=contracts, spot=spot, underlier_returns=aligned["dom"])
+    # SAME overlay convention as the linear candidates: dollar P&L divided by
+    # the ORIGINAL book's gross, added to per-original-book-dollar returns.
+    hedged_returns = aligned["book"] + pnl / book_gross
+
+    try:
+        es_after = clean(historical_es(hedged_returns, confidence=0.975))
+    except InsufficientDataError:
+        es_after = None
+    protection = es_before - es_after if es_before is not None and es_after is not None else None
+
+    cost_annual = clean(
+        premium_annual_drag(st.net_premium_per_contract, contracts, book_gross, st.expiry_years)
+    )
+    ppc = protection_per_cost(protection, cost_annual)
+
+    ci = delta_es_ci(
+        aligned["book"].to_numpy(),
+        hedged_returns.to_numpy(),
+        n_boot=_CI_N_BOOT,
+        block_size=_CI_BLOCK_SIZE,
+        seed=_CI_SEED,
+    )
+    tail = worst_decile_tail(aligned["book"], hedged_returns, bench_returns, decile=_TAIL_DECILE)
+
+    return OptionHedgeOut(
+        kind=st.kind,
+        expiry=st.expiry,
+        expiry_years=clean(st.expiry_years),
+        legs=[
+            OptionLegOut(action=leg.action, strike=leg.strike, right=leg.right, price=leg.price)
+            for leg in st.legs
+        ],
+        contracts=clean(contracts),
+        net_premium_per_contract=clean(st.net_premium_per_contract),
+        cost_annual=cost_annual,
+        es_before=es_before,
+        es_after=es_after,
+        protection=clean(protection),
+        protection_per_cost=clean(ppc),
+        delta_es_ci_low=clean(ci[0]) if ci is not None else None,
+        delta_es_ci_high=clean(ci[1]) if ci is not None else None,
+        tail_n_days=tail.n_days if tail is not None else None,
+        tail_mean_book=clean(tail.mean_book) if tail is not None else None,
+        tail_mean_hedged=clean(tail.mean_hedged) if tail is not None else None,
     )

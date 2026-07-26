@@ -1,10 +1,17 @@
 /**
  * WhatIf page tests (Task 2, wave-2 plan; book builder swap + book_ref,
- * wave-3 Task A1): position builder posts a hypothetical book to
- * POST /api/whatif; results render in amber (Lab's Apply-to-Book precedent
- * — hypothetical books ARE the user's book for color purposes); 422 detail
- * surfaces honestly, never a crash; named scenarios round-trip through
- * localStorage (server persistence deferred — noted in the panel).
+ * wave-3 Task A1; What-If flow, wave-3B Batch 2): position builder posts a
+ * hypothetical book to POST /api/whatif; 422 detail surfaces honestly, never
+ * a crash; named scenarios round-trip through localStorage.
+ *
+ * Color adjudication (batch-1 final review): the CURRENT book (base) is the
+ * user's book and renders amber; hypothetical/scenario values are NOT the
+ * live book and render neutral, sign in the number (stress-grid precedent).
+ *
+ * Wave-3B flow: active book_ref preloads from the URL; "Load current book"
+ * pins the base (chip + URL persistence); the result carries a
+ * current→hypothetical trade ticket and a CRN-paired delta; option legs wire
+ * through the builder; pinned scenarios compare side-by-side.
  * No @testing-library/user-event dependency in this repo — fireEvent only
  * (pattern: lab.test.tsx).
  */
@@ -22,6 +29,7 @@ afterAll(() => server.close());
 
 beforeEach(() => {
   localStorage.clear();
+  window.history.replaceState(null, "", "/");
   server.use(
     http.get("/api/brief", () =>
       HttpResponse.json({
@@ -48,8 +56,8 @@ function renderWhatIf() {
 
 const WHATIF_RESPONSE = {
   weights: [
-    { symbol: "SPY", qty: 60, price: 100, market_value: 6000, weight: 0.6 },
-    { symbol: "QQQ", qty: 40, price: 100, market_value: 4000, weight: 0.4 },
+    { symbol: "SPY", qty: 60, sec_type: "STK", strike: null, expiry: null, right: null, multiplier: 1, price: 100, market_value: 6000, weight: 0.6 },
+    { symbol: "QQQ", qty: 40, sec_type: "STK", strike: null, expiry: null, right: null, multiplier: 1, price: 100, market_value: 4000, weight: 0.4 },
   ],
   beta: 1.0234,
   es_975: 0.0311,
@@ -60,10 +68,16 @@ const WHATIF_RESPONSE = {
     p50: 0.01,
     p95: 0.11,
     n_nonfinite: 0,
+    seed: 7,
+    horizon_days: 126,
   },
   benchmark: { symbol: "SPY", es_975: 0.029, ann_vol: 0.171 },
   n_obs: 250,
   as_of: "2026-07-24T00:00:00Z",
+  base: null,
+  delta: null,
+  trade_ticket: null,
+  notes: [],
 };
 
 function fillFirstRow() {
@@ -93,7 +107,9 @@ test("add/remove position rows", async () => {
   expect(screen.queryByLabelText(/symbol row 2/i)).not.toBeInTheDocument();
 });
 
-test("build book -> compute -> amber results render", async () => {
+test("build book -> compute -> results render; hypothetical values are NEUTRAL, not amber", async () => {
+  // Amber adjudication (batch-1 final review): a hypothetical book is NOT
+  // the live book — its risk numbers must not carry text-you.
   server.use(http.post("/api/whatif", () => HttpResponse.json(WHATIF_RESPONSE)));
   renderWhatIf();
 
@@ -107,7 +123,7 @@ test("build book -> compute -> amber results render", async () => {
   expect(within(weights).getByText("40.00%")).toBeInTheDocument();
 
   const bookRisk = screen.getByTestId("whatif-book-risk");
-  expect(bookRisk).toHaveClass("text-you");
+  expect(bookRisk).not.toHaveClass("text-you");
   expect(within(bookRisk).getByText(/1\.0234/)).toBeInTheDocument();
   expect(within(bookRisk).getByText("3.11%")).toBeInTheDocument();
   expect(within(bookRisk).getByText("18.20%")).toBeInTheDocument();
@@ -117,7 +133,7 @@ test("build book -> compute -> amber results render", async () => {
   expect(within(benchRisk).getByText("17.10%")).toBeInTheDocument();
 
   const mc = screen.getByTestId("whatif-mc-results");
-  expect(mc).toHaveClass("text-you");
+  expect(mc).not.toHaveClass("text-you");
   expect(within(mc).getByText("1.00%")).toBeInTheDocument();
 });
 
@@ -246,4 +262,194 @@ test("editing a row after loading the current book reverts to inline positions",
 
   fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
   await screen.findByTestId("whatif-weights");
+});
+
+// --- wave-3B What-If flow ---
+
+const BASE_RESPONSE = {
+  ...WHATIF_RESPONSE,
+  base: {
+    book_ref: "snap-abc123",
+    valuation_ts: "2026-07-24T00:00:00Z",
+    n_positions: 1,
+    beta: 0.98,
+    es_975: 0.0275,
+    ann_vol: 0.165,
+    p5: -0.08,
+    p50: 0.008,
+    p95: 0.1,
+  },
+  delta: { beta: 0.0434, es_975: 0.0036, ann_vol: 0.017, p5: -0.01, p50: 0.002, p95: 0.01 },
+  trade_ticket: [
+    {
+      symbol: "SPY", sec_type: "STK", strike: null, expiry: null, right: null,
+      multiplier: 1, qty_from: 100, qty_to: 150, qty_delta: 50, action: "BUY", price: 412.33,
+    },
+    {
+      symbol: "QQQ", sec_type: "STK", strike: null, expiry: null, right: null,
+      multiplier: 1, qty_from: 10, qty_to: 0, qty_delta: -10, action: "SELL", price: 500.1,
+    },
+    {
+      symbol: "SPY", sec_type: "OPT", strike: 450, expiry: "20260918", right: "C",
+      multiplier: 100, qty_from: 0, qty_to: 2, qty_delta: 2, action: "BUY", price: 412.33,
+    },
+  ],
+};
+
+test("preloads the active book_ref from the URL and pins it as the base", async () => {
+  window.history.replaceState(null, "", "/?book_ref=snap-abc123");
+  server.use(
+    http.get("/api/book/snap-abc123", () => HttpResponse.json(CURRENT_BOOK)),
+    http.post("/api/whatif", async ({ request }) => {
+      const body = (await request.json()) as { book_ref?: string; base_book_ref?: string };
+      expect(body.base_book_ref).toBe("snap-abc123");
+      expect(body.book_ref).toBe("snap-abc123");
+      return HttpResponse.json(BASE_RESPONSE);
+    })
+  );
+  renderWhatIf();
+
+  // rows populate from the pinned snapshot, and the chip shows the active ref
+  await screen.findByDisplayValue("25", {}, BOOK_FETCH_TIMEOUT);
+  expect(screen.getByTestId("book-pinned-chip")).toHaveTextContent("snap-abc123");
+
+  fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
+  await screen.findByTestId("whatif-weights");
+});
+
+test("load current book pins the base: chip + URL persistence + base_book_ref on compute", async () => {
+  server.use(
+    http.get("/api/book/current", () => HttpResponse.json(CURRENT_BOOK)),
+    http.post("/api/whatif", async ({ request }) => {
+      const body = (await request.json()) as { base_book_ref?: string };
+      expect(body.base_book_ref).toBe("snap-abc123");
+      return HttpResponse.json(BASE_RESPONSE);
+    })
+  );
+  renderWhatIf();
+
+  fireEvent.click(await screen.findByRole("button", { name: /load current book/i }));
+  await screen.findByDisplayValue("25", {}, BOOK_FETCH_TIMEOUT);
+
+  const chip = screen.getByTestId("book-pinned-chip");
+  expect(chip).toHaveTextContent("snap-abc123");
+  expect(chip).toHaveTextContent("2026-07-24"); // as-of stamp on the chip
+  expect(window.location.search).toContain("book_ref=snap-abc123");
+
+  fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
+  await screen.findByTestId("whatif-weights");
+});
+
+test("unpinning the chip clears the base ref and the URL param", async () => {
+  server.use(
+    http.get("/api/book/current", () => HttpResponse.json(CURRENT_BOOK)),
+    http.post("/api/whatif", async ({ request }) => {
+      const body = (await request.json()) as { base_book_ref?: string };
+      expect(body.base_book_ref).toBeUndefined();
+      return HttpResponse.json(WHATIF_RESPONSE);
+    })
+  );
+  renderWhatIf();
+
+  fireEvent.click(await screen.findByRole("button", { name: /load current book/i }));
+  await screen.findByDisplayValue("25", {}, BOOK_FETCH_TIMEOUT);
+  fireEvent.click(screen.getByLabelText(/unpin current book/i));
+
+  expect(screen.queryByTestId("book-pinned-chip")).not.toBeInTheDocument();
+  expect(window.location.search).not.toContain("book_ref");
+
+  fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
+  await screen.findByTestId("whatif-weights");
+});
+
+test("trade ticket renders current→hypothetical per-leg deltas", async () => {
+  server.use(
+    http.get("/api/book/current", () => HttpResponse.json(CURRENT_BOOK)),
+    http.post("/api/whatif", () => HttpResponse.json(BASE_RESPONSE))
+  );
+  renderWhatIf();
+  fireEvent.click(await screen.findByRole("button", { name: /load current book/i }));
+  await screen.findByDisplayValue("25", {}, BOOK_FETCH_TIMEOUT);
+  fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
+
+  const ticket = await screen.findByTestId("whatif-trade-ticket");
+  expect(within(ticket).getByText(/BUY 50 shares SPY/)).toBeInTheDocument();
+  expect(within(ticket).getByText(/SELL 10 shares QQQ/)).toBeInTheDocument();
+  // an option leg opens contracts, with its full descriptor
+  expect(within(ticket).getByText(/OPEN 2 contracts SPY 20260918 450C ×100/)).toBeInTheDocument();
+});
+
+test("base (current book) risk renders AMBER; CRN-paired delta renders with the shared seed", async () => {
+  server.use(
+    http.get("/api/book/current", () => HttpResponse.json(CURRENT_BOOK)),
+    http.post("/api/whatif", () => HttpResponse.json(BASE_RESPONSE))
+  );
+  renderWhatIf();
+  fireEvent.click(await screen.findByRole("button", { name: /load current book/i }));
+  await screen.findByDisplayValue("25", {}, BOOK_FETCH_TIMEOUT);
+  fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
+
+  const base = await screen.findByTestId("whatif-base-risk");
+  expect(base).toHaveClass("text-you"); // the current book IS the user's book
+  expect(within(base).getByText("2.75%")).toBeInTheDocument();
+
+  const delta = screen.getByTestId("whatif-delta");
+  expect(delta).not.toHaveClass("text-you"); // deltas are hypothetical-derived
+  expect(within(delta).getByText(/CRN-paired/)).toBeInTheDocument();
+  expect(within(delta).getByText(/seed 7/)).toBeInTheDocument();
+  expect(within(delta).getByText(/\+0\.36%/)).toBeInTheDocument(); // ΔES, sign in the number
+});
+
+test("option leg inputs wire strike/expiry/right/multiplier into the POST body", async () => {
+  server.use(
+    http.post("/api/whatif", async ({ request }) => {
+      const body = (await request.json()) as { positions?: unknown };
+      expect(body.positions).toEqual([
+        { symbol: "SPY", qty: 2, strike: 450, expiry: "2026-09-18", right: "C", multiplier: 100 },
+      ]);
+      return HttpResponse.json(WHATIF_RESPONSE);
+    })
+  );
+  renderWhatIf();
+
+  fireEvent.change(await screen.findByLabelText(/symbol row 1/i), { target: { value: "SPY" } });
+  fireEvent.change(screen.getByLabelText(/qty row 1/i), { target: { value: "2" } });
+  fireEvent.change(screen.getByLabelText(/type row 1/i), { target: { value: "OPT" } });
+  fireEvent.change(screen.getByLabelText(/strike row 1/i), { target: { value: "450" } });
+  fireEvent.change(screen.getByLabelText(/expiry row 1/i), { target: { value: "2026-09-18" } });
+  fireEvent.change(screen.getByLabelText(/right row 1/i), { target: { value: "C" } });
+
+  fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
+  await screen.findByTestId("whatif-weights");
+});
+
+test("an incomplete option leg blocks compute with an honest error, no POST", async () => {
+  renderWhatIf();
+  fireEvent.change(await screen.findByLabelText(/symbol row 1/i), { target: { value: "SPY" } });
+  fireEvent.change(screen.getByLabelText(/type row 1/i), { target: { value: "OPT" } });
+  // no strike/expiry set
+  fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
+  expect(await screen.findByText(/strike and expiry/i)).toBeInTheDocument();
+});
+
+test("pin result -> side-by-side compare table, URL-persisted names, unpin removes", async () => {
+  server.use(http.post("/api/whatif", () => HttpResponse.json(WHATIF_RESPONSE)));
+  renderWhatIf();
+  fillFirstRow();
+  fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
+  await screen.findByTestId("whatif-weights");
+
+  fireEvent.change(screen.getByLabelText(/pin name/i), { target: { value: "scenA" } });
+  fireEvent.click(screen.getByRole("button", { name: /pin result/i }));
+
+  const compare = screen.getByTestId("whatif-pinned-compare");
+  expect(within(compare).getByText("scenA")).toBeInTheDocument();
+  expect(within(compare).getByText("3.11%")).toBeInTheDocument(); // pinned ES
+  expect(within(compare).getAllByText(/126d/).length).toBeGreaterThan(0); // horizon label
+  expect(window.location.search).toContain("pins=scenA");
+  expect(localStorage.getItem("quantmind.whatif.pins")).toContain("scenA");
+
+  fireEvent.click(within(compare).getByLabelText(/unpin scenario scenA/i));
+  expect(within(compare).queryByText("scenA")).not.toBeInTheDocument();
+  expect(window.location.search).not.toContain("pins=scenA");
 });

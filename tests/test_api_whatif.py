@@ -219,3 +219,204 @@ def test_whatif_both_positions_and_book_ref_is_422(client):
 def test_whatif_neither_positions_nor_book_ref_is_422(client):
     r = client.post("/api/whatif", json={"years": 1})
     assert r.status_code == 422
+
+
+# --- wave-3B What-If flow: base_book_ref diff (trade ticket), common-random-
+# numbers paired sims (shared seed exposed in the response), option legs
+# through BOTH the inline-positions and book_ref paths. ---
+
+
+def _pin(client, positions):
+    r = client.post("/api/book/pin", json={"positions": positions})
+    assert r.status_code == 200
+    return r.json()
+
+
+def test_whatif_response_echoes_shared_seed_and_horizon(client):
+    r = client.post("/api/whatif", json=_payload())
+    assert r.status_code == 200
+    mc = r.json()["mc"]
+    assert mc["seed"] == 7
+    assert mc["horizon_days"] == 21
+
+
+def test_whatif_generates_and_echoes_seed_when_none_given(client):
+    # No seed in the request: the router must draw ONE shared seed, use it,
+    # and expose it — replaying with the echoed seed reproduces the
+    # distribution exactly (the CRN plumbing made auditable).
+    r = client.post("/api/whatif", json=_payload(mc={"horizon": 21, "n_paths": 500}))
+    assert r.status_code == 200
+    seed = r.json()["mc"]["seed"]
+    assert isinstance(seed, int)
+    r2 = client.post("/api/whatif", json=_payload(mc={"horizon": 21, "n_paths": 500, "seed": seed}))
+    assert r2.status_code == 200
+    assert r2.json()["mc"]["histogram"] == r.json()["mc"]["histogram"]
+
+
+def test_whatif_crn_identity_delta_is_exactly_zero_for_identical_books(client):
+    # The CRN identity: base and hypothetical books simulate on the SAME
+    # bootstrap draws, so an identical book yields a delta of EXACTLY zero
+    # (float a - a == 0.0), not merely approximately — no seed is posted on
+    # purpose, the shared generated seed alone must guarantee pairing.
+    pinned = _pin(client, [{"symbol": "SPY", "qty": 60}, {"symbol": "QQQ", "qty": 40}])
+    r = client.post(
+        "/api/whatif",
+        json={
+            "book_ref": pinned["snapshot_id"],
+            "base_book_ref": pinned["snapshot_id"],
+            "years": 1,
+            "mc": {"horizon": 21, "n_paths": 2000},
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    delta = body["delta"]
+    assert delta["beta"] == 0.0
+    assert delta["es_975"] == 0.0
+    assert delta["ann_vol"] == 0.0
+    assert delta["p5"] == 0.0
+    assert delta["p50"] == 0.0
+    assert delta["p95"] == 0.0
+    assert body["trade_ticket"] == []
+    base = body["base"]
+    assert base["book_ref"] == pinned["snapshot_id"]
+    assert base["es_975"] == body["es_975"]
+    assert base["valuation_ts"] and base["valuation_ts"].endswith("Z")
+
+
+def test_whatif_trade_ticket_diffs_current_to_hypothetical(client):
+    pinned = _pin(client, [{"symbol": "SPY", "qty": 100}])
+    r = client.post(
+        "/api/whatif",
+        json={
+            "positions": [{"symbol": "SPY", "qty": 150}, {"symbol": "QQQ", "qty": -10}],
+            "base_book_ref": pinned["snapshot_id"],
+            "years": 1,
+            "mc": {"horizon": 21, "n_paths": 500, "seed": 7},
+        },
+    )
+    assert r.status_code == 200
+    ticket = {t["symbol"]: t for t in r.json()["trade_ticket"]}
+    assert ticket["SPY"]["qty_from"] == 100
+    assert ticket["SPY"]["qty_to"] == 150
+    assert ticket["SPY"]["qty_delta"] == 50
+    assert ticket["SPY"]["action"] == "BUY"
+    assert ticket["SPY"]["sec_type"] == "STK"
+    assert ticket["SPY"]["price"] is not None
+    assert ticket["QQQ"]["qty_from"] == 0
+    assert ticket["QQQ"]["qty_to"] == -10
+    assert ticket["QQQ"]["qty_delta"] == -10
+    assert ticket["QQQ"]["action"] == "SELL"
+
+
+def test_whatif_no_base_book_ref_means_no_base_delta_or_ticket(client):
+    r = client.post("/api/whatif", json=_payload())
+    assert r.status_code == 200
+    body = r.json()
+    assert body["base"] is None
+    assert body["delta"] is None
+    assert body["trade_ticket"] is None
+
+
+def test_whatif_unknown_base_book_ref_is_422(client):
+    r = client.post("/api/whatif", json=_payload(base_book_ref="ffffffffffff"))
+    assert r.status_code == 422
+    assert "ffffffffffff" in r.json()["detail"]
+
+
+def test_whatif_empty_base_book_yields_null_base_risk_and_all_open_ticket(client):
+    # No broker configured in tests: pinning without positions pins an EMPTY
+    # live book. The diff against it is still honest — no base risk numbers
+    # (there is no base book to price) and a ticket that opens every leg.
+    pinned = client.post("/api/book/pin", json={}).json()
+    r = client.post(
+        "/api/whatif",
+        json={
+            "positions": [{"symbol": "SPY", "qty": 10}],
+            "base_book_ref": pinned["snapshot_id"],
+            "years": 1,
+            "mc": {"horizon": 21, "n_paths": 500, "seed": 7},
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["base"]["es_975"] is None
+    assert body["base"]["n_positions"] == 0
+    assert body["delta"] is None
+    assert [t["action"] for t in body["trade_ticket"]] == ["BUY"]
+    assert body["trade_ticket"][0]["qty_from"] == 0
+    assert body["trade_ticket"][0]["qty_to"] == 10
+
+
+def test_whatif_option_leg_inline_prices_at_multiplier_scaled_notional(client):
+    # Delta-one proxy (declared in `notes`, never silent): 1 call contract at
+    # multiplier 100 carries the same underlier notional as 100 shares, so
+    # this book weighs 50/50 — and the option leg's descriptor fields echo
+    # back on its weight row.
+    r = client.post(
+        "/api/whatif",
+        json={
+            "positions": [
+                {"symbol": "SPY", "qty": 100},
+                {"symbol": "SPY", "qty": 1, "strike": 400, "expiry": "2026-09-18", "right": "C"},
+            ],
+            "years": 1,
+            "mc": {"horizon": 21, "n_paths": 500, "seed": 7},
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["weights"][0]["weight"] == pytest.approx(0.5)
+    assert body["weights"][1]["weight"] == pytest.approx(0.5)
+    assert body["weights"][1]["sec_type"] == "OPT"
+    assert body["weights"][1]["strike"] == 400
+    assert body["weights"][1]["expiry"] == "20260918"
+    assert body["weights"][1]["right"] == "C"
+    assert body["weights"][1]["multiplier"] == 100
+    assert body["weights"][0]["sec_type"] == "STK"
+    assert body["notes"]  # the delta-one approximation is declared
+
+
+def test_whatif_option_leg_via_book_ref_matches_inline(client):
+    positions = [
+        {"symbol": "SPY", "qty": 100},
+        {"symbol": "SPY", "qty": 1, "strike": 400, "expiry": "20260918", "right": "C"},
+    ]
+    pinned = _pin(client, positions)
+    mc = {"horizon": 21, "n_paths": 500, "seed": 7}
+    r_ref = client.post(
+        "/api/whatif", json={"book_ref": pinned["snapshot_id"], "years": 1, "mc": mc}
+    )
+    r_inline = client.post("/api/whatif", json={"positions": positions, "years": 1, "mc": mc})
+    assert r_ref.status_code == r_inline.status_code == 200
+    assert r_ref.json()["weights"] == r_inline.json()["weights"]
+    assert r_ref.json()["mc"] == r_inline.json()["mc"]
+
+
+def test_whatif_option_leg_in_trade_ticket_keys_on_the_full_leg(client):
+    # Base holds the underlier only; hypothetical adds a call overlay. The
+    # ticket must key legs on (symbol, strike, expiry, right, multiplier) —
+    # the option leg is a NEW line, not a qty change on the stock line.
+    pinned = _pin(client, [{"symbol": "SPY", "qty": 100}])
+    r = client.post(
+        "/api/whatif",
+        json={
+            "positions": [
+                {"symbol": "SPY", "qty": 100},
+                {"symbol": "SPY", "qty": -2, "strike": 380, "expiry": "20260918", "right": "P"},
+            ],
+            "base_book_ref": pinned["snapshot_id"],
+            "years": 1,
+            "mc": {"horizon": 21, "n_paths": 500, "seed": 7},
+        },
+    )
+    assert r.status_code == 200
+    ticket = r.json()["trade_ticket"]
+    assert len(ticket) == 1  # the unchanged 100-share stock line is absent
+    (line,) = ticket
+    assert line["sec_type"] == "OPT"
+    assert line["strike"] == 380
+    assert line["right"] == "P"
+    assert line["qty_delta"] == -2
+    assert line["action"] == "SELL"
+    assert line["multiplier"] == 100

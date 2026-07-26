@@ -12,6 +12,10 @@ export interface BookPositionOut {
   con_id: number | null;
   sec_type: string;
   multiplier: number;
+  // Option-leg fields (wave-3A book pin): null/absent for plain equity legs.
+  strike?: number | null;
+  expiry?: string | null;
+  right?: "C" | "P" | null;
 }
 
 export interface BookSnapshotOut {
@@ -54,6 +58,68 @@ export function writeActiveBookRef(snapshotId: string | null): void {
     url.searchParams.set(BOOK_REF_PARAM, snapshotId);
   } else {
     url.searchParams.delete(BOOK_REF_PARAM);
+  }
+  window.history.replaceState(null, "", url);
+}
+
+// --- Pinned what-if scenarios (wave-3B What-If flow): a named summary of a
+// computed result, stored locally and compared side-by-side. The record
+// lives in localStorage; the pinned NAMES are URL-persisted (like the
+// active book_ref above) so a reload keeps the same compare set in view. ---
+
+export interface PinnedScenario {
+  name: string;
+  pinned_at: string;
+  as_of: string | null;
+  // Every risk number stays horizon-labeled: MC stats are over horizon_days,
+  // ES is daily, vol is annualized, beta is the 60d rolling estimate.
+  horizon_days: number;
+  n_paths: number;
+  seed: number | null;
+  beta: number | null;
+  es_975: number | null;
+  ann_vol: number | null;
+  p5: number | null;
+  p50: number | null;
+  p95: number | null;
+}
+
+const PINNED_SCENARIOS_KEY = "quantmind.whatif.pins";
+const PINS_PARAM = "pins";
+
+export function readPinnedScenarios(): Record<string, PinnedScenario> {
+  try {
+    const raw = localStorage.getItem(PINNED_SCENARIOS_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, PinnedScenario>) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function writePinnedScenarios(pins: Record<string, PinnedScenario>): void {
+  try {
+    localStorage.setItem(PINNED_SCENARIOS_KEY, JSON.stringify(pins));
+  } catch {
+    // localStorage unavailable (private mode, quota) — pins just don't persist.
+  }
+}
+
+/** Reads the URL-persisted pinned-scenario names (`?pins=a,b`). */
+export function readPinnedNames(): string[] {
+  if (typeof window === "undefined") return [];
+  const raw = new URLSearchParams(window.location.search).get(PINS_PARAM);
+  return raw ? raw.split(",").filter((n) => n !== "") : [];
+}
+
+/** Mirrors the pinned-scenario names into the URL (replaceState, like
+ * writeActiveBookRef) — an empty list clears the param. */
+export function writePinnedNames(names: string[]): void {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (names.length) {
+    url.searchParams.set(PINS_PARAM, names.join(","));
+  } else {
+    url.searchParams.delete(PINS_PARAM);
   }
   window.history.replaceState(null, "", url);
 }
