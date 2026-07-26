@@ -111,7 +111,10 @@ class MonteCarloRequest(BaseModel):
     # Bounds are the resource-exhaustion guard, matching the models/simulate ceiling.
     horizon: int = Field(252, ge=1, le=2520)
     n_paths: int = Field(10_000, ge=1, le=200_000)
-    seed: int | None = None
+    # Bounded like whatif's MonteCarloParams.seed (Batch-2 final review item
+    # 3): np.random.default_rng raises ValueError on a negative seed — a 422
+    # at the model layer, never a 500.
+    seed: int | None = Field(None, ge=0, le=2**31 - 1)
 
 
 class Histogram(BaseModel):

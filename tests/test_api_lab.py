@@ -140,6 +140,24 @@ def test_apply_bounds_reject_resource_exhaustion(client):
     assert apply(100_000, 100).status_code == 422
 
 
+def test_apply_negative_seed_is_422_not_500(client):
+    # Batch-2 final review item 3 (never-500): np.random.default_rng(-1)
+    # raises ValueError — bounds-check the seed like whatif does.
+    fit = _fit(client)
+    r = client.post(
+        "/api/lab/apply",
+        json={
+            "model_name": "ou",
+            "fit": fit,
+            "horizon": 30,
+            "n_paths": 100,
+            "seed": -1,
+            "exposure": {"factor_kind": "rate_level", "units": "usd_per_bp", "value": -610.0},
+        },
+    )
+    assert r.status_code == 422
+
+
 def test_apply_unknown_model_is_404(client):
     fit = _fit(client)
     r = client.post(

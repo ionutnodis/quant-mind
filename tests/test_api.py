@@ -109,6 +109,18 @@ def test_simulate_endpoint_returns_bands_not_raw_paths(client):
     assert len(body["sample_paths"]) <= 100  # never raw 10k paths over the wire
 
 
+def test_simulate_negative_seed_is_422_not_500(client):
+    # Batch-2 final review item 3 (never-500): np.random.default_rng(-1)
+    # raises ValueError — the seed must be bounds-checked at the model layer
+    # (whatif's Field(None, ge=0, le=2**31-1) convention).
+    fit = client.post("/api/models/ou/fit", json={"symbol": "SPY", "years": 1}).json()
+    r = client.post(
+        "/api/models/ou/simulate",
+        json={"fit": fit, "horizon": 60, "n_paths": 100, "seed": -1, "x0": 100.0},
+    )
+    assert r.status_code == 422
+
+
 def test_forged_host_header_is_rejected(client):
     r = client.get("/api/health", headers={"Host": "testserver"})
     assert r.status_code == 403
