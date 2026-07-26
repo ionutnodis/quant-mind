@@ -144,6 +144,7 @@ async def snapshot_option_quotes(
     sleep=asyncio.sleep,
     pace_seconds: float = 1.0,
     batch_size: int = 50,
+    market_data_type: int = 4,
 ) -> list[OptionQuote]:
     """Builds Option contracts for every (expiry, strike, right) in
     `expiries` x `strikes` x {C, P}, then qualifies + snapshots them in paced
@@ -155,6 +156,15 @@ async def snapshot_option_quotes(
     combination) are dropped, never raised — one bad strike must not abort the
     whole chain sync."""
     from ib_async import Option
+
+    # Market-data type 4 = delayed-frozen: last available delayed quote, served
+    # even off-hours and WITHOUT live OPRA sharing on the session (field report
+    # 2026-07-26: Error 354 on every live option snapshot from the paper
+    # session, with "Delayed market data is available"). The chain cache feeds
+    # daily risk math, so delayed is honest; sessions with live sharing enabled
+    # can pass market_data_type=1.
+    if hasattr(ib, "reqMarketDataType"):
+        ib.reqMarketDataType(market_data_type)
 
     contracts = [
         Option(chain.underlying_symbol, expiry, strike, right, chain.exchange, chain.multiplier)

@@ -140,7 +140,11 @@ class _FakeIbSnapshot:
     def __init__(self):
         self.qualify_batches: list[int] = []
         self.ticker_batches: list[int] = []
+        self.market_data_types: list[int] = []
         self._next_con_id = 1000
+
+    def reqMarketDataType(self, t):
+        self.market_data_types.append(t)
 
     async def qualifyContractsAsync(self, *contracts):
         self.qualify_batches.append(len(contracts))
@@ -240,3 +244,27 @@ async def test_snapshot_option_quotes_treats_sentinel_bid_ask_as_missing():
         ib, chain, expiries=chain.expirations, strikes=chain.strikes, sleep=_FakeSleeper(), pace_seconds=0.1, batch_size=50
     )
     assert all(q.bid is None and q.ask is None and q.iv is None and q.delta is None for q in quotes)
+
+
+async def test_snapshot_requests_delayed_frozen_market_data_by_default():
+    # Error 354 field report (2026-07-26): live OPRA snapshots are rejected on
+    # the paper session ("Delayed market data is available"). The chain cache
+    # feeds daily risk math, so delayed-frozen (type 4) is the honest default;
+    # operators with live sharing enabled can pass market_data_type=1.
+    ib = _FakeIbSnapshot()
+    sleeper = _FakeSleeper()
+    chain = _params()
+    await snapshot_option_quotes(
+        ib, chain, expiries=chain.expirations, strikes=chain.strikes, sleep=sleeper
+    )
+    assert ib.market_data_types == [4]
+
+
+async def test_snapshot_market_data_type_is_overridable():
+    ib = _FakeIbSnapshot()
+    sleeper = _FakeSleeper()
+    chain = _params()
+    await snapshot_option_quotes(
+        ib, chain, expiries=chain.expirations, strikes=chain.strikes, sleep=sleeper, market_data_type=1
+    )
+    assert ib.market_data_types == [1]
