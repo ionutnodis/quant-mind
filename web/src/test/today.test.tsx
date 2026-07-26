@@ -14,11 +14,23 @@ beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
-// Plotly needs real canvas/WebGL; stub the heatmap in jsdom.
-vi.mock("../components/CorrelationHeatmap", () => ({
-  CorrelationHeatmap: () => <div data-testid="corr-heatmap" />,
-}));
 import { vi } from "vitest";
+
+// Plotly needs real canvas/WebGL; stub the rotation heatmap in jsdom. Each
+// of these three components owns its own data fetch (POST /api/rotation,
+// GET /api/news, GET /api/instruments/*/candles + /api/macro) — they get
+// their own dedicated component tests (rotationheatmap.test.tsx,
+// newsticker.test.tsx, glancecharts.test.tsx); Today's own test stays
+// scoped to what /api/brief + /api/models drive.
+vi.mock("../components/RotationHeatmap", () => ({
+  RotationHeatmap: () => <div data-testid="rotation-heatmap-stub" />,
+}));
+vi.mock("../components/NewsTicker", () => ({
+  NewsTicker: () => <div data-testid="news-ticker-stub" />,
+}));
+vi.mock("../components/GlanceCharts", () => ({
+  GlanceCharts: () => <div data-testid="glance-charts-stub" />,
+}));
 
 function renderToday() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });

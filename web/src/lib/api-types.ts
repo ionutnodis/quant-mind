@@ -225,6 +225,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/news": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get News */
+        get: operations["get_news_api_news_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/options/book-greeks": {
         parameters: {
             query?: never;
@@ -310,6 +327,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/risk/{symbol}/regression": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Regression */
+        get: operations["regression_api_risk__symbol__regression_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rotation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Rotation */
+        post: operations["rotation_api_rotation_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sync": {
         parameters: {
             query?: never;
@@ -365,6 +416,70 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AccountOut */
+        AccountOut: {
+            /** Buying Power */
+            buying_power: number | null;
+            /** Gross Position Value */
+            gross_position_value: number | null;
+            /** Net Liquidation */
+            net_liquidation: number | null;
+            /** Total Cash Value */
+            total_cash_value: number | null;
+        };
+        /**
+         * AttributionOut
+         * @description Requirement 4 — the product's identity number: daily book P&L
+         *     decomposed into beta*bench_return*book_value (core) vs the residual
+         *     (overlay), over `window_days` of the cached history. Pure math lives in
+         *     exposure/attribution.py; this router only assembles the return series and
+         *     estimates beta (quantmind.risk.returns.rolling_beta, the same estimator
+         *     routers/risk.py and routers/hedge.py use).
+         */
+        AttributionOut: {
+            /** Available */
+            available: boolean;
+            /** Beta */
+            beta: number | null;
+            /** Core Pnl */
+            core_pnl: number | null;
+            /** Core Share */
+            core_share: number | null;
+            /** N Obs */
+            n_obs: number;
+            /** Overlay Pnl */
+            overlay_pnl: number | null;
+            /** Overlay Share */
+            overlay_share: number | null;
+            /** Reason */
+            reason: string | null;
+            /** Series */
+            series: components["schemas"]["AttributionPointOut"][];
+            /** Total Pnl */
+            total_pnl: number | null;
+            /** Window Days */
+            window_days: number;
+        };
+        /** AttributionPointOut */
+        AttributionPointOut: {
+            /** Core Pnl */
+            core_pnl: number | null;
+            /** Date */
+            date: string;
+            /** Overlay Pnl */
+            overlay_pnl: number | null;
+            /** Total Pnl */
+            total_pnl: number | null;
+        };
+        /** AttributionRow */
+        AttributionRow: {
+            /** Annualized */
+            annualized: number | null;
+            /** Daily */
+            daily: number | null;
+            /** Name */
+            name: string;
+        };
         /** BenchmarkOut */
         BenchmarkOut: {
             /** Ann Vol */
@@ -373,6 +488,19 @@ export interface components {
             es_975: number | null;
             /** Symbol */
             symbol: string;
+        };
+        /** BetaEstimate */
+        BetaEstimate: {
+            /** Beta */
+            beta: number | null;
+            /** Ci High */
+            ci_high: number | null;
+            /** Ci Low */
+            ci_low: number | null;
+            /** Factor */
+            factor: string;
+            /** Se */
+            se: number | null;
         };
         /** BetaPoint */
         BetaPoint: {
@@ -495,6 +623,37 @@ export interface components {
             /** Symbols */
             symbols: string[];
         };
+        /**
+         * ExpiryBucketsOut
+         * @description Requirement 5: option legs bucketed by days-to-expiry. Only legs that
+         *     resolved to a priceable BookLeg (matching cached-chain IV) are bucketed —
+         *     an unpriceable OPT position has no known expiry to bucket by.
+         */
+        ExpiryBucketsOut: {
+            /** Later */
+            later: components["schemas"]["ExpiryLegOut"][];
+            /** Le 30D */
+            le_30d: components["schemas"]["ExpiryLegOut"][];
+            /** Le 7D */
+            le_7d: components["schemas"]["ExpiryLegOut"][];
+            /** Le 90D */
+            le_90d: components["schemas"]["ExpiryLegOut"][];
+        };
+        /** ExpiryLegOut */
+        ExpiryLegOut: {
+            /** Days To Expiry */
+            days_to_expiry: number;
+            /** Expiry */
+            expiry: string;
+            /** Qty */
+            qty: number;
+            /** Right */
+            right: string;
+            /** Strike */
+            strike: number;
+            /** Symbol */
+            symbol: string;
+        };
         /** ExpirySmile */
         ExpirySmile: {
             /** Expiry */
@@ -510,6 +669,32 @@ export interface components {
             units: string;
             /** Value */
             value: number;
+        };
+        /**
+         * FitLine
+         * @description The single-factor (`factors[0]` alone) OLS line the scatter is drawn
+         *     against. When more than one factor is requested this is DELIBERATELY not
+         *     the same as that factor's `betas[]` entry below: `betas[]` is the
+         *     multi-factor PARTIAL beta (holding the other factors fixed), while this
+         *     is the simple two-variable slope — the gap between them is itself
+         *     informative (it's what the other factors were absorbing).
+         */
+        FitLine: {
+            /** Factor */
+            factor: string;
+            /** Intercept */
+            intercept: number | null;
+            /** R Squared */
+            r_squared: number | null;
+            /** Slope */
+            slope: number | null;
+            /** Slope Ci */
+            slope_ci: [
+                number | null,
+                number | null
+            ];
+            /** Slope Se */
+            slope_se: number | null;
         };
         /** FitRequest */
         FitRequest: {
@@ -777,6 +962,28 @@ export interface components {
             /** Series */
             series: components["schemas"]["SeriesPoint"][];
         };
+        /** NewsItemOut */
+        NewsItemOut: {
+            /** Headline */
+            headline: string;
+            /** Source */
+            source: string;
+            /** Symbol */
+            symbol?: string | null;
+            /** Time */
+            time: string;
+            /** Url */
+            url?: string | null;
+        };
+        /** NewsResponse */
+        NewsResponse: {
+            /** As Of */
+            as_of: string | null;
+            /** Items */
+            items: components["schemas"]["NewsItemOut"][];
+            /** Note */
+            note: string | null;
+        };
         /** Objective */
         Objective: {
             /**
@@ -807,6 +1014,33 @@ export interface components {
             /** Strike */
             strike: number;
         };
+        /**
+         * OptionsSleeveOut
+         * @description Requirement 3: per-underlying net Gamma/vega/theta + the spot x vol
+         *     stress grid — renders only when option positions AND priceable chain
+         *     data exist; the two honest-empty `reason`s are documented on the module
+         *     docstring above.
+         */
+        OptionsSleeveOut: {
+            /** Available */
+            available: boolean;
+            /** Reason */
+            reason: string | null;
+            stress_grid: components["schemas"]["StressGridOut"] | null;
+            /** Underlyings */
+            underlyings: components["schemas"]["SleeveUnderlyingOut"][];
+        };
+        /** OtherSideOut */
+        OtherSideOut: {
+            /** Corr */
+            corr: number | null;
+            /** Ret */
+            ret: number | null;
+            /** Score */
+            score: number | null;
+            /** Symbol */
+            symbol: string;
+        };
         /** PnlHistogram */
         PnlHistogram: {
             /** Bin Edges */
@@ -816,8 +1050,16 @@ export interface components {
         };
         /** PortfolioResponse */
         PortfolioResponse: {
+            account: components["schemas"]["AccountOut"] | null;
+            /** Account Note */
+            account_note: string | null;
+            attribution: components["schemas"]["AttributionOut"];
             /** Base Currency */
             base_currency: string;
+            expiry_buckets: components["schemas"]["ExpiryBucketsOut"];
+            /** Exposure */
+            exposure: components["schemas"]["UnderlyingExposureOut"][];
+            options_sleeve: components["schemas"]["OptionsSleeveOut"];
             /** Positions */
             positions: components["schemas"]["PositionOut"][];
             /** Snapshot Id */
@@ -847,6 +1089,8 @@ export interface components {
         };
         /** PositionOut */
         PositionOut: {
+            /** Avg Cost */
+            avg_cost?: number | null;
             /** Con Id */
             con_id: number;
             /** Last Close */
@@ -861,8 +1105,69 @@ export interface components {
             sec_type: string;
             /** Symbol */
             symbol: string;
+            /** Unrealized Pnl */
+            unrealized_pnl?: number | null;
             /** Weight */
             weight: number | null;
+        };
+        /** R2Step */
+        R2Step: {
+            /** Factor Added */
+            factor_added: string;
+            /** R Squared */
+            r_squared: number | null;
+        };
+        /** RegressionResponse */
+        RegressionResponse: {
+            /** Alpha Annualized */
+            alpha_annualized: number | null;
+            /** Alpha Ci */
+            alpha_ci: [
+                number | null,
+                number | null
+            ];
+            /** Alpha Daily */
+            alpha_daily: number | null;
+            /** Alpha Se */
+            alpha_se: number | null;
+            /** As Of */
+            as_of: string | null;
+            /** Attribution */
+            attribution: components["schemas"]["AttributionRow"][];
+            /** Betas */
+            betas: components["schemas"]["BetaEstimate"][];
+            /** Factors */
+            factors: string[];
+            fit_line: components["schemas"]["FitLine"];
+            /** Hac Lags */
+            hac_lags: number;
+            /** Horizon Note */
+            horizon_note: string;
+            /** N Obs */
+            n_obs: number;
+            /** R Squared */
+            r_squared: number | null;
+            /** R Squared Progression */
+            r_squared_progression: components["schemas"]["R2Step"][];
+            /** Residuals */
+            residuals: components["schemas"]["ResidualPoint"][];
+            /** Scatter */
+            scatter: components["schemas"]["ScatterPoint"][];
+            /** Symbol */
+            symbol: string;
+            /** Variance Decomposition */
+            variance_decomposition: components["schemas"]["ShareRow"][];
+            /** Window */
+            window: number | null;
+            /** Years */
+            years: number;
+        };
+        /** ResidualPoint */
+        ResidualPoint: {
+            /** Date */
+            date: string;
+            /** Value */
+            value: number | null;
         };
         /** RiskResponse */
         RiskResponse: {
@@ -889,6 +1194,52 @@ export interface components {
             /** Years */
             years: number;
         };
+        /** RotationRequest */
+        RotationRequest: {
+            /** Anchor */
+            anchor?: string | null;
+            /**
+             * Corr Window
+             * @default 60
+             * @enum {integer}
+             */
+            corr_window: 20 | 60 | 120;
+            /**
+             * Return Days
+             * @default 5
+             */
+            return_days: number;
+            /** Symbols */
+            symbols?: string[] | null;
+            /**
+             * Universe
+             * @enum {string}
+             */
+            universe: "sectors" | "factors" | "world" | "custom";
+        };
+        /** RotationResponse */
+        RotationResponse: {
+            /** Anchor */
+            anchor: string | null;
+            /** As Of */
+            as_of: string | null;
+            /** Corr Window */
+            corr_window: number;
+            /** Matrix */
+            matrix: (number | null)[][];
+            /** Missing */
+            missing: string[];
+            /** Other Side */
+            other_side: components["schemas"]["OtherSideOut"][] | null;
+            /** Return Days */
+            return_days: number;
+            /** Returns */
+            returns: components["schemas"]["SymbolReturnOut"][];
+            /** Symbols */
+            symbols: string[];
+            /** Universe */
+            universe: string;
+        };
         /** RotationRow */
         RotationRow: {
             /** Ret 1D */
@@ -900,12 +1251,28 @@ export interface components {
             /** Symbol */
             symbol: string;
         };
+        /** ScatterPoint */
+        ScatterPoint: {
+            /** Asset */
+            asset: number | null;
+            /** Date */
+            date: string;
+            /** Factor */
+            factor: number | null;
+        };
         /** SeriesPoint */
         SeriesPoint: {
             /** Date */
             date: string;
             /** Value */
             value: number | null;
+        };
+        /** ShareRow */
+        ShareRow: {
+            /** Name */
+            name: string;
+            /** Share */
+            share: number | null;
         };
         /** SimulateRequest */
         SimulateRequest: {
@@ -938,6 +1305,17 @@ export interface components {
             /** Sample Paths */
             sample_paths: number[][];
         };
+        /** SleeveUnderlyingOut */
+        SleeveUnderlyingOut: {
+            /** Gamma */
+            gamma: number | null;
+            /** Theta */
+            theta: number | null;
+            /** Underlier */
+            underlier: string;
+            /** Vega */
+            vega: number | null;
+        };
         /** SmilePoint */
         SmilePoint: {
             /** Iv */
@@ -953,6 +1331,13 @@ export interface components {
             spot_shocks: number[];
             /** Vol Shocks */
             vol_shocks: number[];
+        };
+        /** SymbolReturnOut */
+        SymbolReturnOut: {
+            /** Ret */
+            ret: number | null;
+            /** Symbol */
+            symbol: string;
         };
         /** SyncStatusResponse */
         SyncStatusResponse: {
@@ -983,6 +1368,31 @@ export interface components {
             market_value: number | null;
             /** N Positions */
             n_positions: number;
+            /** Unrealized Pnl */
+            unrealized_pnl?: number | null;
+        };
+        /**
+         * UnderlyingExposureOut
+         * @description Delta-adjusted exposure (Task B1 requirement 2 — "the number he
+         *     manages to"): net delta (shares + option legs via book_greeks),
+         *     dollar-delta, and SPY-equivalent notional (dollar-delta * per-underlier
+         *     beta vs the app benchmark, estimated from cached bars).
+         */
+        UnderlyingExposureOut: {
+            /** Beta */
+            beta: number | null;
+            /** Beta Note */
+            beta_note: string | null;
+            /** Dollar Delta */
+            dollar_delta: number | null;
+            /** Net Delta */
+            net_delta: number | null;
+            /** Spot */
+            spot: number | null;
+            /** Spy Equivalent Notional */
+            spy_equivalent_notional: number | null;
+            /** Underlier */
+            underlier: string;
         };
         /** UnderlyingGreeksOut */
         UnderlyingGreeksOut: {
@@ -1447,6 +1857,26 @@ export interface operations {
             };
         };
     };
+    get_news_api_news_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NewsResponse"];
+                };
+            };
+        };
+    };
     book_greeks_api_options_book_greeks_post: {
         parameters: {
             query?: never;
@@ -1513,7 +1943,10 @@ export interface operations {
     };
     get_portfolio_api_portfolio_get: {
         parameters: {
-            query?: never;
+            query?: {
+                book_ref?: string | null;
+                attribution_days?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -1527,6 +1960,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PortfolioResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -1585,6 +2027,75 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RiskResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    regression_api_risk__symbol__regression_get: {
+        parameters: {
+            query: {
+                /** @description comma-separated factor names, e.g. SPY,MTUM,US10Y */
+                factors: string;
+                window?: number | null;
+                years?: number;
+            };
+            header?: never;
+            path: {
+                symbol: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegressionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rotation_api_rotation_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RotationRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RotationResponse"];
                 };
             };
             /** @description Validation Error */

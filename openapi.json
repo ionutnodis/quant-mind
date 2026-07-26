@@ -1,6 +1,264 @@
 {
   "components": {
     "schemas": {
+      "AccountOut": {
+        "properties": {
+          "buying_power": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Buying Power"
+          },
+          "gross_position_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gross Position Value"
+          },
+          "net_liquidation": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Net Liquidation"
+          },
+          "total_cash_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Cash Value"
+          }
+        },
+        "required": [
+          "net_liquidation",
+          "total_cash_value",
+          "gross_position_value",
+          "buying_power"
+        ],
+        "title": "AccountOut",
+        "type": "object"
+      },
+      "AttributionOut": {
+        "description": "Requirement 4 \u2014 the product's identity number: daily book P&L\ndecomposed into beta*bench_return*book_value (core) vs the residual\n(overlay), over `window_days` of the cached history. Pure math lives in\nexposure/attribution.py; this router only assembles the return series and\nestimates beta (quantmind.risk.returns.rolling_beta, the same estimator\nrouters/risk.py and routers/hedge.py use).",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "beta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta"
+          },
+          "core_pnl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Core Pnl"
+          },
+          "core_share": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Core Share"
+          },
+          "n_obs": {
+            "title": "N Obs",
+            "type": "integer"
+          },
+          "overlay_pnl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overlay Pnl"
+          },
+          "overlay_share": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overlay Share"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "series": {
+            "items": {
+              "$ref": "#/components/schemas/AttributionPointOut"
+            },
+            "title": "Series",
+            "type": "array"
+          },
+          "total_pnl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Pnl"
+          },
+          "window_days": {
+            "title": "Window Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "available",
+          "reason",
+          "window_days",
+          "beta",
+          "n_obs",
+          "total_pnl",
+          "core_pnl",
+          "overlay_pnl",
+          "core_share",
+          "overlay_share",
+          "series"
+        ],
+        "title": "AttributionOut",
+        "type": "object"
+      },
+      "AttributionPointOut": {
+        "properties": {
+          "core_pnl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Core Pnl"
+          },
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "overlay_pnl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overlay Pnl"
+          },
+          "total_pnl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Pnl"
+          }
+        },
+        "required": [
+          "date",
+          "total_pnl",
+          "core_pnl",
+          "overlay_pnl"
+        ],
+        "title": "AttributionPointOut",
+        "type": "object"
+      },
+      "AttributionRow": {
+        "properties": {
+          "annualized": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annualized"
+          },
+          "daily": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Daily"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "daily",
+          "annualized"
+        ],
+        "title": "AttributionRow",
+        "type": "object"
+      },
       "BenchmarkOut": {
         "properties": {
           "ann_vol": {
@@ -36,6 +294,67 @@
           "ann_vol"
         ],
         "title": "BenchmarkOut",
+        "type": "object"
+      },
+      "BetaEstimate": {
+        "properties": {
+          "beta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta"
+          },
+          "ci_high": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ci High"
+          },
+          "ci_low": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ci Low"
+          },
+          "factor": {
+            "title": "Factor",
+            "type": "string"
+          },
+          "se": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Se"
+          }
+        },
+        "required": [
+          "factor",
+          "beta",
+          "se",
+          "ci_low",
+          "ci_high"
+        ],
+        "title": "BetaEstimate",
         "type": "object"
       },
       "BetaPoint": {
@@ -514,6 +833,85 @@
         "title": "Correlation",
         "type": "object"
       },
+      "ExpiryBucketsOut": {
+        "description": "Requirement 5: option legs bucketed by days-to-expiry. Only legs that\nresolved to a priceable BookLeg (matching cached-chain IV) are bucketed \u2014\nan unpriceable OPT position has no known expiry to bucket by.",
+        "properties": {
+          "later": {
+            "items": {
+              "$ref": "#/components/schemas/ExpiryLegOut"
+            },
+            "title": "Later",
+            "type": "array"
+          },
+          "le_30d": {
+            "items": {
+              "$ref": "#/components/schemas/ExpiryLegOut"
+            },
+            "title": "Le 30D",
+            "type": "array"
+          },
+          "le_7d": {
+            "items": {
+              "$ref": "#/components/schemas/ExpiryLegOut"
+            },
+            "title": "Le 7D",
+            "type": "array"
+          },
+          "le_90d": {
+            "items": {
+              "$ref": "#/components/schemas/ExpiryLegOut"
+            },
+            "title": "Le 90D",
+            "type": "array"
+          }
+        },
+        "required": [
+          "le_7d",
+          "le_30d",
+          "le_90d",
+          "later"
+        ],
+        "title": "ExpiryBucketsOut",
+        "type": "object"
+      },
+      "ExpiryLegOut": {
+        "properties": {
+          "days_to_expiry": {
+            "title": "Days To Expiry",
+            "type": "integer"
+          },
+          "expiry": {
+            "title": "Expiry",
+            "type": "string"
+          },
+          "qty": {
+            "title": "Qty",
+            "type": "number"
+          },
+          "right": {
+            "title": "Right",
+            "type": "string"
+          },
+          "strike": {
+            "title": "Strike",
+            "type": "number"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "expiry",
+          "right",
+          "strike",
+          "qty",
+          "days_to_expiry"
+        ],
+        "title": "ExpiryLegOut",
+        "type": "object"
+      },
       "ExpirySmile": {
         "properties": {
           "expiry": {
@@ -556,6 +954,97 @@
           "value"
         ],
         "title": "ExposureRequest",
+        "type": "object"
+      },
+      "FitLine": {
+        "description": "The single-factor (`factors[0]` alone) OLS line the scatter is drawn\nagainst. When more than one factor is requested this is DELIBERATELY not\nthe same as that factor's `betas[]` entry below: `betas[]` is the\nmulti-factor PARTIAL beta (holding the other factors fixed), while this\nis the simple two-variable slope \u2014 the gap between them is itself\ninformative (it's what the other factors were absorbing).",
+        "properties": {
+          "factor": {
+            "title": "Factor",
+            "type": "string"
+          },
+          "intercept": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intercept"
+          },
+          "r_squared": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "R Squared"
+          },
+          "slope": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slope"
+          },
+          "slope_ci": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            ],
+            "title": "Slope Ci",
+            "type": "array"
+          },
+          "slope_se": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slope Se"
+          }
+        },
+        "required": [
+          "factor",
+          "slope",
+          "slope_se",
+          "slope_ci",
+          "intercept",
+          "r_squared"
+        ],
+        "title": "FitLine",
         "type": "object"
       },
       "FitRequest": {
@@ -1567,6 +2056,91 @@
         "title": "NetLiquidityBlock",
         "type": "object"
       },
+      "NewsItemOut": {
+        "properties": {
+          "headline": {
+            "title": "Headline",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "symbol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Symbol"
+          },
+          "time": {
+            "title": "Time",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "time",
+          "source",
+          "headline"
+        ],
+        "title": "NewsItemOut",
+        "type": "object"
+      },
+      "NewsResponse": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/NewsItemOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "required": [
+          "items",
+          "as_of",
+          "note"
+        ],
+        "title": "NewsResponse",
+        "type": "object"
+      },
       "Objective": {
         "properties": {
           "kind": {
@@ -1664,6 +2238,100 @@
         "title": "OptionQuoteOut",
         "type": "object"
       },
+      "OptionsSleeveOut": {
+        "description": "Requirement 3: per-underlying net Gamma/vega/theta + the spot x vol\nstress grid \u2014 renders only when option positions AND priceable chain\ndata exist; the two honest-empty `reason`s are documented on the module\ndocstring above.",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "stress_grid": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StressGridOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "underlyings": {
+            "items": {
+              "$ref": "#/components/schemas/SleeveUnderlyingOut"
+            },
+            "title": "Underlyings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "available",
+          "reason",
+          "underlyings",
+          "stress_grid"
+        ],
+        "title": "OptionsSleeveOut",
+        "type": "object"
+      },
+      "OtherSideOut": {
+        "properties": {
+          "corr": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Corr"
+          },
+          "ret": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ret"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "corr",
+          "ret",
+          "score"
+        ],
+        "title": "OtherSideOut",
+        "type": "object"
+      },
       "PnlHistogram": {
         "properties": {
           "bin_edges": {
@@ -1690,9 +2358,46 @@
       },
       "PortfolioResponse": {
         "properties": {
+          "account": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "account_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Note"
+          },
+          "attribution": {
+            "$ref": "#/components/schemas/AttributionOut"
+          },
           "base_currency": {
             "title": "Base Currency",
             "type": "string"
+          },
+          "expiry_buckets": {
+            "$ref": "#/components/schemas/ExpiryBucketsOut"
+          },
+          "exposure": {
+            "items": {
+              "$ref": "#/components/schemas/UnderlyingExposureOut"
+            },
+            "title": "Exposure",
+            "type": "array"
+          },
+          "options_sleeve": {
+            "$ref": "#/components/schemas/OptionsSleeveOut"
           },
           "positions": {
             "items": {
@@ -1718,7 +2423,13 @@
           "valuation_ts",
           "base_currency",
           "positions",
-          "totals"
+          "totals",
+          "account",
+          "account_note",
+          "exposure",
+          "options_sleeve",
+          "expiry_buckets",
+          "attribution"
         ],
         "title": "PortfolioResponse",
         "type": "object"
@@ -1793,6 +2504,17 @@
       },
       "PositionOut": {
         "properties": {
+          "avg_cost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Cost"
+          },
           "con_id": {
             "title": "Con Id",
             "type": "integer"
@@ -1835,6 +2557,17 @@
             "title": "Symbol",
             "type": "string"
           },
+          "unrealized_pnl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unrealized Pnl"
+          },
           "weight": {
             "anyOf": [
               {
@@ -1858,6 +2591,250 @@
           "weight"
         ],
         "title": "PositionOut",
+        "type": "object"
+      },
+      "R2Step": {
+        "properties": {
+          "factor_added": {
+            "title": "Factor Added",
+            "type": "string"
+          },
+          "r_squared": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "R Squared"
+          }
+        },
+        "required": [
+          "factor_added",
+          "r_squared"
+        ],
+        "title": "R2Step",
+        "type": "object"
+      },
+      "RegressionResponse": {
+        "properties": {
+          "alpha_annualized": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha Annualized"
+          },
+          "alpha_ci": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            ],
+            "title": "Alpha Ci",
+            "type": "array"
+          },
+          "alpha_daily": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha Daily"
+          },
+          "alpha_se": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha Se"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "attribution": {
+            "items": {
+              "$ref": "#/components/schemas/AttributionRow"
+            },
+            "title": "Attribution",
+            "type": "array"
+          },
+          "betas": {
+            "items": {
+              "$ref": "#/components/schemas/BetaEstimate"
+            },
+            "title": "Betas",
+            "type": "array"
+          },
+          "factors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Factors",
+            "type": "array"
+          },
+          "fit_line": {
+            "$ref": "#/components/schemas/FitLine"
+          },
+          "hac_lags": {
+            "title": "Hac Lags",
+            "type": "integer"
+          },
+          "horizon_note": {
+            "title": "Horizon Note",
+            "type": "string"
+          },
+          "n_obs": {
+            "title": "N Obs",
+            "type": "integer"
+          },
+          "r_squared": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "R Squared"
+          },
+          "r_squared_progression": {
+            "items": {
+              "$ref": "#/components/schemas/R2Step"
+            },
+            "title": "R Squared Progression",
+            "type": "array"
+          },
+          "residuals": {
+            "items": {
+              "$ref": "#/components/schemas/ResidualPoint"
+            },
+            "title": "Residuals",
+            "type": "array"
+          },
+          "scatter": {
+            "items": {
+              "$ref": "#/components/schemas/ScatterPoint"
+            },
+            "title": "Scatter",
+            "type": "array"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          },
+          "variance_decomposition": {
+            "items": {
+              "$ref": "#/components/schemas/ShareRow"
+            },
+            "title": "Variance Decomposition",
+            "type": "array"
+          },
+          "window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window"
+          },
+          "years": {
+            "title": "Years",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "symbol",
+          "factors",
+          "window",
+          "years",
+          "n_obs",
+          "hac_lags",
+          "scatter",
+          "fit_line",
+          "alpha_daily",
+          "alpha_annualized",
+          "alpha_se",
+          "alpha_ci",
+          "betas",
+          "r_squared",
+          "r_squared_progression",
+          "variance_decomposition",
+          "attribution",
+          "residuals",
+          "as_of",
+          "horizon_note"
+        ],
+        "title": "RegressionResponse",
+        "type": "object"
+      },
+      "ResidualPoint": {
+        "properties": {
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "date",
+          "value"
+        ],
+        "title": "ResidualPoint",
         "type": "object"
       },
       "RiskResponse": {
@@ -1954,6 +2931,172 @@
         "title": "RiskResponse",
         "type": "object"
       },
+      "RotationRequest": {
+        "properties": {
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
+          "corr_window": {
+            "default": 60,
+            "enum": [
+              20,
+              60,
+              120
+            ],
+            "title": "Corr Window",
+            "type": "integer"
+          },
+          "return_days": {
+            "default": 5,
+            "maximum": 21.0,
+            "minimum": 1.0,
+            "title": "Return Days",
+            "type": "integer"
+          },
+          "symbols": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Symbols"
+          },
+          "universe": {
+            "enum": [
+              "sectors",
+              "factors",
+              "world",
+              "custom"
+            ],
+            "title": "Universe",
+            "type": "string"
+          }
+        },
+        "required": [
+          "universe"
+        ],
+        "title": "RotationRequest",
+        "type": "object"
+      },
+      "RotationResponse": {
+        "properties": {
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "corr_window": {
+            "title": "Corr Window",
+            "type": "integer"
+          },
+          "matrix": {
+            "items": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "title": "Matrix",
+            "type": "array"
+          },
+          "missing": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing",
+            "type": "array"
+          },
+          "other_side": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/OtherSideOut"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Other Side"
+          },
+          "return_days": {
+            "title": "Return Days",
+            "type": "integer"
+          },
+          "returns": {
+            "items": {
+              "$ref": "#/components/schemas/SymbolReturnOut"
+            },
+            "title": "Returns",
+            "type": "array"
+          },
+          "symbols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Symbols",
+            "type": "array"
+          },
+          "universe": {
+            "title": "Universe",
+            "type": "string"
+          }
+        },
+        "required": [
+          "universe",
+          "symbols",
+          "matrix",
+          "corr_window",
+          "return_days",
+          "returns",
+          "anchor",
+          "other_side",
+          "as_of",
+          "missing"
+        ],
+        "title": "RotationResponse",
+        "type": "object"
+      },
       "RotationRow": {
         "properties": {
           "ret_1d": {
@@ -2003,6 +3146,43 @@
         "title": "RotationRow",
         "type": "object"
       },
+      "ScatterPoint": {
+        "properties": {
+          "asset": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asset"
+          },
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "factor": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Factor"
+          }
+        },
+        "required": [
+          "date",
+          "asset",
+          "factor"
+        ],
+        "title": "ScatterPoint",
+        "type": "object"
+      },
       "SeriesPoint": {
         "properties": {
           "date": {
@@ -2026,6 +3206,31 @@
           "value"
         ],
         "title": "SeriesPoint",
+        "type": "object"
+      },
+      "ShareRow": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "share": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Share"
+          }
+        },
+        "required": [
+          "name",
+          "share"
+        ],
+        "title": "ShareRow",
         "type": "object"
       },
       "SimulateRequest": {
@@ -2116,6 +3321,55 @@
         "title": "SimulateResponse",
         "type": "object"
       },
+      "SleeveUnderlyingOut": {
+        "properties": {
+          "gamma": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gamma"
+          },
+          "theta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Theta"
+          },
+          "underlier": {
+            "title": "Underlier",
+            "type": "string"
+          },
+          "vega": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vega"
+          }
+        },
+        "required": [
+          "underlier",
+          "gamma",
+          "vega",
+          "theta"
+        ],
+        "title": "SleeveUnderlyingOut",
+        "type": "object"
+      },
       "SmilePoint": {
         "properties": {
           "iv": {
@@ -2181,6 +3435,31 @@
           "pnl"
         ],
         "title": "StressGridOut",
+        "type": "object"
+      },
+      "SymbolReturnOut": {
+        "properties": {
+          "ret": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ret"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "ret"
+        ],
+        "title": "SymbolReturnOut",
         "type": "object"
       },
       "SyncStatusResponse": {
@@ -2270,6 +3549,17 @@
           "n_positions": {
             "title": "N Positions",
             "type": "integer"
+          },
+          "unrealized_pnl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unrealized Pnl"
           }
         },
         "required": [
@@ -2277,6 +3567,92 @@
           "n_positions"
         ],
         "title": "Totals",
+        "type": "object"
+      },
+      "UnderlyingExposureOut": {
+        "description": "Delta-adjusted exposure (Task B1 requirement 2 \u2014 \"the number he\nmanages to\"): net delta (shares + option legs via book_greeks),\ndollar-delta, and SPY-equivalent notional (dollar-delta * per-underlier\nbeta vs the app benchmark, estimated from cached bars).",
+        "properties": {
+          "beta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta"
+          },
+          "beta_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta Note"
+          },
+          "dollar_delta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dollar Delta"
+          },
+          "net_delta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Net Delta"
+          },
+          "spot": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spot"
+          },
+          "spy_equivalent_notional": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spy Equivalent Notional"
+          },
+          "underlier": {
+            "title": "Underlier",
+            "type": "string"
+          }
+        },
+        "required": [
+          "underlier",
+          "spot",
+          "net_delta",
+          "dollar_delta",
+          "beta",
+          "spy_equivalent_notional",
+          "beta_note"
+        ],
+        "title": "UnderlyingExposureOut",
         "type": "object"
       },
       "UnderlyingGreeksOut": {
@@ -3092,6 +4468,24 @@
         "summary": "Simulate"
       }
     },
+    "/api/news": {
+      "get": {
+        "operationId": "get_news_api_news_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NewsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get News"
+      }
+    },
     "/api/options/book-greeks": {
       "post": {
         "operationId": "book_greeks_api_options_book_greeks_post",
@@ -3172,6 +4566,36 @@
     "/api/portfolio": {
       "get": {
         "operationId": "get_portfolio_api_portfolio_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "book_ref",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Book Ref"
+            }
+          },
+          {
+            "in": "query",
+            "name": "attribution_days",
+            "required": false,
+            "schema": {
+              "default": 90,
+              "maximum": 756,
+              "minimum": 5,
+              "title": "Attribution Days",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -3182,6 +4606,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Get Portfolio"
@@ -3286,6 +4720,124 @@
           }
         },
         "summary": "Risk"
+      }
+    },
+    "/api/risk/{symbol}/regression": {
+      "get": {
+        "operationId": "regression_api_risk__symbol__regression_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "symbol",
+            "required": true,
+            "schema": {
+              "title": "Symbol",
+              "type": "string"
+            }
+          },
+          {
+            "description": "comma-separated factor names, e.g. SPY,MTUM,US10Y",
+            "in": "query",
+            "name": "factors",
+            "required": true,
+            "schema": {
+              "description": "comma-separated factor names, e.g. SPY,MTUM,US10Y",
+              "title": "Factors",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "window",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 2520,
+                  "minimum": 20,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Window"
+            }
+          },
+          {
+            "in": "query",
+            "name": "years",
+            "required": false,
+            "schema": {
+              "default": 5,
+              "maximum": 25,
+              "minimum": 1,
+              "title": "Years",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegressionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Regression"
+      }
+    },
+    "/api/rotation": {
+      "post": {
+        "operationId": "rotation_api_rotation_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RotationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rotation"
       }
     },
     "/api/sync": {

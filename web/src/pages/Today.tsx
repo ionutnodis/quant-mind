@@ -6,9 +6,11 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, request } from "../lib/api";
-import { CorrelationHeatmap } from "../components/CorrelationHeatmap";
+import { GlanceCharts } from "../components/GlanceCharts";
 import { InstrumentHover } from "../components/InstrumentHover";
+import { NewsTicker } from "../components/NewsTicker";
 import { Panel, Skeleton } from "../components/Panel";
+import { RotationHeatmap } from "../components/RotationHeatmap";
 
 // Local, page-scoped types + calls for the sync job — api.ts is shared and not
 // owned here, so these stay in Today.tsx per the wave-2 ownership rule.
@@ -177,9 +179,11 @@ export function Today() {
           <p className="text-[20px] leading-snug font-medium max-w-[34ch]">
             {regimeLine(data.tiles)}
           </p>
-          <p className="text-muted mt-2 text-[12px]">
-            Derived from the cached universe. Portfolio-weighted regime lands with your positions.
-          </p>
+          {/* Dynamic in place of a static blurb (user direction): scroll
+              through relevant headline news right under the regime call. */}
+          <div className="mt-2 border-t border-hairline pt-2">
+            <NewsTicker />
+          </div>
         </Panel>
         <Panel title="Your book" note="paper account">
           <div className="grid grid-cols-2 gap-x-4 gap-y-2">
@@ -198,6 +202,11 @@ export function Today() {
           </p>
         </Panel>
       </div>
+
+      {/* Zone A2 — glance charts: major indices, VIX, oil, gold, 2s10s */}
+      <Panel title="At a glance" note="90d · indices · vol · commodities · curve">
+        <GlanceCharts />
+      </Panel>
 
       {/* Zone B — overnight strip, ranked */}
       <Panel
@@ -232,8 +241,8 @@ export function Today() {
             positions exist.
           </p>
         </Panel>
-        <Panel title="Correlation" note="daily · 5y · union calendar">
-          {data.correlation && <CorrelationHeatmap data={data.correlation} />}
+        <Panel title="Rotation" note="click a mover for the other side of the trade">
+          <RotationHeatmap />
         </Panel>
       </div>
 
