@@ -279,6 +279,102 @@ def test_expiry_rejects_unparseable_form(store):
     assert r.status_code == 422
 
 
+# --- Batch-2 final review, item 1: pin-time all-or-none. A partial option
+# descriptor (any strict subset of strike/expiry/right) must be refused AT PIN
+# TIME — before it can ever persist — and any pre-fix snapshot already on disk
+# carrying a partial descriptor must be refused at read time regardless of its
+# persisted sec_type ("re-pin with explicit legs"). ---
+
+
+@pytest.mark.parametrize(
+    "leg_fields, missing",
+    [
+        ({"strike": 450.0}, ["expiry", "right"]),
+        ({"expiry": "20260918"}, ["strike", "right"]),
+        ({"right": "C"}, ["strike", "expiry"]),  # right-only stays covered
+        ({"strike": 450.0, "expiry": "20260918"}, ["right"]),
+        ({"strike": 450.0, "right": "C"}, ["expiry"]),
+        ({"expiry": "20260918", "right": "C"}, ["strike"]),
+    ],
+)
+def test_pin_partial_option_descriptor_is_422_naming_missing_fields(store, leg_fields, missing):
+    client = _client(store)
+    r = client.post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 1, **leg_fields}]}
+    )
+    assert r.status_code == 422
+    detail = str(r.json()["detail"])
+    assert "SPY" in detail
+    for field in missing:
+        assert field in detail
+
+
+def _write_legacy_partial_snapshot(store, snapshot_id="aaaaaaaaaaaa", sec_type="STK"):
+    """A pre-fix snapshot as it exists on disk: sec_type STK with a partial
+    option descriptor (strike+expiry, no right) — exactly what /api/book/pin
+    used to persist before the pin-time all-or-none guard."""
+    import json as _json
+
+    from quantmind.api.routers.book import _books_dir
+
+    payload = {
+        "snapshot_id": snapshot_id,
+        "valuation_ts": "2026-07-24T00:00:00Z",
+        "base_currency": "USD",
+        "positions": [
+            {
+                "con_id": 1,
+                "symbol": "SPY",
+                "qty": 2,
+                "sec_type": sec_type,
+                "multiplier": 1.0,
+                "strike": 450.0,
+                "expiry": "20260918",
+                "right": None,
+            }
+        ],
+    }
+    (_books_dir(store) / f"{snapshot_id}.json").write_text(_json.dumps(payload))
+    return snapshot_id
+
+
+def test_legacy_partial_snapshot_is_422_from_read_book_positions(store):
+    from fastapi import HTTPException
+
+    from quantmind.api.routers.book import read_book_positions
+
+    ref = _write_legacy_partial_snapshot(store)
+    with pytest.raises(HTTPException) as exc_info:
+        read_book_positions(store, ref)
+    assert exc_info.value.status_code == 422
+    assert "re-pin with explicit legs" in exc_info.value.detail
+
+
+def test_legacy_partial_snapshot_is_422_from_every_consumer(store):
+    # The persisted-partial refusal must hold at EVERY book_ref consumer, not
+    # just whatif: hedge, macro, lab book-regression, portfolio, options
+    # book-greeks all resolve refs through read_book_positions.
+    client = _client(store)
+    ref = _write_legacy_partial_snapshot(store)
+
+    requests = [
+        ("post", "/api/whatif", {"book_ref": ref, "years": 1}),
+        (
+            "post",
+            "/api/hedge",
+            {"book_ref": ref, "objective": {"kind": "beta_target", "value": 0.0}},
+        ),
+        ("get", f"/api/macro?book_ref={ref}", None),
+        ("post", "/api/lab/book-regression", {"book_ref": ref}),
+        ("get", f"/api/portfolio?book_ref={ref}", None),
+        ("post", "/api/options/book-greeks", {"book_ref": ref}),
+    ]
+    for method, url, body in requests:
+        r = client.get(url) if method == "get" else client.post(url, json=body)
+        assert r.status_code == 422, f"{url} returned {r.status_code}"
+        assert "re-pin with explicit legs" in str(r.json()["detail"]), url
+
+
 def test_broker_sourced_option_leg_without_strike_is_422_on_book_ref_resolution(store):
     # A live broker Position carries no strike/expiry/right (portfolio.py's
     # Position type doesn't have those fields) — if it happens to be an OPT

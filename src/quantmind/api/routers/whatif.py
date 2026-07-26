@@ -42,7 +42,14 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
-from quantmind.api.routers._shared import PositionIn, clean, iso, read_close_series, weighted_portfolio_returns
+from quantmind.api.routers._shared import (
+    PositionIn,
+    _validate_option_legs,
+    clean,
+    iso,
+    read_close_series,
+    weighted_portfolio_returns,
+)
 from quantmind.api.routers.book import read_book, read_book_positions
 from quantmind.risk.montecarlo import simulate_terminal_returns
 from quantmind.risk.returns import (
@@ -272,29 +279,6 @@ def _book_risk(
         seed=seed,
     )
     return beta, es, vol, terminal
-
-
-def _validate_option_legs(positions: list[PositionIn], origin: str) -> None:
-    """Fix round 1 (I1): strike/expiry/right are ALL-or-NONE on every leg,
-    on BOTH the inline and book_ref paths (parity with book.py's honest-
-    refusal guard for pinned OPT legs). A leg with `right` but no strike/
-    expiry cannot be priced (and used to slip through inline, silently
-    valued at 100x underlier notional); a leg with strike/expiry but no
-    `right` used to key as a phantom separate STK line in the trade ticket.
-    Refuse both with a named 422, never a silent mispricing."""
-    for p in positions:
-        fields = {"strike": p.strike, "expiry": p.expiry, "right": p.right}
-        given = [k for k, v in fields.items() if v is not None]
-        if given and len(given) < len(fields):
-            missing = [k for k, v in fields.items() if v is None]
-            raise HTTPException(
-                422,
-                detail=(
-                    f"{origin} leg {p.symbol!r} has a partial option descriptor "
-                    f"(has {'/'.join(given)}, missing {'/'.join(missing)}) — "
-                    "strike/expiry/right must be given together (all or none)"
-                ),
-            )
 
 
 def _leg_key(p: PositionIn) -> tuple:

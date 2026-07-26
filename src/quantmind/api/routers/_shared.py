@@ -132,6 +132,30 @@ class PositionIn(BaseModel):
         raise ValueError(f"expiry must be YYYYMMDD or YYYY-MM-DD, got {v!r}")
 
 
+def _validate_option_legs(positions: list["PositionIn"], origin: str) -> None:
+    """Batch-2 final review item 1 (moved unchanged from whatif.py so the
+    guard is shared): strike/expiry/right are ALL-or-NONE on every leg, on
+    BOTH the inline and book_ref paths (parity with book.py's honest-refusal
+    guard for pinned OPT legs). A leg with `right` but no strike/expiry
+    cannot be priced (and used to slip through inline, silently valued at
+    100x underlier notional); a leg with strike/expiry but no `right` used
+    to key as a phantom separate STK line in the trade ticket. Refuse both
+    with a named 422, never a silent mispricing."""
+    for p in positions:
+        fields = {"strike": p.strike, "expiry": p.expiry, "right": p.right}
+        given = [k for k, v in fields.items() if v is not None]
+        if given and len(given) < len(fields):
+            missing = [k for k, v in fields.items() if v is None]
+            raise HTTPException(
+                422,
+                detail=(
+                    f"{origin} leg {p.symbol!r} has a partial option descriptor "
+                    f"(has {'/'.join(given)}, missing {'/'.join(missing)}) — "
+                    "strike/expiry/right must be given together (all or none)"
+                ),
+            )
+
+
 def weighted_portfolio_returns(returns: pd.DataFrame, symbols: list[str], weights: np.ndarray) -> pd.Series:
     """Weighted sum of aligned per-symbol simple returns: `symbols[i]`'s
     column of `returns` gets `weights[i]`. `symbols` may repeat (whatif.py's

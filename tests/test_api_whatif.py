@@ -419,27 +419,49 @@ def test_whatif_partial_option_descriptor_without_right_is_422(client):
     assert "together" in r.json()["detail"]
 
 
-def test_whatif_partial_option_descriptor_via_book_ref_is_422(client):
-    # The same all-or-none guard must hold for a book_ref-resolved book:
-    # /api/book/pin happily persists a strike-without-right leg (it pins it
-    # as STK sec_type, so book.py's OPT guard never fires), so whatif must
-    # refuse it at resolution time on BOTH the hypothetical and base paths.
-    pinned = _pin(
-        client, [{"symbol": "SPY", "qty": 1, "strike": 400, "expiry": "20260918"}]
-    )
+def test_whatif_partial_option_descriptor_is_now_refused_at_pin_time(client):
+    # Batch-2 final review, item 1: /api/book/pin used to happily persist a
+    # strike-without-right leg (as STK sec_type, so book.py's OPT guard never
+    # fired). The all-or-none guard now runs AT PIN TIME.
     r = client.post(
-        "/api/whatif",
-        json={"book_ref": pinned["snapshot_id"], "years": 1, "mc": {"horizon": 21, "n_paths": 500, "seed": 7}},
+        "/api/book/pin",
+        json={"positions": [{"symbol": "SPY", "qty": 1, "strike": 400, "expiry": "20260918"}]},
     )
     assert r.status_code == 422
     assert "together" in r.json()["detail"]
 
-    r_base = client.post(
+
+def test_whatif_legacy_partial_snapshot_on_disk_is_422_on_both_ref_paths(client):
+    # A PRE-FIX snapshot already on disk with a partial descriptor must still
+    # be refused at resolution time on BOTH the hypothetical and base paths
+    # (book.py's read guard covers legacy files the pin guard predates).
+    import json as _json
+
+    from quantmind.api.routers.book import _books_dir
+
+    store = client.app.state.store  # type: ignore[attr-defined]
+    ref = "aaaaaaaaaaaa"
+    payload = {
+        "snapshot_id": ref,
+        "valuation_ts": "2026-07-24T00:00:00Z",
+        "base_currency": "USD",
+        "positions": [
+            {"con_id": 1, "symbol": "SPY", "qty": 1, "sec_type": "STK",
+             "multiplier": 1.0, "strike": 400.0, "expiry": "20260918", "right": None}
+        ],
+    }
+    (_books_dir(store) / f"{ref}.json").write_text(_json.dumps(payload))
+
+    r = client.post(
         "/api/whatif",
-        json=_payload(base_book_ref=pinned["snapshot_id"]),
+        json={"book_ref": ref, "years": 1, "mc": {"horizon": 21, "n_paths": 500, "seed": 7}},
     )
+    assert r.status_code == 422
+    assert "re-pin with explicit legs" in r.json()["detail"]
+
+    r_base = client.post("/api/whatif", json=_payload(base_book_ref=ref))
     assert r_base.status_code == 422
-    assert "together" in r_base.json()["detail"]
+    assert "re-pin with explicit legs" in r_base.json()["detail"]
 
 
 def test_whatif_option_leg_in_trade_ticket_keys_on_the_full_leg(client):
