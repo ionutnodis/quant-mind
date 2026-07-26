@@ -50,3 +50,32 @@ def test_engle_granger_rejects_independent_random_walks():
     res = engle_granger(y, x)
     assert res.pvalue > 0.05
     assert not res.is_cointegrated()
+
+
+def test_engle_granger_reports_hedge_ratio_se():
+    # Uncertainty is displayed (wave-3 Global Constraint): the hedge ratio
+    # ships a standard error. For the synthetic pair (true ratio 0.5, tight
+    # stationary noise on a wide-ranging walk) the SE is positive and small
+    # relative to the estimate.
+    rng = np.random.default_rng(8)
+    x = pd.Series(np.cumsum(rng.normal(size=1000)), index=_idx(1000))
+    y = 0.5 * x + pd.Series(rng.normal(scale=0.5, size=1000), index=_idx(1000))
+    res = engle_granger(y, x)
+    assert res.hedge_ratio_se > 0
+    assert res.hedge_ratio_se < 0.1 * abs(res.hedge_ratio)
+
+
+def test_engle_granger_spread_passes_ou_mean_reversion_gate():
+    # The Lab's pair pipeline (wave-3B): EG hedge ratio -> OU fit on the
+    # spread. A genuinely cointegrated pair's spread must clear the
+    # random-walk gate (delta AIC favors OU AND ADF rejects the unit root).
+    from quantmind.models.ou import OrnsteinUhlenbeck
+
+    rng = np.random.default_rng(8)
+    x = pd.Series(np.cumsum(rng.normal(size=1000)), index=_idx(1000))
+    y = 0.5 * x + pd.Series(rng.normal(scale=0.5, size=1000), index=_idx(1000))
+    res = engle_granger(y, x)
+    spread = y - res.hedge_ratio * x
+    fit = OrnsteinUhlenbeck().fit(spread)
+    assert fit.diagnostics["mean_reversion"] == 1.0
+    assert fit.diagnostics["half_life_days"] > 0

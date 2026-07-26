@@ -6,6 +6,16 @@ slope b, with theta = (1-b)/dt, mu = a/(1-b), sigma = std(resid)/sqrt(dt).
 CIs propagate the OLS standard errors (delta-method approximation for mu).
 Diagnostics include ADF stationarity, AIC, and log-likelihood — the Lab shows
 its math (DESIGN.md: mathematical transparency is a feature).
+
+Wave-3B practitioner readouts ride along on every fit (models/diagnostics.py):
+half-life ln2/θ with delta-method CI, current displacement from μ in
+stationary-σ units, the last observation (`x_last` — simulate's default x0),
+and the random-walk gate (ΔAIC + LR vs the unit-root null, composed with ADF
+into a single `mean_reversion` verdict). Derived keys are only added when
+finite/defined — the API's FitResponse.diagnostics is dict[str, float], and
+an undefined half-life is an ABSENT key, never a NaN. The half-life CI lives
+in diagnostics (half_life_ci_lo/hi) rather than `cis` because `cis` keys are
+contractually the parameter names (tests/test_api.py pins that set).
 """
 
 from __future__ import annotations
@@ -19,6 +29,12 @@ from scipy.stats import chi2
 from statsmodels.tsa.stattools import adfuller
 
 from quantmind.models.base import Factor, FitResult
+from quantmind.models.diagnostics import (
+    displacement_sigma,
+    half_life_days,
+    rw_gate,
+    stationary_sigma,
+)
 
 
 class OrnsteinUhlenbeck:
@@ -64,6 +80,43 @@ class OrnsteinUhlenbeck:
         )
 
         adf_pvalue = float(adfuller(x, autolag="AIC")[1])
+        diagnostics: dict[str, float] = {
+            "adf_pvalue": adf_pvalue,
+            "aic": float(ols.aic),
+            "log_likelihood": float(ols.llf),
+            "r_squared": float(ols.rsquared),
+        }
+
+        # Practitioner readouts (see module docstring): only finite/defined
+        # values are added — FitResponse.diagnostics is dict[str, float].
+        def put(key: str, value: float | None) -> None:
+            if value is not None and math.isfinite(value):
+                diagnostics[key] = float(value)
+
+        x_last = float(x[-1])
+        put("x_last", x_last)
+
+        gate = rw_gate(x)
+        put("aic_rw", gate.aic_rw)
+        put("delta_aic", gate.delta_aic)
+        put("lr_stat", gate.lr_stat)
+        # Mean reversion is ESTABLISHED only when θ > 0, the OU alternative
+        # beats the RW null on AIC, AND ADF rejects the unit root at 5% —
+        # ΔAIC/LR alone have no valid unit-root distribution (compose with
+        # ADF, don't duplicate it).
+        established = theta > 0 and gate.delta_aic > 0 and adf_pvalue < 0.05
+        diagnostics["mean_reversion"] = 1.0 if established else 0.0
+
+        theta_se = float(se_b) / dt
+        hl = half_life_days(theta, theta_se, dt)
+        if hl is not None:
+            hl_value, (hl_lo, hl_hi) = hl
+            put("half_life_days", hl_value)
+            put("half_life_ci_lo", hl_lo)
+            put("half_life_ci_hi", hl_hi)
+        put("stationary_sigma", stationary_sigma(theta, sigma))
+        put("displacement_sigma", displacement_sigma(x_last, float(mu), theta, sigma))
+
         return FitResult(
             model_name=self.name,
             params={"theta": float(theta), "mu": float(mu), "sigma": sigma},
@@ -72,12 +125,7 @@ class OrnsteinUhlenbeck:
                 "mu": (float(mu_ci[0]), float(mu_ci[1])),
                 "sigma": sigma_ci,
             },
-            diagnostics={
-                "adf_pvalue": adf_pvalue,
-                "aic": float(ols.aic),
-                "log_likelihood": float(ols.llf),
-                "r_squared": float(ols.rsquared),
-            },
+            diagnostics=diagnostics,
             n_obs=n,
         )
 
@@ -92,7 +140,10 @@ class OrnsteinUhlenbeck:
         theta, mu, sigma = fit.params["theta"], fit.params["mu"], fit.params["sigma"]
         dt = self.factor.dt
         rng = np.random.default_rng(seed)
-        start = mu if x0 is None else x0
+        # Default start = the fitted series' last observation ("simulate from
+        # where reality is", wave-3B) — falling back to mu only for fits that
+        # predate the x_last diagnostic. Always overridable via x0.
+        start = x0 if x0 is not None else fit.diagnostics.get("x_last", mu)
         paths = np.empty((n_paths, horizon))
         x = np.full(n_paths, start, dtype=float)
         shocks = rng.normal(size=(n_paths, horizon))

@@ -14,6 +14,7 @@ import { Lab } from "../pages/Lab";
 
 vi.mock("../components/LabFanChart", () => ({
   LabFanChart: () => <div data-testid="lab-fan-chart" />,
+  PairBandsChart: () => <div data-testid="pair-bands-chart" />,
 }));
 
 const server = setupServer();
@@ -76,6 +77,69 @@ const APPLY_RESPONSE = {
   horizon: 60,
   n_paths: 500,
   n_nonfinite: 0,
+};
+
+// Wave-3B practitioner fixtures: every OU fit now carries the derived
+// half-life/displacement/random-walk-gate diagnostics.
+const FIT_DERIVED = {
+  ...FIT_RESPONSE,
+  diagnostics: {
+    ...FIT_RESPONSE.diagnostics,
+    x_last: 0.0512,
+    half_life_days: 34.2,
+    half_life_ci_lo: 21.0,
+    half_life_ci_hi: 61.0,
+    displacement_sigma: 2.1,
+    stationary_sigma: 0.005,
+    mean_reversion: 1,
+    delta_aic: 6.2,
+    lr_stat: 8.2,
+    aic_rw: -117.2,
+  },
+};
+
+const BOOK_SNAPSHOT = {
+  snapshot_id: "abc123def456",
+  valuation_ts: "2026-07-25T00:00:00Z",
+  base_currency: "USD",
+  positions: [],
+};
+
+const BOOK_REG_RESPONSE = {
+  factor_series: "US10Y",
+  horizon: "daily",
+  exposure_units: "usd_per_bp",
+  beta_usd_per_bp: -612.4,
+  beta_se: 45.1,
+  beta_ci: [-701.2, -523.6],
+  alpha_usd: 1.2,
+  alpha_se: 0.8,
+  r_squared: 0.41,
+  n_obs: 1250,
+  hac_lags: 7,
+  book_gross: 812345.0,
+  as_of: "2026-07-24T00:00:00Z",
+};
+
+const PAIR_RESPONSE = {
+  y_symbol: "BBB",
+  x_symbol: "AAA",
+  horizon: "daily",
+  coint_pvalue: 0.003,
+  hedge_ratio: 0.5123,
+  hedge_ratio_se: 0.012,
+  is_cointegrated: true,
+  dates: ["2026-07-23T00:00:00Z", "2026-07-24T00:00:00Z"],
+  spread: [1.2, 1.4],
+  mu: 1.1,
+  stationary_sigma: 0.2,
+  current_z: 2.4,
+  half_life_days: 34.2,
+  half_life_ci: [21.0, 61.0],
+  mean_reversion_established: true,
+  fit: FIT_DERIVED,
+  n_obs: 252,
+  as_of: "2026-07-24T00:00:00Z",
 };
 
 test("schema-driven model form renders from GET /api/models", async () => {
@@ -166,6 +230,114 @@ test("apply is disabled and honest about the awaiting state before a fit exists"
   renderLab();
   await screen.findByText(/Ornstein-Uhlenbeck/);
   expect(screen.getByRole("button", { name: /^apply$/i })).toBeDisabled();
+});
+
+// --- wave-3B practitioner tests ---
+
+test("fit renders the half-life + displacement readout with its CI", async () => {
+  server.use(
+    http.get("/api/models", () => HttpResponse.json([MODEL_SCHEMA])),
+    http.post("/api/models/ou/fit", () => HttpResponse.json(FIT_DERIVED))
+  );
+  renderLab();
+  fireEvent.click(await screen.findByRole("button", { name: /^fit$/i }));
+  expect(await screen.findByText(/2\.1σ above mean/)).toBeInTheDocument();
+  expect(screen.getByText(/half-life 34d/)).toBeInTheDocument();
+  expect(screen.getByText(/95% CI 21–61d/)).toBeInTheDocument();
+});
+
+test("random-walk gate labels mean reversion not established", async () => {
+  const rwFit = {
+    ...FIT_DERIVED,
+    diagnostics: { ...FIT_DERIVED.diagnostics, mean_reversion: 0, delta_aic: -1.4, lr_stat: 0.6 },
+  };
+  server.use(
+    http.get("/api/models", () => HttpResponse.json([MODEL_SCHEMA])),
+    http.post("/api/models/ou/fit", () => HttpResponse.json(rwFit))
+  );
+  renderLab();
+  fireEvent.click(await screen.findByRole("button", { name: /^fit$/i }));
+  expect(await screen.findByText(/mean reversion not established/i)).toBeInTheDocument();
+});
+
+test("book exposure regression renders the amber sensitivity with SE/CI and daily horizon", async () => {
+  server.use(
+    http.get("/api/models", () => HttpResponse.json([MODEL_SCHEMA])),
+    http.get("/api/book/current", () => HttpResponse.json(BOOK_SNAPSHOT)),
+    http.post("/api/lab/book-regression", () => HttpResponse.json(BOOK_REG_RESPONSE))
+  );
+  renderLab();
+  fireEvent.click(await screen.findByRole("button", { name: /regress/i }));
+  const results = await screen.findByTestId("book-regression-results");
+  expect(results).toHaveClass("text-you"); // book quantity → amber, the law
+  expect(within(results).getByText(/-612/)).toBeInTheDocument();
+  expect(within(results).getByText(/±\s*45/)).toBeInTheDocument(); // SE displayed
+  expect(within(results).getByText(/-701/)).toBeInTheDocument(); // CI lower bound
+  expect(within(results).getByText(/daily horizon/i)).toBeInTheDocument(); // horizon label
+});
+
+test("one-click Use in Apply feeds the regression beta into apply-to-book", async () => {
+  // Holder object (not a `X | null` let): TS control-flow analysis doesn't
+  // track assignments inside the msw handler closure and would narrow a
+  // null-initialized variable to `never` at the assertion site.
+  const captured: { applyBody?: { exposure?: { units?: string; value?: number } } } = {};
+  server.use(
+    http.get("/api/models", () => HttpResponse.json([MODEL_SCHEMA])),
+    http.get("/api/book/current", () => HttpResponse.json(BOOK_SNAPSHOT)),
+    http.post("/api/lab/book-regression", () => HttpResponse.json(BOOK_REG_RESPONSE)),
+    http.post("/api/models/ou/fit", () => HttpResponse.json(FIT_DERIVED)),
+    http.post("/api/lab/apply", async ({ request }) => {
+      captured.applyBody = (await request.json()) as typeof captured.applyBody;
+      return HttpResponse.json(APPLY_RESPONSE);
+    })
+  );
+  renderLab();
+  fireEvent.click(await screen.findByRole("button", { name: /^fit$/i }));
+  await screen.findByText(/θ/);
+  fireEvent.click(screen.getByRole("button", { name: /regress/i }));
+  await screen.findByTestId("book-regression-results");
+
+  fireEvent.click(screen.getByRole("button", { name: /use in apply/i }));
+  await screen.findByTestId("apply-results");
+  expect(captured.applyBody?.exposure?.units).toBe("usd_per_bp");
+  expect(captured.applyBody?.exposure?.value).toBe(-612.4);
+});
+
+test("pair pipeline renders the EG→OU readout with the z-bands chart", async () => {
+  server.use(
+    http.get("/api/models", () => HttpResponse.json([MODEL_SCHEMA])),
+    http.post("/api/lab/pair", () => HttpResponse.json(PAIR_RESPONSE))
+  );
+  renderLab();
+  await screen.findByText(/Ornstein-Uhlenbeck/);
+  fireEvent.click(screen.getByRole("button", { name: /run pair/i }));
+  expect(await screen.findByTestId("pair-bands-chart")).toBeInTheDocument();
+  expect(screen.getByText(/0\.5123/)).toBeInTheDocument(); // hedge ratio
+  expect(screen.getByText(/0\.0030/)).toBeInTheDocument(); // EG p-value
+  expect(screen.getByText(/2\.4σ above mean/)).toBeInTheDocument(); // displacement
+  expect(screen.getByText(/half-life 34d/)).toBeInTheDocument();
+});
+
+test("pair pipeline is honest when the pair is not cointegrated and RW wins", async () => {
+  const honest = {
+    ...PAIR_RESPONSE,
+    coint_pvalue: 0.41,
+    is_cointegrated: false,
+    mean_reversion_established: false,
+    current_z: null,
+    half_life_days: null,
+    half_life_ci: null,
+    stationary_sigma: null,
+  };
+  server.use(
+    http.get("/api/models", () => HttpResponse.json([MODEL_SCHEMA])),
+    http.post("/api/lab/pair", () => HttpResponse.json(honest))
+  );
+  renderLab();
+  await screen.findByText(/Ornstein-Uhlenbeck/);
+  fireEvent.click(screen.getByRole("button", { name: /run pair/i }));
+  expect(await screen.findByText(/not cointegrated/i)).toBeInTheDocument();
+  expect(screen.getByText(/mean reversion not established/i)).toBeInTheDocument();
 });
 
 test("unsupported exposure mapping surfaces the backend's refusing message, not a crash", async () => {
