@@ -156,10 +156,38 @@ const YEARS_BOUNDS = { min: 1, max: 25 };
 const HORIZON_BOUNDS = { min: 1, max: 2520 };
 const PATHS_BOUNDS = { min: 1, max: 200_000 };
 
+/** Shape check for one stored scenario (batch-2 final review item 7,
+ * mirroring lib/book.ts's isPinnedScenario): localStorage is user-editable
+ * junk territory — a corrupt entry must never TypeError loadScenario, it
+ * just doesn't load. */
+function isScenario(v: unknown): v is Scenario {
+  if (typeof v !== "object" || v === null) return false;
+  const s = v as Record<string, unknown>;
+  return (
+    Array.isArray(s.positions) &&
+    s.positions.every(
+      (p) =>
+        typeof p === "object" &&
+        p !== null &&
+        typeof (p as Record<string, unknown>).symbol === "string" &&
+        typeof (p as Record<string, unknown>).qty === "string"
+    ) &&
+    typeof s.years === "number" &&
+    typeof s.horizon === "number" &&
+    typeof s.n_paths === "number"
+  );
+}
+
 function loadScenarios(): Record<string, Scenario> {
   try {
     const raw = localStorage.getItem(SCENARIOS_KEY);
-    return raw ? (JSON.parse(raw) as Record<string, Scenario>) : {};
+    const parsed: unknown = raw ? JSON.parse(raw) : {};
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const out: Record<string, Scenario> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (isScenario(v)) out[k] = v;
+    }
+    return out;
   } catch {
     return {};
   }

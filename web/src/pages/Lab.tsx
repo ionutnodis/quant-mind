@@ -113,6 +113,10 @@ interface BookRegressionResponse {
   hac_lags: number;
   book_gross: number | null;
   as_of: string | null;
+  // Declared approximations (batch-2 final review item 2): e.g. the option
+  // delta-one proxy when the pinned book carries OPT legs. Optional so
+  // pre-regen fixtures stay valid.
+  notes?: string[];
 }
 
 interface PairResponse {
@@ -704,6 +708,9 @@ export function Lab() {
                   <span className="ml-1">{bookReg.data.hac_lags}</span>
                 </div>
               </div>
+              {(bookReg.data.notes ?? []).map((n, i) => (
+                <p key={i} className="text-warning text-[10px]">{n}</p>
+              ))}
               <button
                 type="button"
                 className="w-full border border-you/60 bg-you/10 hover:bg-you/20 text-you text-[12px] py-1.5 disabled:opacity-40 disabled:text-muted disabled:border-hairline disabled:bg-transparent"
@@ -809,7 +816,8 @@ export function Lab() {
               {!pair.data.mean_reversion_established && (
                 <p className="text-warning text-[11px]">
                   Mean reversion not established on this spread — random-walk null not
-                  rejected (ΔAIC {num(pair.data.fit.diagnostics.delta_aic, 1)}, ADF p{" "}
+                  rejected (ΔAIC {num(pair.data.fit.diagnostics.delta_aic, 1)}, LR{" "}
+                  {num(pair.data.fit.diagnostics.lr_stat, 1)}, ADF p{" "}
                   {num(pair.data.fit.diagnostics.adf_pvalue, 3)}).
                 </p>
               )}

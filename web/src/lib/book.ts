@@ -33,7 +33,18 @@ export function getBook(snapshotId: string): Promise<BookSnapshotOut> {
   return request<BookSnapshotOut>(`/api/book/${encodeURIComponent(snapshotId)}`);
 }
 
-export function pinBook(positions: { symbol: string; qty: number }[]): Promise<BookSnapshotOut> {
+/** The full leg shape POST /api/book/pin accepts (batch-2 final review item
+ * 7k): option fields optional — a bare {symbol, qty} is a plain equity leg. */
+export interface PinPositionIn {
+  symbol: string;
+  qty: number;
+  strike?: number | null;
+  expiry?: string | null;
+  right?: "C" | "P" | null;
+  multiplier?: number | null;
+}
+
+export function pinBook(positions: PinPositionIn[]): Promise<BookSnapshotOut> {
   return request<BookSnapshotOut>("/api/book/pin", {
     method: "POST",
     body: JSON.stringify({ positions }),

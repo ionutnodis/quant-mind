@@ -957,6 +957,34 @@ def test_hedge_nan_strike_chain_row_never_reaches_the_response(tmp_path):
     assert pp["legs"][0]["strike"] == pytest.approx(round(0.95 * spot, 2))
 
 
+def test_hedge_unparseable_chain_as_of_is_honest_note_not_silent_today(tmp_path):
+    """Batch-2 final review item 7i: _chain_as_of_date used to swallow a
+    ValueError and silently return date.today() — an unparseable snapshot
+    date silently repriced every premium/time-to-expiry as if snapped NOW.
+    Degrade to a structured note instead."""
+    client, spot = _option_client(tmp_path)
+    store_root = client.app.state.store.root  # type: ignore[attr-defined]
+    # Rewrite the chain meta with garbage as_of.
+    chain_df, _meta = OptionsStore(store_root).read_chain("SPY")
+    OptionsStore(store_root).write_chain(
+        "SPY", chain_df, OptionsSnapshotMeta(as_of="not-a-date", spot=spot)
+    )
+    r = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "SPY", "qty": 1000}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["QQQ"],
+            "years": 1,
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["option_hedges"] == []
+    assert body["option_note"] is not None
+    assert "as_of" in body["option_note"] or "unparseable" in body["option_note"].lower()
+
+
 def test_hedge_option_note_distinguishes_no_overlap_from_no_payoff(tmp_path):
     """Bundled minor 2: when the book's return window and the dominant
     underlier's bars have NO overlapping days, the degrade note must say so —

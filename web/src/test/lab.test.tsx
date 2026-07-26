@@ -337,7 +337,10 @@ test("pair pipeline is honest when the pair is not cointegrated and RW wins", as
   await screen.findByText(/Ornstein-Uhlenbeck/);
   fireEvent.click(screen.getByRole("button", { name: /run pair/i }));
   expect(await screen.findByText(/not cointegrated/i)).toBeInTheDocument();
-  expect(screen.getByText(/mean reversion not established/i)).toBeInTheDocument();
+  const banner = screen.getByText(/mean reversion not established/i);
+  // Batch-2 final review item 7h: the pair banner carries the LR stat too
+  // (parity with the model-zone RwGateBanner).
+  expect(banner.textContent).toMatch(/LR 8\.2/);
 });
 
 test("unsupported exposure mapping surfaces the backend's refusing message, not a crash", async () => {

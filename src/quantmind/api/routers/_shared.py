@@ -69,13 +69,25 @@ def iso(ts: pd.Timestamp) -> str:
 
 def downsample(seq: T, max_points: int) -> T:
     """Step-slice `seq` down to at most `max_points` elements, preserving the
-    first/last-ish spread rather than truncating. Works for anything that
-    supports `len()` and `[::step]` slicing — a `list` (risk.py's
-    `BetaPoint` points) or a `pd.Series` (macro.py's named series) alike."""
+    first AND the TRUE last element (batch-2 final review item 7f: `[::step]`
+    silently dropped the most recent point — the as-of anchor — unless
+    (len-1) % step == 0). Works for anything that supports `len()` and
+    `[::step]` slicing — a `list` (risk.py's `BetaPoint` points) or a
+    `pd.Series` (macro.py's named series, lab.py's pair spread) alike."""
     if len(seq) <= max_points:
         return seq
     step = math.ceil(len(seq) / max_points)
-    return seq[::step]
+    sampled = seq[::step]
+    if (len(seq) - 1) % step == 0:
+        return sampled  # stride already lands on the last element
+    if len(sampled) >= max_points:
+        # Make room for the true last element by dropping the last interior
+        # sample — the endpoints matter more than one interior point.
+        sampled = sampled[:-1]
+    tail = seq[len(seq) - 1:]
+    if isinstance(sampled, pd.Series):
+        return pd.concat([sampled, tail])
+    return sampled + tail
 
 
 def read_close_series(store, con_id: int, symbol: str, years: int) -> pd.Series:

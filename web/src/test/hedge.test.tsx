@@ -197,7 +197,8 @@ test("build a book, run, and render the ranked candidates table in amber", async
   // header + 3 candidates
   expect(rows.length).toBe(4);
 
-  // Ranked by protection desc: QQQ (160) before IWM (100) before FLAT (unusable, last).
+  // Ranked by protection-per-cost desc (wave-3B "Hedge honest"): QQQ (0.478)
+  // before IWM (0.386) before FLAT (unusable, last).
   const bodyRows = rows.slice(1);
   expect(within(bodyRows[0]).getByText("QQQ")).toBeInTheDocument();
   expect(within(bodyRows[1]).getByText("IWM")).toBeInTheDocument();

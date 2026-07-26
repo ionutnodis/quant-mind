@@ -184,6 +184,31 @@ test("422 detail surfaces honestly, not a crash", async () => {
   expect(await screen.findByText(/unknown symbols: \['NOPE'\]/)).toBeInTheDocument();
 });
 
+test("corrupt scenario-store entries are filtered, never a TypeError on load", async () => {
+  // Batch-2 final review item 7 (WhatIf.tsx JSON.parse cast): localStorage
+  // is user-editable junk territory — a corrupt entry must not crash the
+  // panel or loadScenario; the valid entry still loads.
+  localStorage.setItem(
+    "quantmind.whatif.scenarios",
+    JSON.stringify({
+      corrupt: 42,
+      "no-positions": { years: 5, horizon: 126, n_paths: 10000 },
+      good: {
+        positions: [{ symbol: "IWM", qty: "7" }],
+        years: 3,
+        horizon: 21,
+        n_paths: 500,
+      },
+    })
+  );
+  renderWhatIf();
+  expect(screen.queryByRole("button", { name: "corrupt" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "no-positions" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "good" }));
+  expect(screen.getByDisplayValue("IWM")).toBeInTheDocument();
+  expect(screen.getByDisplayValue("7")).toBeInTheDocument();
+});
+
 test("scenario save/load round-trip through localStorage", async () => {
   renderWhatIf();
   fillFirstRow();

@@ -615,13 +615,16 @@ def _rank_key(ppc: float | None, protection: float | None) -> tuple:
     )
 
 
-def _chain_as_of_date(as_of: str) -> date:
+def _chain_as_of_date(as_of: str) -> date | None:
     """The chain snapshot's date, for time-to-expiry: option premiums/IVs are
-    only honest relative to WHEN they were snapped, not to today."""
+    only honest relative to WHEN they were snapped, not to today. None means
+    the persisted as_of is unparseable — the caller degrades with a note
+    (batch-2 final review item 7i: this used to silently return date.today(),
+    repricing every premium as if the chain were snapped NOW)."""
     try:
         return datetime.strptime(as_of[:10], "%Y-%m-%d").date()
     except ValueError:
-        return date.today()
+        return None
 
 
 def _build_option_hedges(
@@ -659,6 +662,14 @@ def _build_option_hedges(
         return [], f"no cached option chain for {dominant}", None
 
     as_of_date = _chain_as_of_date(meta.as_of)
+    if as_of_date is None:
+        return (
+            [],
+            f"cached chain for {dominant} has an unparseable as_of "
+            f"({meta.as_of!r}) — time-to-expiry cannot be computed honestly; "
+            "re-snapshot the chain with options_sync_cli",
+            meta.as_of,
+        )
     spot = meta.spot if math.isfinite(meta.spot) and meta.spot > 0 else float(dominant_prices.iloc[-1])
 
     structures, notes = build_structures(chain_df, spot=spot, as_of=as_of_date, min_days=_OPTION_MIN_DAYS)
