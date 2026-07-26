@@ -15,6 +15,16 @@ from quantmind.broker.base import ReadOnlyBroker
 from quantmind.portfolio import Portfolio, Position
 
 
+def positions_to_cost_basis(ib_positions) -> dict[int, float]:
+    """Map ib_async position objects to {con_id: avgCost} (Task B1 — ledger
+    essentials: cost basis for unrealized P&L). Mirrors `positions_to_portfolio`'s
+    zero-qty drop exactly (a closed-during-session row is not a holding, so it
+    has no cost basis to report either) — the two functions are always called
+    together over the SAME `reqPositionsAsync()` result and must agree on
+    which rows count as positions."""
+    return {p.contract.conId: float(p.avgCost) for p in ib_positions if p.position != 0}
+
+
 def positions_to_portfolio(ib_positions, as_of: str) -> Portfolio:
     """Map ib_async position objects to our Portfolio. Zero-qty entries are dropped
     (IBKR reports positions closed during the session as qty 0)."""
@@ -43,6 +53,45 @@ class IbBroker(ReadOnlyBroker):
     async def get_portfolio(self) -> Portfolio:
         ib_positions = await self._ib.reqPositionsAsync()
         return positions_to_portfolio(ib_positions, as_of=str(date.today()))
+
+    async def get_avg_costs(self) -> dict[int, float]:
+        """Cost basis per con_id (Task B1 — ledger essentials). A second
+        `reqPositionsAsync()` call rather than folding into `get_portfolio`:
+        `Portfolio`/`Position` (Engineering Constraint 9's one Portfolio type)
+        has no room for avgCost, so this stays a sibling read rather than
+        widening that shared type."""
+        ib_positions = await self._ib.reqPositionsAsync()
+        return positions_to_cost_basis(ib_positions)
+
+    # Account-summary tags this dashboard surfaces today (Task B1's "ledger
+    # essentials"); mapped to snake_case response keys. Extend this dict
+    # (never widen the wire-format tag string above it) to add more later.
+    _ACCOUNT_SUMMARY_TAGS = {
+        "NetLiquidation": "net_liquidation",
+        "TotalCashValue": "total_cash_value",
+        "GrossPositionValue": "gross_position_value",
+        "BuyingPower": "buying_power",
+    }
+
+    async def get_account_summary(self) -> dict[str, float | None]:
+        """NetLiquidation/TotalCashValue/GrossPositionValue/BuyingPower via
+        `reqAccountSummaryAsync` (Task B1). ib_async's `reqAccountSummaryAsync`
+        requests the FULL fixed tag set and returns `None`, populating
+        `ib.accountSummary()` as a side effect (its own documented shape) — a
+        tag absent from the response, or present with an unparseable value,
+        maps to an honest `None` rather than a fabricated 0.0."""
+        await self._ib.reqAccountSummaryAsync()
+        values = self._ib.accountSummary()
+        out: dict[str, float | None] = {key: None for key in self._ACCOUNT_SUMMARY_TAGS.values()}
+        for v in values:
+            key = self._ACCOUNT_SUMMARY_TAGS.get(v.tag)
+            if key is None:
+                continue
+            try:
+                out[key] = float(v.value)
+            except (TypeError, ValueError):
+                out[key] = None
+        return out
 
     async def resolve_stock_con_id(self, symbol: str, exchange: str = "SMART", currency: str = "USD") -> int:
         from ib_async import Stock

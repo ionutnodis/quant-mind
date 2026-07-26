@@ -1,14 +1,21 @@
 /**
- * Portfolio page component tests: dense positions table renders from the
- * mocked API, totals row, snapshot/valuation-ts note, honest empty state
- * when the paper book has no positions.
+ * Portfolio page component tests: ledger essentials (positions + cost basis
+ * + account), delta-adjusted exposure, options sleeve (Greeks + stress
+ * grid), expiry buckets, and core-vs-overlay P&L attribution — all rendered
+ * from the mocked GET /api/portfolio response. Plotly needs real canvas —
+ * PortfolioAttributionChart is stubbed, same pattern as risk.test.tsx stubs
+ * FanChart/RollingBetaChart.
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
-import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, expect, test, vi } from "vitest";
 import { Portfolio } from "../pages/Portfolio";
+
+vi.mock("../components/PortfolioAttributionChart", () => ({
+  PortfolioAttributionChart: () => <div data-testid="portfolio-attribution-chart-stub" />,
+}));
 
 const server = setupServer();
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
@@ -24,6 +31,22 @@ function renderPortfolio() {
   );
 }
 
+const BASE_SLEEVE = { available: false, reason: "no option positions", underlyings: [], stress_grid: null };
+const BASE_BUCKETS = { le_7d: [], le_30d: [], le_90d: [], later: [] };
+const BASE_ATTRIBUTION = {
+  available: false,
+  reason: "no priced positions with enough overlapping history for a book return series",
+  window_days: 90,
+  beta: null,
+  n_obs: 0,
+  total_pnl: null,
+  core_pnl: null,
+  overlay_pnl: null,
+  core_share: null,
+  overlay_share: null,
+  series: [],
+};
+
 const TWO_POSITIONS = {
   snapshot_id: "abc123def456",
   valuation_ts: "2026-07-25T00:00:00Z",
@@ -38,6 +61,8 @@ const TWO_POSITIONS = {
       last_close: 100.0,
       market_value: 1000.0,
       weight: 0.2857142857142857,
+      avg_cost: 90.0,
+      unrealized_pnl: 100.0,
     },
     {
       con_id: 2,
@@ -48,9 +73,32 @@ const TWO_POSITIONS = {
       last_close: 5.0,
       market_value: 2500.0,
       weight: 0.7142857142857143,
+      avg_cost: null,
+      unrealized_pnl: null,
     },
   ],
-  totals: { market_value: 3500.0, n_positions: 2 },
+  totals: { market_value: 3500.0, n_positions: 2, unrealized_pnl: 100.0 },
+  account: {
+    net_liquidation: 125000.5,
+    total_cash_value: 20000.0,
+    gross_position_value: 105000.5,
+    buying_power: 60000.0,
+  },
+  account_note: null,
+  exposure: [
+    {
+      underlier: "SPY",
+      spot: 100.0,
+      net_delta: 10.0,
+      dollar_delta: 1000.0,
+      beta: 1.0,
+      spy_equivalent_notional: 1000.0,
+      beta_note: null,
+    },
+  ],
+  options_sleeve: BASE_SLEEVE,
+  expiry_buckets: BASE_BUCKETS,
+  attribution: BASE_ATTRIBUTION,
 };
 
 const EMPTY = {
@@ -58,44 +106,146 @@ const EMPTY = {
   valuation_ts: "2026-07-25T00:00:00Z",
   base_currency: "USD",
   positions: [],
-  totals: { market_value: null, n_positions: 0 },
+  totals: { market_value: null, n_positions: 0, unrealized_pnl: null },
+  account: null,
+  account_note: "NO MATERIAL LINK — no broker connected",
+  exposure: [],
+  options_sleeve: BASE_SLEEVE,
+  expiry_buckets: BASE_BUCKETS,
+  attribution: BASE_ATTRIBUTION,
 };
 
-test("renders positions table with totals from the API", async () => {
+test("renders positions table with cost basis, unrealized P&L, and totals from the API", async () => {
   server.use(http.get("/api/portfolio", () => HttpResponse.json(TWO_POSITIONS)));
   renderPortfolio();
-  expect(await screen.findByText("SPY")).toBeInTheDocument();
-  expect(screen.getByText("OPT_XYZ")).toBeInTheDocument();
-  expect(screen.getByText("100.00")).toBeInTheDocument();
-  expect(screen.getByText("1000.00")).toBeInTheDocument();
-  expect(screen.getByText("2500.00")).toBeInTheDocument();
+  const table = within(await screen.findByTestId("positions-table"));
+  expect(table.getByText("SPY")).toBeInTheDocument();
+  expect(table.getByText("OPT_XYZ")).toBeInTheDocument();
+  expect(table.getAllByText("100.00").length).toBeGreaterThan(0); // last_close and unrealized_pnl both 100.00
+  expect(table.getByText("1000.00")).toBeInTheDocument();
+  expect(table.getByText("2500.00")).toBeInTheDocument();
+  // cost basis / unrealized P&L
+  expect(table.getByText("90.00")).toBeInTheDocument();
   // weight formatting
-  expect(screen.getByText("28.6%")).toBeInTheDocument();
-  expect(screen.getByText("71.4%")).toBeInTheDocument();
+  expect(table.getByText("28.6%")).toBeInTheDocument();
+  expect(table.getByText("71.4%")).toBeInTheDocument();
   // totals row
-  expect(screen.getByText(/Total \(2\)/)).toBeInTheDocument();
-  expect(screen.getByText("3500.00")).toBeInTheDocument();
-  // snapshot/valuation-ts note
+  expect(table.getByText(/Total \(2\)/)).toBeInTheDocument();
+  expect(table.getByText("3500.00")).toBeInTheDocument();
+  // snapshot/valuation-ts note (Panel-level, outside the table)
   expect(screen.getByText(/abc123def456/)).toBeInTheDocument();
 });
 
 test("null price fields render as em-dash placeholders, not crashes", async () => {
   const withMissingPrice = {
-    ...TWO_POSITIONS,
+    ...EMPTY,
     positions: [
-      { con_id: 3, symbol: "UNKNOWN", qty: 3, sec_type: "STK", multiplier: 1, last_close: null, market_value: null, weight: null },
+      {
+        con_id: 3, symbol: "UNKNOWN", qty: 3, sec_type: "STK", multiplier: 1,
+        last_close: null, market_value: null, weight: null, avg_cost: null, unrealized_pnl: null,
+      },
     ],
-    totals: { market_value: null, n_positions: 1 },
+    totals: { market_value: null, n_positions: 1, unrealized_pnl: null },
   };
   server.use(http.get("/api/portfolio", () => HttpResponse.json(withMissingPrice)));
   renderPortfolio();
   expect(await screen.findByText("UNKNOWN")).toBeInTheDocument();
   const dashes = screen.getAllByText("—");
-  expect(dashes.length).toBeGreaterThanOrEqual(3); // last, mkt value, weight
+  expect(dashes.length).toBeGreaterThanOrEqual(5); // last, avg cost, unrealized, mkt value, weight
 });
 
 test("empty paper book shows honest empty state, not a crash", async () => {
   server.use(http.get("/api/portfolio", () => HttpResponse.json(EMPTY)));
   renderPortfolio();
   expect(await screen.findByText(/No positions in the paper book yet/)).toBeInTheDocument();
+  expect(screen.getByText("NO MATERIAL LINK — no broker connected")).toBeInTheDocument();
+});
+
+test("account block renders ledger essentials when the broker reports them", async () => {
+  server.use(http.get("/api/portfolio", () => HttpResponse.json(TWO_POSITIONS)));
+  renderPortfolio();
+  expect(await screen.findByText("Net liquidation")).toBeInTheDocument();
+  expect(screen.getByText("125001")).toBeInTheDocument();
+});
+
+test("delta-adjusted exposure table renders per-underlier rows", async () => {
+  server.use(http.get("/api/portfolio", () => HttpResponse.json(TWO_POSITIONS)));
+  renderPortfolio();
+  expect(await screen.findByText("Delta-Adjusted Exposure")).toBeInTheDocument();
+  const rows = screen.getAllByText("SPY");
+  expect(rows.length).toBeGreaterThan(0);
+});
+
+test("options sleeve shows honest empty reason when unavailable", async () => {
+  server.use(http.get("/api/portfolio", () => HttpResponse.json(TWO_POSITIONS)));
+  renderPortfolio();
+  expect(await screen.findByText("no option positions")).toBeInTheDocument();
+});
+
+test("options sleeve renders greeks table and stress grid when available", async () => {
+  const withSleeve = {
+    ...TWO_POSITIONS,
+    options_sleeve: {
+      available: true,
+      reason: null,
+      underlyings: [{ underlier: "SPY", gamma: 0.01, vega: 12.5, theta: -3.2 }],
+      stress_grid: {
+        vol_shocks: [0.0],
+        spot_shocks: [-0.1, 0.0, 0.1],
+        pnl: [[-500, 0, 500]],
+      },
+    },
+  };
+  server.use(http.get("/api/portfolio", () => HttpResponse.json(withSleeve)));
+  renderPortfolio();
+  expect(await screen.findByTestId("portfolio-stress-grid")).toBeInTheDocument();
+  expect(screen.getByText("12.50")).toBeInTheDocument(); // vega
+});
+
+test("expiry buckets render legs grouped by days-to-expiry", async () => {
+  const withBuckets = {
+    ...TWO_POSITIONS,
+    expiry_buckets: {
+      le_7d: [{ symbol: "SPY", expiry: "20260801", right: "C", strike: 105, qty: 1, days_to_expiry: 5 }],
+      le_30d: [],
+      le_90d: [],
+      later: [],
+    },
+  };
+  server.use(http.get("/api/portfolio", () => HttpResponse.json(withBuckets)));
+  renderPortfolio();
+  expect(await screen.findByText(/SPY C105 20260801/)).toBeInTheDocument();
+});
+
+test("attribution shows honest reason when unavailable", async () => {
+  server.use(http.get("/api/portfolio", () => HttpResponse.json(TWO_POSITIONS)));
+  renderPortfolio();
+  expect(await screen.findByText(BASE_ATTRIBUTION.reason)).toBeInTheDocument();
+});
+
+test("attribution renders core/overlay split and chart when available", async () => {
+  const withAttribution = {
+    ...TWO_POSITIONS,
+    attribution: {
+      available: true,
+      reason: null,
+      window_days: 90,
+      beta: 1.2,
+      n_obs: 2,
+      total_pnl: 400.0,
+      core_pnl: 150.0,
+      overlay_pnl: 250.0,
+      core_share: 0.375,
+      overlay_share: 0.625,
+      series: [
+        { date: "2026-07-01T00:00:00Z", total_pnl: 200.0, core_pnl: 150.0, overlay_pnl: 50.0 },
+        { date: "2026-07-02T00:00:00Z", total_pnl: 200.0, core_pnl: 0.0, overlay_pnl: 200.0 },
+      ],
+    },
+  };
+  server.use(http.get("/api/portfolio", () => HttpResponse.json(withAttribution)));
+  renderPortfolio();
+  expect(await screen.findByTestId("portfolio-attribution-chart-stub")).toBeInTheDocument();
+  expect(screen.getByText("Core (beta x bench)")).toBeInTheDocument();
+  expect(screen.getByText("Overlay (residual)")).toBeInTheDocument();
 });
