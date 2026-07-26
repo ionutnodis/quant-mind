@@ -44,14 +44,21 @@ class IbNews:
         return [p.code for p in providers if p.code]
 
     async def broadtape_headlines(
-        self, lookback_hours: int = 48, max_results: int = 100
+        self,
+        lookback_hours: int = 48,
+        max_results: int = 100,
+        providers: list[str] | None = None,
     ) -> list[NewsHeadline]:
         """General-market headlines (conId=0) from every entitled provider
         over the trailing `lookback_hours`. `[]` when there are no entitled
         providers or IBKR returns nothing (Gateway down, feed empty, etc.) —
-        the caller (routers/news.py) turns that into the honest "news source
-        unavailable" empty state, never a crash."""
-        providers = await self.provider_codes()
+        the caller (routers/news.py) turns that into an honest,
+        case-specific empty state, never a crash. Pass `providers` (from an
+        earlier `provider_codes()` call) to skip re-fetching the provider
+        list — routers/news.py needs it separately anyway, to distinguish
+        "no entitlements" from "entitled but nothing relevant"."""
+        if providers is None:
+            providers = await self.provider_codes()
         if not providers:
             return []
         provider_codes = "+".join(providers)

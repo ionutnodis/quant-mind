@@ -23,7 +23,9 @@ vi.mock("../components/CandleChart", () => ({
   CandleChart: () => <div data-testid="candle-chart-stub" />,
 }));
 vi.mock("../components/SeriesChart", () => ({
-  SeriesChart: () => <div data-testid="series-chart-stub" />,
+  SeriesChart: ({ points }: { points: unknown[] }) => (
+    <div data-testid="series-chart-stub" data-points={points.length} />
+  ),
 }));
 
 function renderGlance() {
@@ -79,6 +81,31 @@ test("renders the 2s10s spread from macro's yields.series", async () => {
   );
   renderGlance();
   expect(await screen.findByTestId("series-chart-stub")).toBeInTheDocument();
+});
+
+test("2s10s spread is trimmed to the 90d glance window, not full FRED history", async () => {
+  // 200 joined daily points (~a multi-year FRED tail) must clip to the same
+  // 90-point window the candle cells use (fix-round-1).
+  const dates = Array.from({ length: 200 }, (_, i) => {
+    const d = new Date(Date.UTC(2026, 0, 1) + i * 86_400_000);
+    return `${d.toISOString().slice(0, 10)}T00:00:00Z`;
+  });
+  const longYields = {
+    yields: {
+      spread_2s10s: 0.007,
+      series: {
+        us10y: dates.map((date) => ({ date, value: 0.045 })),
+        us2y: dates.map((date) => ({ date, value: 0.038 })),
+      },
+    },
+  };
+  server.use(
+    http.get("/api/instruments/:symbol/candles", () => HttpResponse.json({ ...CANDLES, candles: [] })),
+    http.get("/api/macro", () => HttpResponse.json(longYields))
+  );
+  renderGlance();
+  const chart = await screen.findByTestId("series-chart-stub");
+  expect(chart).toHaveAttribute("data-points", "90");
 });
 
 test("honest empty cell when a symbol has no cached candles", async () => {

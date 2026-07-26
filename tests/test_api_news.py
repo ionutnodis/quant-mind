@@ -21,12 +21,21 @@ from quantmind.datastore.store import BarMeta, BarStore
 
 
 class FakeIb:
-    def __init__(self, providers=None, historical_news=None, raise_on_history=False):
+    def __init__(
+        self,
+        providers=None,
+        historical_news=None,
+        raise_on_history=False,
+        raise_on_providers=False,
+    ):
         self._providers = providers if providers is not None else []
         self._historical_news = historical_news if historical_news is not None else []
         self._raise_on_history = raise_on_history
+        self._raise_on_providers = raise_on_providers
 
     async def reqNewsProvidersAsync(self):
+        if self._raise_on_providers:
+            raise ConnectionError("gateway dropped")
         return self._providers
 
     async def reqHistoricalNewsAsync(self, conId, providerCodes, startDateTime, endDateTime, totalResults):
@@ -63,31 +72,55 @@ def _client(store: BarStore, broker=None) -> TestClient:
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 
-def test_no_broker_returns_structured_empty_never_500(store):
+# The three empty causes get three DISTINCT notes (fix-round-1: a live
+# paper session couldn't tell "start the Gateway" from "fix entitlements"
+# from "quiet tape" behind one ambiguous message).
+
+
+def test_no_broker_says_gateway_not_connected(store):
     r = _client(store, broker=None).get("/api/news")
     assert r.status_code == 200
     body = r.json()
     assert body["items"] == []
     assert body["as_of"] is None
-    assert "unavailable" in body["note"]
+    assert body["note"] == "Gateway not connected"
 
 
-def test_broker_with_no_providers_returns_structured_empty(store):
+def test_broker_with_no_providers_says_no_entitled_providers(store):
     broker = FakeBroker(FakeIb(providers=[]))
     r = _client(store, broker=broker).get("/api/news")
     assert r.status_code == 200
     body = r.json()
     assert body["items"] == []
-    assert "unavailable" in body["note"]
+    assert "no entitled news providers" in body["note"]
+    assert "data sharing" in body["note"]
 
 
-def test_ib_error_never_500(store):
+def test_providers_but_zero_headlines_says_no_relevant_headlines(store):
+    broker = FakeBroker(FakeIb(providers=[NewsProvider(code="BRFG", name="x")], historical_news=[]))
+    r = _client(store, broker=broker).get("/api/news")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["items"] == []
+    assert body["note"] == "no relevant headlines"
+
+
+def test_history_error_never_500_says_request_failed(store):
     broker = FakeBroker(FakeIb(providers=[NewsProvider(code="BRFG", name="x")], raise_on_history=True))
     r = _client(store, broker=broker).get("/api/news")
     assert r.status_code == 200
     body = r.json()
     assert body["items"] == []
-    assert "unavailable" in body["note"]
+    assert "news request failed" in body["note"]
+
+
+def test_provider_fetch_error_never_500_says_request_failed(store):
+    broker = FakeBroker(FakeIb(raise_on_providers=True))
+    r = _client(store, broker=broker).get("/api/news")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["items"] == []
+    assert "news request failed" in body["note"]
 
 
 def test_filters_to_universe_symbol_and_macro_keyword_drops_irrelevant(store):
@@ -127,7 +160,7 @@ def test_sorted_newest_first_and_capped_at_50(store):
     assert body["items"][0]["headline"] == "Fed headline 59"
 
 
-def test_no_matches_after_filtering_is_honest_empty(store):
+def test_no_matches_after_filtering_says_no_relevant_headlines(store):
     broker = FakeBroker(
         FakeIb(
             providers=[NewsProvider(code="BRFG", name="x")],
@@ -137,4 +170,4 @@ def test_no_matches_after_filtering_is_honest_empty(store):
     r = _client(store, broker=broker).get("/api/news")
     body = r.json()
     assert body["items"] == []
-    assert "matched" in body["note"]
+    assert body["note"] == "no relevant headlines"

@@ -69,6 +69,11 @@ test("renders tiles with direction glyphs and ES from the API", async () => {
   expect(screen.getByText(/ranked by move/i)).toBeInTheDocument();
   expect(await screen.findByText(/Ornstein-Uhlenbeck/)).toBeInTheDocument();
   expect(screen.getByText(/as of 2026-07-24/)).toBeInTheDocument();
+  // wave-3B additions are wired into the page (each component's behavior is
+  // covered by its own dedicated test file — here just prove Today mounts them)
+  expect(screen.getByTestId("news-ticker-stub")).toBeInTheDocument();
+  expect(screen.getByTestId("glance-charts-stub")).toBeInTheDocument();
+  expect(screen.getByTestId("rotation-heatmap-stub")).toBeInTheDocument();
 });
 
 test("staleness flag shows when data is old", async () => {

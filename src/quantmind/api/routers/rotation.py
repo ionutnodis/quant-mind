@@ -183,6 +183,26 @@ def _other_side_score(corr: float | None, ret: float | None) -> float | None:
     return clean(max(-corr, 0.0) * max(ret, 0.0))
 
 
+def rank_other_side(rows: list[OtherSideOut]) -> list[OtherSideOut]:
+    """Ordering for the "other side of the trade" list. Primary: score
+    descending (the clipped negative-corr x positive-return product).
+    Secondary (fix-round-1 adjudication): the clip zeroes out
+    negatively-correlated-but-FLAT symbols — which is exactly the "money
+    hasn't rotated there YET" candidate the user wants surfaced — so
+    equal-score rows tie-break by corr ascending (most inverse first): a
+    strongly-inverse-quiet name outranks an uncorrelated-quiet one instead
+    of drowning in the zero-score noise. Null score/corr sink last."""
+    return sorted(
+        rows,
+        key=lambda o: (
+            o.score is None,
+            -(o.score if o.score is not None else 0.0),
+            o.corr is None,
+            o.corr if o.corr is not None else 0.0,
+        ),
+    )
+
+
 @router.post("/rotation", response_model=RotationResponse)
 def rotation(request: Request, req: RotationRequest) -> RotationResponse:
     store = request.app.state.store
@@ -233,8 +253,7 @@ def rotation(request: Request, req: RotationRequest) -> RotationResponse:
             r = _symbol_return(closes[s], req.return_days)
             sc = _other_side_score(c, r)
             other_side_rows.append(OtherSideOut(symbol=s, corr=clean(c), ret=r, score=sc))
-        other_side_rows.sort(key=lambda o: (o.score is None, -(o.score or 0.0)))
-        other_side = other_side_rows
+        other_side = rank_other_side(other_side_rows)
 
     return RotationResponse(
         universe=req.universe,

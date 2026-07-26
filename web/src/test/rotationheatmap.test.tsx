@@ -138,6 +138,15 @@ test("clicking a symbol's return sets it as anchor and shows the other-side rank
   expect(screen.getByTestId("rotation-other-side-XLK")).toHaveTextContent("2.00%");
   expect(screen.getByTestId("rotation-clear-anchor")).toBeInTheDocument();
 
+  // Amber law (CLAUDE.md): the anchor highlight is market data, never the
+  // book — steel/neutral selection only, `you` classes must never appear.
+  const anchorButton = screen.getByTestId("rotation-symbol-XLF");
+  expect(anchorButton.className).not.toMatch(/\btext-you\b/);
+  expect(anchorButton.className).toMatch(/\btext-ink\b/);
+  const anchorChip = anchorButton.parentElement!;
+  expect(anchorChip.className).not.toMatch(/\bborder-you\b/);
+  expect(anchorChip.className).toMatch(/\bborder-market\b/);
+
   fireEvent.click(screen.getByTestId("rotation-clear-anchor"));
   await waitFor(() => expect(screen.queryByTestId("rotation-other-side")).not.toBeInTheDocument());
 });

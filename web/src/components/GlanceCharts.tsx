@@ -54,6 +54,9 @@ const GLANCE_INSTRUMENTS: { symbol: string; label: string }[] = [
 // sources/fred.py's sync), so a plain date-keyed join is enough — this
 // deliberately does NOT try to align mismatched calendars, that's macro.py's
 // job for the authoritative spread number this chart is just visualizing.
+// The joined series is trimmed to the trailing GLANCE_DAYS points so the
+// spread cell shows the same 90d window as the candle cells, not the full
+// multi-decade FRED history (fix-round-1).
 function buildSpread(series: Record<string, MacroSeriesPoint[]> | undefined): SeriesPoint[] {
   if (!series?.us10y || !series?.us2y) return [];
   const shortEnd = new Map(series.us2y.map((p) => [p.date, p.value]));
@@ -63,7 +66,8 @@ function buildSpread(series: Record<string, MacroSeriesPoint[]> | undefined): Se
       const short = shortEnd.get(p.date) ?? null;
       const value = p.value !== null && short !== null ? p.value - short : null;
       return { date: p.date, value };
-    });
+    })
+    .slice(-GLANCE_DAYS);
 }
 
 function GlanceCell({ symbol, label }: { symbol: string; label: string }) {

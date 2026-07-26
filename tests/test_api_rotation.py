@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from quantmind.api.app import create_app
 from quantmind.api.routers.macro import FACTORS, SECTORS
-from quantmind.api.routers.rotation import cluster_order
+from quantmind.api.routers.rotation import OtherSideOut, cluster_order, rank_other_side
 from quantmind.datastore.store import BarMeta, BarStore
 
 N_BARS = 150
@@ -248,3 +248,49 @@ def test_cluster_order_handles_nan_without_crashing():
     corr = _corr_df(labels, matrix)
     order = cluster_order(corr)
     assert set(order) == set(labels)
+
+
+# --- rank_other_side unit tests (pure helper, hand-built rows) ---
+
+
+def _row(symbol, corr, ret, score):
+    return OtherSideOut(symbol=symbol, corr=corr, ret=ret, score=score)
+
+
+def test_rank_other_side_score_descending_is_primary():
+    rows = [
+        _row("LOW", -0.2, 0.01, 0.002),
+        _row("HIGH", -0.5, 0.02, 0.010),
+    ]
+    assert [r.symbol for r in rank_other_side(rows)] == ["HIGH", "LOW"]
+
+
+def test_rank_other_side_inverse_flat_outranks_uncorrelated_flat():
+    # Both flat (ret ~ 0 -> clipped score 0), so the score alone can't
+    # separate them — the secondary corr-ascending key must surface the
+    # strongly-inverse-quiet name ("money hasn't rotated there YET") above
+    # the uncorrelated-quiet one (fix-round-1 adjudication).
+    rows = [
+        _row("UNCORR_FLAT", 0.0, 0.0, 0.0),
+        _row("INVERSE_FLAT", -0.8, 0.0, 0.0),
+    ]
+    assert [r.symbol for r in rank_other_side(rows)] == ["INVERSE_FLAT", "UNCORR_FLAT"]
+
+
+def test_rank_other_side_positive_score_beats_any_zero_score_inverse():
+    # An actually-moving negative-corr name still outranks even the most
+    # inverse quiet one — the secondary key is a tie-break, not an override.
+    rows = [
+        _row("INVERSE_FLAT", -0.9, 0.0, 0.0),
+        _row("MOVING", -0.3, 0.02, 0.006),
+    ]
+    assert [r.symbol for r in rank_other_side(rows)] == ["MOVING", "INVERSE_FLAT"]
+
+
+def test_rank_other_side_null_score_and_corr_sink_last():
+    rows = [
+        _row("NULL_SCORE", None, None, None),
+        _row("INVERSE_FLAT", -0.5, 0.0, 0.0),
+        _row("MOVING", -0.4, 0.01, 0.004),
+    ]
+    assert [r.symbol for r in rank_other_side(rows)] == ["MOVING", "INVERSE_FLAT", "NULL_SCORE"]

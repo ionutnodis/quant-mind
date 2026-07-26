@@ -34,7 +34,10 @@ function getNews(): Promise<NewsResponse> {
 const POLL_MS = 5 * 60 * 1000;
 const TRACK_HEIGHT = 96;
 const SCROLL_SECONDS = 22;
-const DEFAULT_EMPTY_NOTE = "news source unavailable — Gateway down or no entitled providers";
+// Shown only when the /api/news request itself failed (backend unreachable)
+// — otherwise the backend always supplies a case-specific note (Gateway not
+// connected / no entitled providers / no relevant headlines).
+const DEFAULT_EMPTY_NOTE = "news unavailable — backend unreachable";
 
 function hhmm(iso: string): string {
   return iso.length >= 16 ? `${iso.slice(11, 16)}Z` : iso;

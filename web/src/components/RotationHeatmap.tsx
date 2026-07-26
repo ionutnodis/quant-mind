@@ -203,7 +203,10 @@ export function RotationHeatmap() {
                 <div
                   key={r.symbol}
                   className={`flex items-center gap-1 border px-1.5 py-1 ${
-                    isAnchor ? "border-you" : "border-hairline"
+                    // Anchor selection is MARKET data, never book — amber is
+                    // book-only (CLAUDE.md core law), so the selected chip
+                    // gets the steel market accent, not `you`.
+                    isAnchor ? "border-market bg-elevated" : "border-hairline"
                   }`}
                 >
                   <InstrumentHover symbol={r.symbol}>
@@ -214,8 +217,8 @@ export function RotationHeatmap() {
                     data-testid={`rotation-symbol-${r.symbol}`}
                     onClick={() => setAnchor(r.symbol)}
                     title="Find the other side of the trade"
-                    className={`num text-[11px] ${isUp ? "text-up" : "text-down"} ${
-                      isAnchor ? "text-you" : ""
+                    className={`num text-[11px] ${
+                      isAnchor ? "text-ink" : isUp ? "text-up" : "text-down"
                     }`}
                   >
                     {pct(r.ret)}

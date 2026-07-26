@@ -40,8 +40,15 @@ _LOOKBACK_HOURS = 48
 _MAX_FETCH = 100
 _MAX_ITEMS = 50
 
-_UNAVAILABLE_NOTE = "news source unavailable — Gateway down or no entitled providers"
-_NO_MATCHES_NOTE = "no headlines matched the cached universe or macro keywords"
+# Honest-empty notes, one per distinguishable cause (fix-round-1: the live
+# paper session returned empty with a single ambiguous message — the user
+# couldn't tell whether to start the Gateway, fix entitlements, or shrug):
+_NO_GATEWAY_NOTE = "Gateway not connected"
+_NO_PROVIDERS_NOTE = (
+    "no entitled news providers on this session — check paper-account data sharing"
+)
+_NO_RELEVANT_NOTE = "no relevant headlines"
+_REQUEST_FAILED_NOTE = "news request failed — Gateway connection error"
 
 # Macro keywords (lowercase, matched as substrings of the lowercased
 # headline) — deliberately broad; a false-positive macro tag just means one
@@ -107,25 +114,30 @@ async def get_news(request: Request) -> NewsResponse:
     broker = request.app.state.broker
     ib = getattr(broker, "_ib", None) if broker is not None else None
     if ib is None:
-        return _empty(_UNAVAILABLE_NOTE)
+        return _empty(_NO_GATEWAY_NOTE)
 
     news_client = IbNews(ib)
     try:
+        # Providers fetched separately from headlines so the empty states
+        # stay distinguishable: zero entitlements is an account/session
+        # problem, zero relevant headlines is just a quiet tape.
+        providers = await news_client.provider_codes()
+        if not providers:
+            return _empty(_NO_PROVIDERS_NOTE)
         headlines = await news_client.broadtape_headlines(
-            lookback_hours=_LOOKBACK_HOURS, max_results=_MAX_FETCH
+            lookback_hours=_LOOKBACK_HOURS, max_results=_MAX_FETCH, providers=providers
         )
     except Exception:
         # Never-500 law: any network/IB-side failure (timeout, disconnect,
-        # malformed response) degrades to the same honest empty state.
-        return _empty(_UNAVAILABLE_NOTE)
-
-    if not headlines:
-        return _empty(_UNAVAILABLE_NOTE)
+        # malformed response) degrades to an honest empty state.
+        return _empty(_REQUEST_FAILED_NOTE)
 
     symbols = set(store.read_symbol_map().keys())
     items = [item for item in (_to_item(h, symbols) for h in headlines) if item is not None]
     if not items:
-        return _empty(_NO_MATCHES_NOTE)
+        # Entitled providers exist but nothing in the window matched (or the
+        # feed returned nothing at all) — quiet tape, not a broken pipe.
+        return _empty(_NO_RELEVANT_NOTE)
 
     items.sort(key=lambda i: i.time, reverse=True)
     items = items[:_MAX_ITEMS]
