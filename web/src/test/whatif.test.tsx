@@ -453,3 +453,113 @@ test("pin result -> side-by-side compare table, URL-persisted names, unpin remov
   expect(within(compare).queryByText("scenA")).not.toBeInTheDocument();
   expect(window.location.search).not.toContain("pins=scenA");
 });
+
+// --- fix round 1 ---
+
+function makePin(name: string, es = 0.0311): Record<string, unknown> {
+  return {
+    name,
+    pinned_at: "2026-07-25T00:00:00Z",
+    as_of: "2026-07-24T00:00:00Z",
+    horizon_days: 126,
+    n_paths: 2000,
+    seed: 7,
+    beta: 1.0,
+    es_975: es,
+    ann_vol: 0.18,
+    p5: -0.09,
+    p50: 0.01,
+    p95: 0.11,
+  };
+}
+
+test("?pins= URL param restores the pinned compare selection and order (I2)", async () => {
+  localStorage.setItem(
+    "quantmind.whatif.pins",
+    JSON.stringify({ alpha: makePin("alpha", 0.01), beta: makePin("beta", 0.02) })
+  );
+  window.history.replaceState(null, "", "/?pins=beta");
+  renderWhatIf();
+
+  const compare = await screen.findByTestId("whatif-pinned-compare");
+  expect(within(compare).getByText("beta")).toBeInTheDocument();
+  // alpha is stored but NOT selected by the shared URL — it must not render
+  expect(within(compare).queryByText("alpha")).not.toBeInTheDocument();
+  expect(within(compare).getByText("2.00%")).toBeInTheDocument();
+});
+
+test("?pins= order wins over localStorage insertion order (I2)", async () => {
+  localStorage.setItem(
+    "quantmind.whatif.pins",
+    JSON.stringify({ alpha: makePin("alpha"), beta: makePin("beta") })
+  );
+  window.history.replaceState(null, "", "/?pins=beta,alpha");
+  renderWhatIf();
+
+  const compare = await screen.findByTestId("whatif-pinned-compare");
+  const headers = within(compare).getAllByRole("columnheader").map((h) => h.textContent ?? "");
+  const betaIdx = headers.findIndex((h) => h.includes("beta"));
+  const alphaIdx = headers.findIndex((h) => h.includes("alpha"));
+  expect(betaIdx).toBeGreaterThan(-1);
+  expect(alphaIdx).toBeGreaterThan(-1);
+  expect(betaIdx).toBeLessThan(alphaIdx);
+});
+
+test("corrupt pins localStorage entries are shape-filtered, not a crash (I2 minor)", async () => {
+  localStorage.setItem(
+    "quantmind.whatif.pins",
+    JSON.stringify({ bad: 42, worse: { name: 7 }, good: makePin("good") })
+  );
+  renderWhatIf();
+
+  const compare = await screen.findByTestId("whatif-pinned-compare");
+  expect(within(compare).getByText("good")).toBeInTheDocument();
+  expect(within(compare).queryByText("bad")).not.toBeInTheDocument();
+  // fully-junk store must degrade to the empty state, never a TypeError
+  localStorage.setItem("quantmind.whatif.pins", '["not", "a", "record"]');
+});
+
+test("pin names containing a comma survive the URL round-trip (I2 minor)", async () => {
+  server.use(http.post("/api/whatif", () => HttpResponse.json(WHATIF_RESPONSE)));
+  const first = renderWhatIf();
+  fillFirstRow();
+  fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
+  await screen.findByTestId("whatif-weights");
+  fireEvent.change(screen.getByLabelText(/pin name/i), { target: { value: "a,b" } });
+  fireEvent.click(screen.getByRole("button", { name: /pin result/i }));
+  expect(within(screen.getByTestId("whatif-pinned-compare")).getByText("a,b")).toBeInTheDocument();
+
+  // fresh mount with the persisted URL + localStorage: one pin named "a,b",
+  // not two phantom pins "a" and "b"
+  first.unmount();
+  renderWhatIf();
+  const compare = await screen.findByTestId("whatif-pinned-compare");
+  expect(within(compare).getByText("a,b")).toBeInTheDocument();
+  expect(within(compare).getAllByRole("columnheader")).toHaveLength(2); // Metric + "a,b"
+});
+
+test("scenario save/load round-trips an option leg (I3)", async () => {
+  renderWhatIf();
+  fireEvent.change(await screen.findByLabelText(/symbol row 1/i), { target: { value: "SPY" } });
+  fireEvent.change(screen.getByLabelText(/qty row 1/i), { target: { value: "2" } });
+  fireEvent.change(screen.getByLabelText(/type row 1/i), { target: { value: "OPT" } });
+  fireEvent.change(screen.getByLabelText(/strike row 1/i), { target: { value: "450" } });
+  fireEvent.change(screen.getByLabelText(/expiry row 1/i), { target: { value: "2026-09-18" } });
+  fireEvent.change(screen.getByLabelText(/right row 1/i), { target: { value: "P" } });
+
+  fireEvent.change(screen.getByLabelText(/scenario name/i), { target: { value: "opt-scen" } });
+  fireEvent.click(screen.getByRole("button", { name: /save scenario/i }));
+
+  // mutate the book: back to a plain stock row
+  fireEvent.change(screen.getByLabelText(/type row 1/i), { target: { value: "STK" } });
+  fireEvent.change(screen.getByLabelText(/symbol row 1/i), { target: { value: "QQQ" } });
+
+  // loading must restore the FULL option leg, not 2 shares of SPY
+  fireEvent.click(screen.getByRole("button", { name: "opt-scen" }));
+  expect(screen.getByLabelText(/symbol row 1/i)).toHaveValue("SPY");
+  expect(screen.getByLabelText(/qty row 1/i)).toHaveValue(2);
+  expect(screen.getByLabelText(/type row 1/i)).toHaveValue("OPT");
+  expect(screen.getByLabelText(/strike row 1/i)).toHaveValue(450);
+  expect(screen.getByLabelText(/expiry row 1/i)).toHaveValue("2026-09-18");
+  expect(screen.getByLabelText(/right row 1/i)).toHaveValue("P");
+});

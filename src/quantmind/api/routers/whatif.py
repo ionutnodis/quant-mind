@@ -274,6 +274,29 @@ def _book_risk(
     return beta, es, vol, terminal
 
 
+def _validate_option_legs(positions: list[PositionIn], origin: str) -> None:
+    """Fix round 1 (I1): strike/expiry/right are ALL-or-NONE on every leg,
+    on BOTH the inline and book_ref paths (parity with book.py's honest-
+    refusal guard for pinned OPT legs). A leg with `right` but no strike/
+    expiry cannot be priced (and used to slip through inline, silently
+    valued at 100x underlier notional); a leg with strike/expiry but no
+    `right` used to key as a phantom separate STK line in the trade ticket.
+    Refuse both with a named 422, never a silent mispricing."""
+    for p in positions:
+        fields = {"strike": p.strike, "expiry": p.expiry, "right": p.right}
+        given = [k for k, v in fields.items() if v is not None]
+        if given and len(given) < len(fields):
+            missing = [k for k, v in fields.items() if v is None]
+            raise HTTPException(
+                422,
+                detail=(
+                    f"{origin} leg {p.symbol!r} has a partial option descriptor "
+                    f"(has {'/'.join(given)}, missing {'/'.join(missing)}) — "
+                    "strike/expiry/right must be given together (all or none)"
+                ),
+            )
+
+
 def _leg_key(p: PositionIn) -> tuple:
     return (p.symbol, p.strike, p.expiry, p.right, _effective_multiplier(p))
 
@@ -337,6 +360,7 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
         raise HTTPException(422, detail="book_ref resolved to an empty book")
     if len(positions) > _MAX_POSITIONS:
         raise HTTPException(422, detail=f"book has {len(positions)} positions; max {_MAX_POSITIONS}")
+    _validate_option_legs(positions, "book")
 
     # The base (CURRENT) book to diff against, if any. An EMPTY base book is
     # legitimate (no broker configured -> /api/book/current pins an empty
@@ -352,6 +376,7 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
             raise HTTPException(
                 422, detail=f"base book has {len(base_positions)} positions; max {_MAX_POSITIONS}"
             )
+        _validate_option_legs(base_positions, "base book")
 
     requested = [p.symbol for p in positions]
     base_symbols = [p.symbol for p in (base_positions or [])]

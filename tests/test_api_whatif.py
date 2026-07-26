@@ -393,6 +393,55 @@ def test_whatif_option_leg_via_book_ref_matches_inline(client):
     assert r_ref.json()["mc"] == r_inline.json()["mc"]
 
 
+def test_whatif_inline_option_leg_missing_strike_expiry_is_422(client):
+    # Fix round 1 (I1): the inline path must refuse the same incomplete OPT
+    # leg the book_ref path refuses (book.py's honest-refusal guard) —
+    # previously this returned 200, silently priced at 100x underlier notional.
+    r = client.post(
+        "/api/whatif",
+        json=_payload(positions=[{"symbol": "SPY", "qty": 1, "right": "C"}]),
+    )
+    assert r.status_code == 422
+    assert "SPY" in r.json()["detail"]
+    assert "strike" in r.json()["detail"]
+
+
+def test_whatif_partial_option_descriptor_without_right_is_422(client):
+    # Fix round 1 (I1 + reviewer minor 4): strike/expiry/right are
+    # all-or-none — a leg with strike but no right previously keyed as a
+    # phantom separate STK line in the trade ticket.
+    r = client.post(
+        "/api/whatif",
+        json=_payload(positions=[{"symbol": "SPY", "qty": 1, "strike": 400, "expiry": "20260918"}]),
+    )
+    assert r.status_code == 422
+    assert "SPY" in r.json()["detail"]
+    assert "together" in r.json()["detail"]
+
+
+def test_whatif_partial_option_descriptor_via_book_ref_is_422(client):
+    # The same all-or-none guard must hold for a book_ref-resolved book:
+    # /api/book/pin happily persists a strike-without-right leg (it pins it
+    # as STK sec_type, so book.py's OPT guard never fires), so whatif must
+    # refuse it at resolution time on BOTH the hypothetical and base paths.
+    pinned = _pin(
+        client, [{"symbol": "SPY", "qty": 1, "strike": 400, "expiry": "20260918"}]
+    )
+    r = client.post(
+        "/api/whatif",
+        json={"book_ref": pinned["snapshot_id"], "years": 1, "mc": {"horizon": 21, "n_paths": 500, "seed": 7}},
+    )
+    assert r.status_code == 422
+    assert "together" in r.json()["detail"]
+
+    r_base = client.post(
+        "/api/whatif",
+        json=_payload(base_book_ref=pinned["snapshot_id"]),
+    )
+    assert r_base.status_code == 422
+    assert "together" in r_base.json()["detail"]
+
+
 def test_whatif_option_leg_in_trade_ticket_keys_on_the_full_leg(client):
     # Base holds the underlier only; hypothetical adds a call overlay. The
     # ticket must key legs on (symbol, strike, expiry, right, multiplier) —

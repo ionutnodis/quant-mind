@@ -87,10 +87,29 @@ export interface PinnedScenario {
 const PINNED_SCENARIOS_KEY = "quantmind.whatif.pins";
 const PINS_PARAM = "pins";
 
+/** Shape check for one stored pin (fix round 1, I2 minor): localStorage is
+ * user-editable junk territory — a corrupt value must never TypeError the
+ * compare table, it just doesn't load. */
+function isPinnedScenario(v: unknown): v is PinnedScenario {
+  if (typeof v !== "object" || v === null) return false;
+  const p = v as Record<string, unknown>;
+  return (
+    typeof p.name === "string" &&
+    typeof p.horizon_days === "number" &&
+    typeof p.n_paths === "number"
+  );
+}
+
 export function readPinnedScenarios(): Record<string, PinnedScenario> {
   try {
     const raw = localStorage.getItem(PINNED_SCENARIOS_KEY);
-    return raw ? (JSON.parse(raw) as Record<string, PinnedScenario>) : {};
+    const parsed: unknown = raw ? JSON.parse(raw) : {};
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const out: Record<string, PinnedScenario> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (isPinnedScenario(v)) out[k] = v;
+    }
+    return out;
   } catch {
     return {};
   }
@@ -104,11 +123,23 @@ export function writePinnedScenarios(pins: Record<string, PinnedScenario>): void
   }
 }
 
-/** Reads the URL-persisted pinned-scenario names (`?pins=a,b`). */
+/** Reads the URL-persisted pinned-scenario names (`?pins=a,b`). Names are
+ * per-name percent-encoded on write so a name containing "," survives the
+ * join/split round-trip (fix round 1, I2 minor). */
 export function readPinnedNames(): string[] {
   if (typeof window === "undefined") return [];
   const raw = new URLSearchParams(window.location.search).get(PINS_PARAM);
-  return raw ? raw.split(",").filter((n) => n !== "") : [];
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .filter((n) => n !== "")
+    .map((n) => {
+      try {
+        return decodeURIComponent(n);
+      } catch {
+        return n; // malformed escape in a hand-edited URL — take it literally
+      }
+    });
 }
 
 /** Mirrors the pinned-scenario names into the URL (replaceState, like
@@ -117,7 +148,7 @@ export function writePinnedNames(names: string[]): void {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
   if (names.length) {
-    url.searchParams.set(PINS_PARAM, names.join(","));
+    url.searchParams.set(PINS_PARAM, names.map((n) => encodeURIComponent(n)).join(","));
   } else {
     url.searchParams.delete(PINS_PARAM);
   }

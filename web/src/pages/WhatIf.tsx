@@ -37,6 +37,7 @@ import { api, request } from "../lib/api";
 import {
   getBook,
   readActiveBookRef,
+  readPinnedNames,
   readPinnedScenarios,
   writeActiveBookRef,
   writePinnedNames,
@@ -45,8 +46,23 @@ import {
   type PinnedScenario,
 } from "../lib/book";
 
+// A saved scenario leg persists the FULL row descriptor (fix round 1, I3):
+// saving only {symbol, qty} silently reloaded "SPY 2 contracts" as "SPY 2
+// shares" — a materially different book. Option fields are optional so
+// pre-fix saved scenarios (plain {symbol, qty}) still load — as STK legs,
+// which is exactly what they were.
+interface ScenarioLeg {
+  symbol: string;
+  qty: string;
+  secType?: "STK" | "OPT";
+  strike?: string;
+  expiry?: string;
+  right?: "C" | "P";
+  multiplier?: string;
+}
+
 interface Scenario {
-  positions: { symbol: string; qty: string }[];
+  positions: ScenarioLeg[];
   years: number;
   horizon: number;
   n_paths: number;
@@ -228,7 +244,22 @@ export function WhatIf() {
   const [scenarioName, setScenarioName] = useState("");
   const [scenarios, setScenarios] = useState<Record<string, Scenario>>(() => loadScenarios());
   const [pinName, setPinName] = useState("");
-  const [pinned, setPinned] = useState<Record<string, PinnedScenario>>(() => readPinnedScenarios());
+  // Pinned compare set (fix round 1, I2): when the URL carries ?pins=, it is
+  // the source of truth for WHICH pins show and in WHAT order (a shared/
+  // reloaded URL restores the same compare view); without the param, the
+  // whole local store shows. The full store stays the persistence layer —
+  // pin/unpin below merge into it rather than overwriting it with the
+  // URL-filtered subset.
+  const [pinned, setPinned] = useState<Record<string, PinnedScenario>>(() => {
+    const all = readPinnedScenarios();
+    const urlNames = readPinnedNames();
+    if (urlNames.length === 0) return all;
+    const selected: Record<string, PinnedScenario> = {};
+    for (const n of urlNames) {
+      if (all[n]) selected[n] = all[n];
+    }
+    return selected;
+  });
 
   // Load-current-book default (wave-3B item 1): an active ?book_ref=
   // preloads the pinned book as the base + builder rows.
@@ -299,7 +330,15 @@ export function WhatIf() {
     if (!name) return;
     const next = {
       ...scenarios,
-      [name]: { positions: rows.map((r) => ({ symbol: r.symbol, qty: r.qty })), years, horizon, n_paths: nPaths, seed },
+      [name]: {
+        // Persist the full leg descriptor (I3) — everything but the
+        // ephemeral row key.
+        positions: rows.map(({ key: _key, ...leg }) => leg),
+        years,
+        horizon,
+        n_paths: nPaths,
+        seed,
+      },
     };
     setScenarios(next);
     persistScenarios(next);
@@ -335,7 +374,9 @@ export function WhatIf() {
       pinned_at: new Date().toISOString(),
       as_of: data.as_of,
       horizon_days: data.mc.horizon_days,
-      n_paths: nPaths,
+      // From the RESPONSE, not input state (reviewer minor): the paths the
+      // sim actually ran = finite histogram mass + dropped non-finite paths.
+      n_paths: data.mc.histogram.counts.reduce((a, b) => a + b, 0) + data.mc.n_nonfinite,
       seed: data.mc.seed,
       beta: data.beta,
       es_975: data.es_975,
@@ -346,7 +387,9 @@ export function WhatIf() {
     };
     const next = { ...pinned, [name]: entry };
     setPinned(next);
-    writePinnedScenarios(next);
+    // Merge into the FULL store (the displayed set may be a URL-filtered
+    // subset — overwriting would delete the unselected pins).
+    writePinnedScenarios({ ...readPinnedScenarios(), [name]: entry });
     writePinnedNames(Object.keys(next));
     setPinName("");
   }
@@ -355,7 +398,9 @@ export function WhatIf() {
     setPinned((prev) => {
       const next = { ...prev };
       delete next[name];
-      writePinnedScenarios(next);
+      const all = readPinnedScenarios();
+      delete all[name];
+      writePinnedScenarios(all);
       writePinnedNames(Object.keys(next));
       return next;
     });
