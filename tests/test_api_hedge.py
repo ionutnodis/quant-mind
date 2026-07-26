@@ -862,6 +862,74 @@ def test_hedge_displayed_protection_shares_one_window_with_its_ci(tmp_path):
     assert not (cand["delta_es_ci_low"] <= phantom <= cand["delta_es_ci_high"])
 
 
+def test_hedge_short_history_candidate_reports_aligned_n_obs_and_note_says_so(tmp_path):
+    """Batch-2 final review item 6: es_note claimed ONE window but candidate
+    rows have used the book∩candidate aligned window since f3f3408. The note
+    must say so, and each candidate must report its own aligned n_obs so the
+    truncation is auditable per row."""
+    rng = np.random.default_rng(21)
+    idx = pd.bdate_range(end="2026-07-24", periods=300)
+    spy_ret = rng.normal(0.0, 0.01, 300)
+    spy_close = 100 * np.cumprod(1 + spy_ret)
+    spy_bars = pd.DataFrame(
+        {"open": spy_close, "high": spy_close, "low": spy_close, "close": spy_close, "volume": 1000.0},
+        index=idx,
+    )
+    # Candidate history: only the last 150 bars -> 149 return days.
+    spy_close_s = pd.Series(spy_close, index=idx)
+    sub_ret = spy_close_s.iloc[150:].pct_change().dropna().to_numpy()
+    cand_ret = 0.8 * sub_ret + rng.normal(0, 0.002, len(sub_ret))
+    cand_close = np.empty(150)
+    cand_close[0] = 100.0
+    cand_close[1:] = 100.0 * np.cumprod(1 + cand_ret)
+    cand_bars = pd.DataFrame(
+        {"open": cand_close, "high": cand_close, "low": cand_close, "close": cand_close, "volume": 1000.0},
+        index=idx[150:],
+    )
+
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(con_id=1, bar_size="1d", bars=spy_bars, meta=meta)
+    store.write_bars(con_id=2, bar_size="1d", bars=cand_bars, meta=meta)
+    store.write_symbol_map({"SPY": 1, "NEWER": 2})
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    client = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+
+    r = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "SPY", "qty": 10}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["NEWER"],
+            "years": 1,
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    cand = body["candidates"][0]
+    # 150 candidate bars -> 149 return days, all inside the 1y book window.
+    assert cand["n_obs"] == 149
+    # The headline note now discloses the per-candidate aligned window.
+    assert "aligned" in body["es_note"]
+    assert "fewer observations" in body["es_note"]
+
+
+def test_hedge_option_rows_report_aligned_n_obs(tmp_path):
+    client, _spot = _option_client(tmp_path)
+    r = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "SPY", "qty": 1000}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["QQQ"],
+            "years": 1,
+        },
+    )
+    assert r.status_code == 200
+    for o in r.json()["option_hedges"]:
+        assert o["n_obs"] is not None and o["n_obs"] > 0
+
+
 def test_hedge_nan_strike_chain_row_never_reaches_the_response(tmp_path):
     """Bundled minor 1: a corrupt NaN-strike chain row must not win leg
     selection, and no leg float may reach the JSON un-cleaned (NaN is not

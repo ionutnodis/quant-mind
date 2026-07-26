@@ -72,6 +72,7 @@ const HEDGE_RESPONSE = {
       tail_n_days: 25,
       tail_mean_book: -0.021,
       tail_mean_hedged: -0.005,
+      n_obs: 251,
     },
     {
       kind: "collar",
@@ -93,6 +94,7 @@ const HEDGE_RESPONSE = {
       tail_n_days: 25,
       tail_mean_book: -0.021,
       tail_mean_hedged: -0.009,
+      n_obs: 251,
     },
   ],
   es_note: "ES = historical expected shortfall (97.5%) of DAILY returns over the 5y window, as a fraction of book gross",
@@ -122,6 +124,7 @@ const HEDGE_RESPONSE = {
       tail_mean_hedged: -0.008,
       residual_beta: 0.05,
       corr_stability: 0.04,
+      n_obs: 251,
     },
     {
       symbol: "IWM",
@@ -143,6 +146,7 @@ const HEDGE_RESPONSE = {
       tail_mean_hedged: -0.012,
       residual_beta: 0.1,
       corr_stability: 0.09,
+      n_obs: 251,
     },
     {
       symbol: "FLAT",
@@ -164,6 +168,7 @@ const HEDGE_RESPONSE = {
       tail_mean_hedged: null,
       residual_beta: null,
       corr_stability: 0.5,
+      n_obs: null,
     },
   ],
 };

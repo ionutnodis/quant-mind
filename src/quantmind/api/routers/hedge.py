@@ -189,6 +189,10 @@ class HedgeCandidateOut(BaseModel):
     residual_beta: float | None
     # Diagnostic only (Engineering Constraint 12) — never the ranking key.
     corr_stability: float | None
+    # Observations in this candidate's book∩candidate aligned window (the
+    # window its ES/CI/tail stats share — batch-2 final review item 6): a
+    # short-history candidate is auditable per row, not silently truncated.
+    n_obs: int | None
 
 
 class OptionLegOut(BaseModel):
@@ -218,6 +222,8 @@ class OptionHedgeOut(BaseModel):
     tail_n_days: int | None
     tail_mean_book: float | None
     tail_mean_hedged: float | None
+    # Observations in the book∩dominant-underlier aligned window (item 6).
+    n_obs: int | None
 
 
 class HedgeResponse(BaseModel):
@@ -407,6 +413,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         carry_drag = borrow_proxy = cost_annual = ppc = None
         ci_low = ci_high = None
         tail_n_days = tail_mean_book = tail_mean_hedged = None
+        cand_n_obs = None
 
         if not unusable and book_beta is not None:
             price_cand_last = float(cand_prices.iloc[-1])
@@ -422,6 +429,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                 # the SAME per-original-book-dollar units via book_gross —
                 # never the (possibly hedge-inflated) new portfolio gross.
                 aligned_overlay = pd.concat({"book": book_returns, "cand": cand_returns}, axis=1).dropna()
+                cand_n_obs = len(aligned_overlay) if len(aligned_overlay) else None
                 hedged_returns: pd.Series | None = None
                 if len(aligned_overlay) > 0 and book_gross:
                     hedge_leg_returns = hedge_notional * aligned_overlay["cand"] / book_gross
@@ -517,6 +525,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                 tail_mean_hedged=tail_mean_hedged,
                 residual_beta=residual_beta,
                 corr_stability=corr_stability,
+                n_obs=cand_n_obs,
             )
         )
 
@@ -565,7 +574,9 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         option_note=option_note,
         es_note=(
             f"ES = historical expected shortfall (97.5%) of DAILY returns over the "
-            f"{req.years}y window, as a fraction of book gross"
+            f"{req.years}y window, as a fraction of book gross. Candidate rows use "
+            f"the book∩candidate aligned window and may span fewer observations "
+            f"(each row's n_obs) — the headline es_before alone is full-window."
         ),
         cost_note=(
             f"cost/yr = carry drag (β_h · E[r_bench]; E[r_bench] = "
@@ -761,4 +772,5 @@ def _price_structure(
         tail_n_days=tail.n_days if tail is not None else None,
         tail_mean_book=clean(tail.mean_book) if tail is not None else None,
         tail_mean_hedged=clean(tail.mean_hedged) if tail is not None else None,
+        n_obs=len(aligned) if len(aligned) else None,
     )

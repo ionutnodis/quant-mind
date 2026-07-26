@@ -51,6 +51,8 @@ interface HedgeCandidate {
   tail_mean_hedged: number | null;
   residual_beta: number | null;
   corr_stability: number | null;
+  // Aligned book∩candidate window length (batch-2 final review item 6).
+  n_obs: number | null;
 }
 
 interface OptionHedgeLeg {
@@ -79,6 +81,7 @@ interface OptionHedge {
   tail_n_days: number | null;
   tail_mean_book: number | null;
   tail_mean_hedged: number | null;
+  n_obs: number | null;
 }
 
 interface HedgeResponse {
