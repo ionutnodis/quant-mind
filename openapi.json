@@ -2670,6 +2670,10 @@
             ],
             "title": "Alpha Daily"
           },
+          "alpha_note": {
+            "title": "Alpha Note",
+            "type": "string"
+          },
           "alpha_se": {
             "anyOf": [
               {
@@ -2680,6 +2684,17 @@
               }
             ],
             "title": "Alpha Se"
+          },
+          "alpha_tstat": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha Tstat"
           },
           "as_of": {
             "anyOf": [
@@ -2723,6 +2738,17 @@
           "horizon_note": {
             "title": "Horizon Note",
             "type": "string"
+          },
+          "information_ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Information Ratio"
           },
           "n_obs": {
             "title": "N Obs",
@@ -2800,6 +2826,9 @@
           "alpha_annualized",
           "alpha_se",
           "alpha_ci",
+          "alpha_tstat",
+          "information_ratio",
+          "alpha_note",
           "betas",
           "r_squared",
           "r_squared_progression",
@@ -2887,6 +2916,43 @@
             "title": "Beta Series",
             "type": "array"
           },
+          "cagr": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cagr"
+          },
+          "drag_approx": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drag Approx"
+          },
+          "drag_exact": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drag Exact"
+          },
+          "drag_note": {
+            "title": "Drag Note",
+            "type": "string"
+          },
           "es_975": {
             "anyOf": [
               {
@@ -2897,6 +2963,17 @@
               }
             ],
             "title": "Es 975"
+          },
+          "mean_arith_annual": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mean Arith Annual"
           },
           "n_obs": {
             "title": "N Obs",
@@ -2926,6 +3003,11 @@
           "alpha_note",
           "es_975",
           "ann_vol",
+          "mean_arith_annual",
+          "cagr",
+          "drag_exact",
+          "drag_approx",
+          "drag_note",
           "as_of"
         ],
         "title": "RiskResponse",

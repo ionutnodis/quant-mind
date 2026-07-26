@@ -68,6 +68,11 @@ const RISK_SPY = {
   alpha_note: "vs SPY, rf=0 until FRED wiring",
   es_975: 0.0314,
   ann_vol: 0.182,
+  mean_arith_annual: 0.20,
+  cagr: 0.185,
+  drag_exact: 0.015,
+  drag_approx: 0.016562,
+  drag_note: "equity sleeve, per-symbol; drag = mean - CAGR ~= 1/2 sigma^2",
   as_of: "2026-07-24T00:00:00Z",
 };
 
@@ -87,6 +92,8 @@ const REGRESSION_SINGLE = {
   alpha_annualized: 0.0252,
   alpha_se: 0.00005,
   alpha_ci: [0.00002, 0.00018],
+  alpha_tstat: 2.0,
+  information_ratio: 1.5,
   betas: [{ factor: "SPY", beta: 1.0, se: 0.02, ci_low: 0.96, ci_high: 1.04 }],
   r_squared: 0.98,
   r_squared_progression: [{ factor_added: "SPY", r_squared: 0.98 }],
@@ -99,6 +106,7 @@ const REGRESSION_SINGLE = {
     { name: "SPY", daily: 0.0003, annualized: 0.0756 },
     { name: "idiosyncratic", daily: 0.0, annualized: 0.0 },
   ],
+  alpha_note: "excess-return Jensen alpha vs SPY, rf=US3M/252",
   as_of: "2026-07-24T00:00:00Z",
   horizon_note: "daily returns; alpha/attribution figures shown daily and annualized (x252); n_obs is the full 5y cache",
 };
@@ -276,4 +284,19 @@ test("years/regression-window/horizon/paths controls are bounded matching backen
   const pathsInput = screen.getByLabelText(/^paths/i) as HTMLInputElement;
   expect(pathsInput.min).toBe("1");
   expect(pathsInput.max).toBe("200000");
+});
+
+test("Risk page surfaces the volatility-drag and skill-vs-luck (alpha honesty) lenses", async () => {
+  mockHappyPath();
+  renderRisk();
+  await screen.findByTestId("regression-scatter");
+
+  // Volatility drag: CAGR (geometric) distinct from arithmetic mean, plus the equity-sleeve note.
+  expect(await screen.findByText(/18\.50%/)).toBeInTheDocument(); // CAGR
+  expect(screen.getByText(/equity sleeve/i)).toBeInTheDocument();
+
+  // Alpha honesty: t-stat / IR and the honest excess-return note; |t|>=2 => distinguishable from luck.
+  expect(screen.getByText(/2\.00 \/ 1\.50/)).toBeInTheDocument();
+  expect(screen.getByText(/rf=US3M\/252/)).toBeInTheDocument();
+  expect(screen.getByText(/statistically distinguishable from luck/i)).toBeInTheDocument();
 });

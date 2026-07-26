@@ -53,3 +53,19 @@
 - **What:** Extract shared `api/routers/_shared.py` (`_clean`, `_iso`, `_read_close_series`, the qty-nonzero PositionIn model — currently 7/4/2/2 duplicated copies); shared `BookBuilder` React component (Hedge's string-qty variant as base — WhatIf and Hedge have diverging row-builders); align Hedge's degenerate-input 422s (gross<=0, non-finite closes) with WhatIf's named-422 policy; narrow the Engle-Granger broad except.
 - **Why:** Wave-2's exclusive-file-ownership rules tripled helper duplication (right tradeoff then, wrong to keep); any NaN-policy change now needs 7 edits; a third row-builder copy in wave 3 locks in drift.
 - **Context:** Wave-2 final whole-branch review M1/M2/M5; ledger history in git (docs/plans/2026-07-25-wave2.md).
+
+## Black-Litterman / MVO allocation lens (eng-review deferred, 2026-07-26)
+- **What:** Reverse-optimized equilibrium weights vs current weights, with optional view injection (Black-Litterman); mean-variance efficient frontier + QP as a later add.
+- **Why:** A "does my tilt agree with equilibrium + my views" sanity check. Deferred from the dashboard-expansion program (scope B): heaviest subsystem for the lightest stated purpose (a lens, not an execution target) for a discretionary options book.
+- **Pros:** Adds an allocation-sanity lens; the quant-flex piece.
+- **Cons:** Needs a covariance estimator (Ledoit-Wolf), a market proxy (Roll's critique), and a QP dep; decorative unless you actually rebalance toward weights.
+- **Context:** Design doc `nodisionut-expand-dashboard-from-video-design-*.md` (D1, NOT-in-scope). Sibling video #100.
+- **Depends on:** analytics core (returns/covariance) shipped; a real desire for an allocation lens.
+
+## Return-on-equity base + options-aware total-book analytics (eng-review deferred, 2026-07-26)
+- **What:** A true return-on-equity denominator (cash/margin/net-liquidation) and options-aware total-book returns, so vol-drag CAGR, drawdown, and leverage-headroom reflect real equity, not per-gross-dollar equity-sleeve P&L.
+- **Why:** `weighted_portfolio_returns` (`_shared.py:135`) is per-gross-dollar; `BookBuilder` is equity-only. v1 survival views are honest but equity-sleeve; a levered/short/options book needs an equity base to be decision-grade (Codex outside voice H2/H3).
+- **Pros:** Makes CAGR/drawdown/leverage numbers real for the actual book.
+- **Cons:** Needs account NAV/cash/margin data and option-leg return modeling; overlaps the options-aware ES v2 work.
+- **Context:** Design doc H2/H3. Bundle with "Unified options-aware ES (v2)" above.
+- **Depends on:** v1 equity-sleeve survival views shipped and used; account-equity data path.

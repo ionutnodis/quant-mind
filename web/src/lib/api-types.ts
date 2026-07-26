@@ -1128,8 +1128,12 @@ export interface components {
             ];
             /** Alpha Daily */
             alpha_daily: number | null;
+            /** Alpha Note */
+            alpha_note: string;
             /** Alpha Se */
             alpha_se: number | null;
+            /** Alpha Tstat */
+            alpha_tstat: number | null;
             /** As Of */
             as_of: string | null;
             /** Attribution */
@@ -1143,6 +1147,8 @@ export interface components {
             hac_lags: number;
             /** Horizon Note */
             horizon_note: string;
+            /** Information Ratio */
+            information_ratio: number | null;
             /** N Obs */
             n_obs: number;
             /** R Squared */
@@ -1183,8 +1189,18 @@ export interface components {
             benchmark: string;
             /** Beta Series */
             beta_series: components["schemas"]["BetaPoint"][];
+            /** Cagr */
+            cagr: number | null;
+            /** Drag Approx */
+            drag_approx: number | null;
+            /** Drag Exact */
+            drag_exact: number | null;
+            /** Drag Note */
+            drag_note: string;
             /** Es 975 */
             es_975: number | null;
+            /** Mean Arith Annual */
+            mean_arith_annual: number | null;
             /** N Obs */
             n_obs: number;
             /** Symbol */

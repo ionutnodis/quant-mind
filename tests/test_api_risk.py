@@ -193,6 +193,67 @@ def client_with_named_series(tmp_path):
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 
+@pytest.fixture
+def client_with_rf(tmp_path):
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)
+    store.write_bars(con_id=2, bar_size="1d", bars=_bars(seed=2), meta=meta)
+    store.write_symbol_map({"SPY": 1, "MTUM": 2})
+    store.write_series("US10Y", _named_series(seed=3))
+    # US3M cached as a DECIMAL LEVEL (~4.5%), the true rf source: daily rf = level/252.
+    store.write_series("US3M", _named_series(seed=4, start=0.045, scale=0.0001))
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+
+
+def test_regression_reports_information_ratio_and_alpha_tstat(client_with_named_series):
+    # New honest-alpha stats are always present in the response shape.
+    r = client_with_named_series.get(
+        "/api/risk/MTUM/regression", params={"factors": "SPY", "years": 1}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert "information_ratio" in body
+    assert "alpha_tstat" in body
+    assert "alpha_note" in body
+
+
+def test_regression_applies_rf_jensen_alpha_when_us3m_present(client_with_rf):
+    # US3M cached AND benchmark (SPY) among factors -> excess-return Jensen alpha.
+    r = client_with_rf.get(
+        "/api/risk/MTUM/regression", params={"factors": "SPY,US10Y", "years": 1}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["alpha_note"] == "excess-return Jensen alpha vs SPY, rf=US3M/252"
+    assert body["information_ratio"] is not None
+    assert body["alpha_tstat"] is not None
+
+
+def test_regression_falls_back_to_rf_zero_when_us3m_missing(client_with_named_series):
+    # US3M NOT cached -> honest rf=0 note, no 500, stats still populated.
+    r = client_with_named_series.get(
+        "/api/risk/MTUM/regression", params={"factors": "SPY", "years": 1}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert "rf=0" in body["alpha_note"]
+    assert "Jensen" not in body["alpha_note"]
+
+
+def test_regression_no_rf_when_benchmark_not_among_factors(client_with_rf):
+    # US3M cached but benchmark (SPY) NOT requested -> do not silently subtract
+    # rf from a non-market factor set; keep the honest rf=0 note.
+    r = client_with_rf.get(
+        "/api/risk/MTUM/regression", params={"factors": "US10Y", "years": 1}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert "rf=0" in body["alpha_note"]
+    assert "Jensen" not in body["alpha_note"]
+
+
 def test_regression_single_factor_capm_shape(client_with_named_series):
     r = client_with_named_series.get(
         "/api/risk/MTUM/regression", params={"factors": "SPY", "years": 1}
@@ -302,3 +363,15 @@ def test_montecarlo_zero_close_never_500s_and_reports_n_nonfinite(client_with_ze
         assert sum(hist["counts"]) == 2000 - body["n_nonfinite"]
     else:
         assert "detail" in r.json()
+
+
+def test_risk_reports_volatility_drag_fields(client):
+    r = client.get("/api/risk/QQQ", params={"window": 30, "years": 2})
+    assert r.status_code == 200
+    body = r.json()
+    for k in ("mean_arith_annual", "cagr", "drag_exact", "drag_approx", "drag_note"):
+        assert k in body
+    # drag_exact = mean_arith_annual - cagr (the defining identity), when present
+    if body["drag_exact"] is not None:
+        assert body["drag_exact"] == pytest.approx(body["mean_arith_annual"] - body["cagr"], rel=1e-6, abs=1e-9)
+    assert "equity sleeve" in body["drag_note"]
