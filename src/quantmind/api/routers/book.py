@@ -24,8 +24,10 @@ whatif/hedge.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -35,6 +37,15 @@ from quantmind.core.snapshot import BookSnapshot
 from quantmind.portfolio import Portfolio, Position
 
 router = APIRouter()
+
+# Snapshot ids are always a 12-hex-char sha256 prefix (BookSnapshot.create).
+# book_ref is client-controlled and lands directly in a filesystem path
+# (`{root}/books/{snapshot_id}.json`) — validating the shape BEFORE building
+# that path closes off both a path-traversal read (e.g. "../instruments",
+# which would resolve to `{root}/instruments.json`, a same-directory file
+# with a completely different schema -> KeyError -> 500) and any other
+# malformed input, final-fix-wave finding 2.
+_BOOK_REF_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 class BookPinRequest(BaseModel):
@@ -50,6 +61,12 @@ class BookPositionOut(BaseModel):
     con_id: int | None
     sec_type: str
     multiplier: float
+    # Option-leg fields (final-fix-wave finding 1) — null for a plain
+    # equity/ETF leg, populated for an OPT leg pinned from an explicit
+    # PositionIn. See write_book/read_book_positions below.
+    strike: float | None = None
+    expiry: str | None = None
+    right: Literal["C", "P"] | None = None
 
 
 class BookSnapshotOut(BaseModel):
@@ -75,12 +92,24 @@ def _leg_multiplier(p: PositionIn) -> float:
     return 100.0 if p.right is not None else 1.0
 
 
-def write_book(store, snapshot: BookSnapshot) -> None:
+def write_book(store, snapshot: BookSnapshot, legs: list[PositionIn] | None = None) -> None:
     """Persist an immutable snapshot as JSON (atomic tmp-then-replace, the
     same convention BarStore uses for its own writes — reproduced here as a
     small helper rather than imported, since store.py is A2's file this wave
-    and this isn't a Parquet write)."""
+    and this isn't a Parquet write).
+
+    `legs` is the ORIGINAL posted `PositionIn` list (same order as
+    `snapshot.portfolio.positions` — see `_portfolio_from_positions`, which
+    builds one `Position` per `PositionIn` in list order), carrying
+    strike/expiry/right that `Position` itself doesn't have room for
+    (Engineering Constraint 9's one Portfolio type). `None` (the live-broker
+    auto-pin path — a broker `Portfolio` was never built from `PositionIn`s)
+    persists null option fields for every leg, even an OPT one; see
+    `read_book_positions`'s honest-refusal guard for why that's the safe
+    default rather than a silent stock mispricing (final-fix-wave finding 1)."""
     path = _books_dir(store) / f"{snapshot.snapshot_id}.json"
+    positions = snapshot.portfolio.positions
+    leg_by_position = legs if legs is not None else [None] * len(positions)
     payload = {
         "snapshot_id": snapshot.snapshot_id,
         "valuation_ts": snapshot.valuation_ts,
@@ -92,8 +121,11 @@ def write_book(store, snapshot: BookSnapshot) -> None:
                 "qty": p.qty,
                 "sec_type": p.sec_type,
                 "multiplier": p.multiplier,
+                "strike": leg.strike if leg is not None else None,
+                "expiry": leg.expiry if leg is not None else None,
+                "right": leg.right if leg is not None else None,
             }
-            for p in snapshot.portfolio.positions
+            for p, leg in zip(positions, leg_by_position)
         ],
     }
     tmp = path.with_suffix(".json.tmp")
@@ -104,19 +136,57 @@ def write_book(store, snapshot: BookSnapshot) -> None:
 def read_book(store, snapshot_id: str) -> dict:
     """Raw persisted payload for `snapshot_id`; 422 naming the ref if it was
     never pinned (matches whatif.py/hedge.py's unknown-symbol 422 policy —
-    an unresolvable book_ref is a client error, never a 500)."""
+    an unresolvable book_ref is a client error, never a 500). Also 422s a
+    malformed ref (path-traversal-shaped or otherwise not a 12-hex-char
+    snapshot id) BEFORE it ever becomes a filesystem path, and a corrupted
+    snapshot file (never expected in normal operation, but a client should
+    never see a 500 for it) — final-fix-wave finding 2."""
+    if not _BOOK_REF_RE.match(snapshot_id):
+        raise HTTPException(422, detail=f"invalid book_ref {snapshot_id!r}")
     path = _books_dir(store) / f"{snapshot_id}.json"
     if not path.exists():
         raise HTTPException(422, detail=f"unknown book_ref {snapshot_id!r}")
-    return json.loads(path.read_text())
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        raise HTTPException(422, detail=f"corrupted book snapshot {snapshot_id!r}")
 
 
 def read_book_positions(store, snapshot_id: str) -> list[PositionIn]:
-    """Resolve a book_ref into the PositionIn legs whatif.py/hedge.py price
-    off (symbol + qty is all those routers need; con_id/sec_type/multiplier
-    stay in the persisted snapshot for GET /api/book/{id} display)."""
+    """Resolve a book_ref into the PositionIn legs whatif.py/hedge.py/
+    options.py price off. Reconstructs the FULL leg (multiplier + the
+    option-leg fields written by `write_book`, not just symbol/qty as before
+    — final-fix-wave finding 1) so an option leg prices identically whether
+    given inline or via book_ref.
+
+    A persisted OPT leg (`sec_type == "OPT"`) with a null strike/expiry can
+    only come from the live-broker auto-pin path (see `write_book`'s
+    docstring) — there is no way to price it correctly, and silently
+    treating it as a bare underlier position would be exactly the silent
+    wrong-numbers bug this fix wave exists to close. Refuse it honestly
+    instead."""
     payload = read_book(store, snapshot_id)
-    return [PositionIn(symbol=p["symbol"], qty=p["qty"]) for p in payload["positions"]]
+    positions: list[PositionIn] = []
+    for p in payload["positions"]:
+        if p.get("sec_type") == "OPT" and (p.get("strike") is None or p.get("expiry") is None):
+            raise HTTPException(
+                422,
+                detail=(
+                    f"snapshot's option legs lack strike/expiry ({p['symbol']!r}) — "
+                    "re-pin with explicit legs"
+                ),
+            )
+        positions.append(
+            PositionIn(
+                symbol=p["symbol"],
+                qty=p["qty"],
+                strike=p.get("strike"),
+                expiry=p.get("expiry"),
+                right=p.get("right"),
+                multiplier=p.get("multiplier"),
+            )
+        )
+    return positions
 
 
 def _snapshot_out(payload: dict) -> BookSnapshotOut:
@@ -155,9 +225,26 @@ def _portfolio_from_positions(store, positions: list[PositionIn], valuation_ts: 
     )
 
 
-def _pin_and_respond(store, portfolio: Portfolio, valuation_ts: str) -> BookSnapshotOut:
-    snapshot = BookSnapshot.create(portfolio, valuation_ts=valuation_ts, base_currency="USD")
-    write_book(store, snapshot)
+def _option_hash_extra(portfolio: Portfolio, legs: list[PositionIn] | None) -> str:
+    """Fold strike/expiry/right into `BookSnapshot.create`'s hash (its
+    `extra` parameter), sorted the same way the base hash sorts positions
+    (by con_id) so the pairing stays correct: two books identical at the
+    `Position` level (same con_id/qty/multiplier/sec_type) but differing
+    only in an option leg's strike must NOT collide on the same snapshot id
+    (final-fix-wave finding 1.iii) — `Position` has no room for those fields,
+    so the base hash alone can't tell them apart."""
+    if legs is None:
+        return ""
+    paired = sorted(zip(portfolio.positions, legs), key=lambda pl: pl[0].con_id)
+    return "|".join(f"{leg.strike}:{leg.expiry}:{leg.right}" for _, leg in paired)
+
+
+def _pin_and_respond(
+    store, portfolio: Portfolio, valuation_ts: str, legs: list[PositionIn] | None = None
+) -> BookSnapshotOut:
+    extra = _option_hash_extra(portfolio, legs)
+    snapshot = BookSnapshot.create(portfolio, valuation_ts=valuation_ts, base_currency="USD", extra=extra)
+    write_book(store, snapshot, legs)
     return _snapshot_out(read_book(store, snapshot.snapshot_id))
 
 
@@ -168,9 +255,9 @@ async def pin_book(request: Request, req: BookPinRequest) -> BookSnapshotOut:
 
     if req.positions is not None:
         portfolio = _portfolio_from_positions(store, req.positions, valuation_ts)
-    else:
-        portfolio = await _live_portfolio(request, valuation_ts)
+        return _pin_and_respond(store, portfolio, valuation_ts, legs=req.positions)
 
+    portfolio = await _live_portfolio(request, valuation_ts)
     return _pin_and_respond(store, portfolio, valuation_ts)
 
 

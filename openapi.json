@@ -172,6 +172,17 @@
             ],
             "title": "Con Id"
           },
+          "expiry": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiry"
+          },
           "multiplier": {
             "title": "Multiplier",
             "type": "number"
@@ -180,9 +191,35 @@
             "title": "Qty",
             "type": "number"
           },
+          "right": {
+            "anyOf": [
+              {
+                "enum": [
+                  "C",
+                  "P"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Right"
+          },
           "sec_type": {
             "title": "Sec Type",
             "type": "string"
+          },
+          "strike": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strike"
           },
           "symbol": {
             "title": "Symbol",

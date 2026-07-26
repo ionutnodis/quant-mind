@@ -194,3 +194,62 @@ def test_book_greeks_unknown_book_ref_is_422(client):
 def test_book_greeks_unknown_symbol_is_422(client):
     r = client.post("/api/options/book-greeks", json={"positions": [{"symbol": "MSFT", "qty": 1}]})
     assert r.status_code == 422
+
+
+# --- final-fix-wave (2026-07-25): option legs must round-trip through pinned
+# books (finding 1 — the blocker: previously priced as bare shares), and
+# book_ref must be a validated 12-hex-char id, never an unvalidated path
+# (finding 2). ---
+
+
+def test_book_greeks_via_book_ref_option_leg_matches_inline(client, store):
+    _write_spy_chain(store, as_of=str(date.today()))
+    positions = [{"symbol": "SPY", "qty": 2, "strike": 440.0, "expiry": "20260918", "right": "C"}]
+
+    inline = client.post("/api/options/book-greeks", json={"positions": positions})
+    assert inline.status_code == 200
+    inline_row = inline.json()["underlyings"][0]
+
+    pinned = client.post("/api/book/pin", json={"positions": positions})
+    assert pinned.status_code == 200
+    snapshot_id = pinned.json()["snapshot_id"]
+
+    via_ref = client.post("/api/options/book-greeks", json={"book_ref": snapshot_id})
+    assert via_ref.status_code == 200
+    ref_row = via_ref.json()["underlyings"][0]
+
+    # Regression guard: before the fix, book_ref resolution dropped
+    # strike/expiry/right, so this leg priced as 2 bare SPY shares instead
+    # of an option (delta ~2.0 instead of ~2*100*bs_delta).
+    assert ref_row["delta"] == pytest.approx(inline_row["delta"])
+    assert ref_row["gamma"] == pytest.approx(inline_row["gamma"])
+    assert ref_row["dollar_delta"] == pytest.approx(inline_row["dollar_delta"])
+
+
+def test_book_greeks_book_ref_with_invalid_format_is_422_not_500(client, store):
+    # {"book_ref": "../instruments"} would resolve to {root}/instruments.json
+    # (A2's instrument-metadata store, a dict with no "positions" key) if the
+    # ref weren't format-validated first -> KeyError -> 500 (finding 2).
+    store.write_instrument_metadata("SPY", {"exchange": "ARCA"})
+    r = client.post("/api/options/book-greeks", json={"book_ref": "../instruments"})
+    assert r.status_code == 422
+
+
+def test_book_greeks_book_ref_corrupted_snapshot_is_422_not_500(client, store):
+    from quantmind.api.routers.book import _books_dir
+
+    bad_id = "abcdef012345"
+    (_books_dir(store) / f"{bad_id}.json").write_text("{not valid json")
+    r = client.post("/api/options/book-greeks", json={"book_ref": bad_id})
+    assert r.status_code == 422
+
+
+def test_book_greeks_expiry_accepts_iso_form(client, store):
+    _write_spy_chain(store, as_of=str(date.today()))
+    payload = {
+        "positions": [
+            {"symbol": "SPY", "qty": 2, "strike": 440.0, "expiry": "2026-09-18", "right": "C"},
+        ]
+    }
+    r = client.post("/api/options/book-greeks", json=payload)
+    assert r.status_code == 200

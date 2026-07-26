@@ -411,12 +411,18 @@ export interface components {
         BookPositionOut: {
             /** Con Id */
             con_id: number | null;
+            /** Expiry */
+            expiry?: string | null;
             /** Multiplier */
             multiplier: number;
             /** Qty */
             qty: number;
+            /** Right */
+            right?: ("C" | "P") | null;
             /** Sec Type */
             sec_type: string;
+            /** Strike */
+            strike?: number | null;
             /** Symbol */
             symbol: string;
         };

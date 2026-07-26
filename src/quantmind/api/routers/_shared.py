@@ -37,6 +37,7 @@ p.multiplier is not None else (100.0 if p.right else 1.0)`.
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from typing import Literal, Sequence, TypeVar
 
 import numpy as np
@@ -113,6 +114,22 @@ class PositionIn(BaseModel):
         if v == 0:
             raise ValueError("qty must be nonzero")
         return v
+
+    @field_validator("expiry")
+    @classmethod
+    def _normalize_expiry(cls, v: str | None) -> str | None:
+        """Accept either options.py's wire format (YYYYMMDD) or the ISO form
+        (YYYY-MM-DD) book.py's own tests happened to use — two conventions
+        that silently diverged across the wave-3 routers (final-fix-wave
+        finding 4) — and normalize to YYYYMMDD everywhere downstream."""
+        if v is None:
+            return None
+        for fmt in ("%Y%m%d", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(v, fmt).strftime("%Y%m%d")
+            except ValueError:
+                continue
+        raise ValueError(f"expiry must be YYYYMMDD or YYYY-MM-DD, got {v!r}")
 
 
 def weighted_portfolio_returns(returns: pd.DataFrame, symbols: list[str], weights: np.ndarray) -> pd.Series:

@@ -265,7 +265,14 @@ def _leg_to_book_leg(
         raise HTTPException(
             422, detail=f"cached quote for {p.symbol} {p.expiry} {p.strike} {p.right} has no usable IV"
         )
-    expiry_dt = datetime.strptime(p.expiry, "%Y%m%d").date()
+    try:
+        expiry_dt = datetime.strptime(p.expiry, "%Y%m%d").date()
+    except ValueError:
+        # Unreachable via the API today — PositionIn.expiry (_shared.py)
+        # already validates/normalizes to YYYYMMDD on the way in — but cheap
+        # insurance against a future caller that constructs a BookLeg
+        # bypassing that validator (final-fix-wave finding 4, deferred-minor).
+        raise HTTPException(422, detail=f"option leg for {p.symbol} has an unparseable expiry {p.expiry!r}")
     expiry_years = (expiry_dt - as_of).days / 365.25
     if expiry_years <= 0:
         raise HTTPException(
