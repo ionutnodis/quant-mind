@@ -62,4 +62,16 @@ def build():
 
 
 if __name__ == "__main__":
-    uvicorn.run(build(), host="127.0.0.1", port=8000)
+    import os
+
+    # QM_RELOAD=1 (default): watch src/ and restart on change — kills the
+    # recurring stale-server failure mode (three field incidents: routes/
+    # messages lagging the code because uvicorn predated the commits).
+    if os.environ.get("QM_RELOAD", "1") == "1":
+        uvicorn.run(
+            "quantmind.api.main:build", factory=True,
+            host="127.0.0.1", port=8000,
+            reload=True, reload_dirs=["src"],
+        )
+    else:
+        uvicorn.run(build(), host="127.0.0.1", port=8000)
