@@ -1,0 +1,31 @@
+/* QuantMind tokens — single source of truth per DESIGN.md.
+   A grep for #E8A33D anywhere else in web/ should return nothing. */
+@import "tailwindcss";
+
+@theme {
+  --color-ground: #0a0a0b;
+  --color-surface: #131316;
+  --color-elevated: #1a1a1e;
+  --color-hairline: #26262b;
+  --color-ink: #ededef;
+  --color-muted: #8b8b93;
+  --color-you: #e8a33d; /* the user's book — nothing else, ever */
+  --color-market: #7fa0b4;
+  --color-up: #2fbf71;
+  --color-down: #e5484d;
+  --color-warning: #d9a63f; /* caution banners only — visually distinct from book-amber by context */
+  --font-sans: "General Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, monospace;
+}
+
+html {
+  background: var(--color-ground);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+}
+
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
