@@ -99,6 +99,9 @@ interface HedgeResponse {
   ci_note: string;
   tail_note: string;
   as_of: string | null;
+  // Declared approximations (batch-2 final review item 2): e.g. the option
+  // delta-one proxy when the book carries OPT legs — rendered, never silent.
+  notes: string[];
 }
 
 const KIND_LABEL: Record<OptionHedge["kind"], string> = {
@@ -390,6 +393,9 @@ export function Hedge() {
                 <p className="text-muted text-[10px]">{data.es_note}</p>
                 <p className="text-muted text-[10px]">{data.cost_note}</p>
                 <p className="text-muted text-[10px]">{data.ci_note}</p>
+                {data.notes.map((n, i) => (
+                  <p key={i} className="text-warning text-[10px]">{n}</p>
+                ))}
               </div>
             </div>
           )}

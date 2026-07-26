@@ -43,7 +43,9 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
 from quantmind.api.routers._shared import (
+    DELTA_ONE_OPTION_NOTE,
     PositionIn,
+    _effective_multiplier,
     _validate_option_legs,
     clean,
     iso,
@@ -64,11 +66,7 @@ router = APIRouter()
 _BETA_WINDOW = 60
 _MAX_HIST_BINS = 60
 _MAX_POSITIONS = 50
-_OPTION_NOTE = (
-    "Option legs are priced as delta-one underlier notional (qty x multiplier x spot) "
-    "in this returns-based engine — a declared approximation; Greeks-aware option risk "
-    "lives in the options layer (book-greeks)."
-)
+_OPTION_NOTE = DELTA_ONE_OPTION_NOTE
 
 
 class MonteCarloParams(BaseModel):
@@ -213,15 +211,6 @@ class WhatIfResponse(BaseModel):
     trade_ticket: list[TicketLineOut] | None = None
     # Declared approximations/caveats (e.g. the option delta-one proxy).
     notes: list[str] = Field(default_factory=list)
-
-
-def _effective_multiplier(p: PositionIn) -> float:
-    """_shared.PositionIn's convention: multiplier has no baked-in default so
-    a bare equity leg is never silently 100x'd; an option leg (right set)
-    defaults to the standard 100, anything else to 1.0 (a plain share)."""
-    if p.multiplier is not None:
-        return p.multiplier
-    return 100.0 if p.right is not None else 1.0
 
 
 def _book_exposures(positions: list[PositionIn], last_close: dict[str, float | None]) -> tuple[list[float], list[float]]:

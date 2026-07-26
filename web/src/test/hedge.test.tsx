@@ -100,6 +100,7 @@ const HEDGE_RESPONSE = {
     "cost/yr = carry drag (β_h · E[r_bench]; E[r_bench] = +7.00%/yr from cached daily bars over the window) + borrow proxy 0.30%/yr on short/inverse notional (a labeled PROXY, not a quoted borrow rate)",
   ci_note: "ΔES interval = 95% CI from a seeded paired block bootstrap (block=5, n=500) of daily returns",
   tail_note: "tail panel = mean DAILY book return on the worst-decile SPY days in the window, with vs without each hedge",
+  notes: [],
   candidates: [
     {
       symbol: "QQQ",
@@ -242,6 +243,25 @@ test("cost column renders carry+borrow as %/yr and the rank is protection-per-co
   // The methodology labels are on the page: proxy label + horizon labels.
   expect(screen.getByText(/labeled proxy/i)).toBeInTheDocument();
   expect(screen.getByText(/daily returns over the/i)).toBeInTheDocument();
+});
+
+test("delta-one option note from the backend is rendered, never silent", async () => {
+  server.use(
+    http.post("/api/hedge", () =>
+      HttpResponse.json({
+        ...HEDGE_RESPONSE,
+        notes: [
+          "Option legs are priced as delta-one underlier notional (qty x multiplier x spot) in this returns-based engine — a declared approximation; Greeks-aware option risk lives in the options layer (book-greeks).",
+        ],
+      })
+    )
+  );
+  renderHedge();
+  const [symbolInput] = screen.getAllByLabelText(/symbol/i);
+  fireEvent.change(symbolInput, { target: { value: "spy" } });
+  fireEvent.click(screen.getByRole("button", { name: /^run$/i }));
+  await screen.findByTestId("candidates-table");
+  expect(screen.getByText(/delta-one underlier notional/i)).toBeInTheDocument();
 });
 
 test("delta-ES bootstrap interval is displayed as an interval", async () => {

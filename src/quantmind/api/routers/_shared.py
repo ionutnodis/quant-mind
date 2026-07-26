@@ -132,6 +132,27 @@ class PositionIn(BaseModel):
         raise ValueError(f"expiry must be YYYYMMDD or YYYY-MM-DD, got {v!r}")
 
 
+# The declared delta-one approximation for option legs in the returns-based
+# engines (whatif/hedge/lab book-regression) — surfaced in each response's
+# `notes`, never silent (Batch-2 final review item 2).
+DELTA_ONE_OPTION_NOTE = (
+    "Option legs are priced as delta-one underlier notional (qty x multiplier x spot) "
+    "in this returns-based engine — a declared approximation; Greeks-aware option risk "
+    "lives in the options layer (book-greeks)."
+)
+
+
+def _effective_multiplier(p: "PositionIn") -> float:
+    """PositionIn's convention (module docstring): multiplier has no baked-in
+    default so a bare equity leg is never silently 100x'd; an option leg
+    (right set) defaults to the standard 100, anything else to 1.0 (a plain
+    share). Moved from whatif.py (Batch-2 final review item 2) so hedge/lab's
+    book pricing shares the exact same convention."""
+    if p.multiplier is not None:
+        return p.multiplier
+    return 100.0 if p.right is not None else 1.0
+
+
 def _validate_option_legs(positions: list["PositionIn"], origin: str) -> None:
     """Batch-2 final review item 1 (moved unchanged from whatif.py so the
     guard is shared): strike/expiry/right are ALL-or-NONE on every leg, on

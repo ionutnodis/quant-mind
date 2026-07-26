@@ -717,6 +717,67 @@ def test_hedge_horizon_labels_present(client):
     assert "/yr" in body["cost_note"] or "per year" in body["cost_note"].lower() or "annual" in body["cost_note"].lower()
 
 
+# --- Batch-2 final review, item 2: option-leg parity. A pinned/inline book
+# of option legs must price at qty x effective-multiplier x underlier close
+# (whatif's delta-one convention), never silently as bare shares (the 100x
+# understatement), and the approximation must be declared in `notes`. ---
+
+
+_OPT_BOOK = [{"symbol": "SPY", "qty": 5, "strike": 400.0, "expiry": "20260918", "right": "C"}]
+_STK_BOOK = [{"symbol": "SPY", "qty": 5}]
+
+
+def _run_book(client, book=None, book_ref=None):
+    body = {
+        "objective": {"kind": "beta_target", "value": 0.0},
+        "candidates": ["QQQ"],
+        "years": 1,
+    }
+    if book is not None:
+        body["book"] = book
+    if book_ref is not None:
+        body["book_ref"] = book_ref
+    r = client.post("/api/hedge", json=body)
+    assert r.status_code == 200
+    return r.json()
+
+
+def test_hedge_full_opt_book_prices_at_multiplier_scaled_notional_with_note(client):
+    # 5 SPY calls (multiplier 100) carry the underlier notional of 500 shares
+    # — pre-fix this returned book_value byte-identical to the 5-share book,
+    # silently, with no note.
+    body_opt = _run_book(client, book=_OPT_BOOK)
+    body_stk = _run_book(client, book=_STK_BOOK)
+    assert body_opt["book_value"] == pytest.approx(100.0 * body_stk["book_value"], rel=1e-9)
+    assert any("delta-one" in n for n in body_opt["notes"])
+    assert body_stk["notes"] == []
+
+
+def test_hedge_option_book_ref_matches_inline(client):
+    pinned = client.post("/api/book/pin", json={"positions": _OPT_BOOK}).json()
+    body_ref = _run_book(client, book_ref=pinned["snapshot_id"])
+    body_inline = _run_book(client, book=_OPT_BOOK)
+    assert body_ref == body_inline
+
+
+def test_hedge_inline_partial_option_descriptor_is_422(client):
+    # Same all-or-none guard as whatif's inline path: with multiplier-aware
+    # pricing keyed on `right`, a right-only leg would otherwise silently
+    # price at 100x.
+    r = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "SPY", "qty": 5, "right": "C"}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["QQQ"],
+            "years": 1,
+        },
+    )
+    assert r.status_code == 422
+    assert "SPY" in r.json()["detail"]
+    assert "together" in r.json()["detail"]
+
+
 # --- fix round 1 ---
 
 

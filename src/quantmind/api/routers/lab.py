@@ -41,7 +41,10 @@ from pydantic import BaseModel, Field, model_validator
 from quantmind.analytics.cointegration import engle_granger
 from quantmind.api.app import FitResponse
 from quantmind.api.routers._shared import (
+    DELTA_ONE_OPTION_NOTE,
     PositionIn,
+    _effective_multiplier,
+    _validate_option_legs,
     clean,
     downsample,
     iso,
@@ -214,6 +217,9 @@ class BookRegressionResponse(BaseModel):
     hac_lags: int
     book_gross: float | None
     as_of: str | None
+    # Declared approximations/caveats (whatif parity, Batch-2 final review
+    # item 2): e.g. the option delta-one proxy when the book carries OPT legs.
+    notes: list[str] = Field(default_factory=list)
 
 
 def _resolve_book(store, book: list[PositionIn] | None, book_ref: str | None) -> list[PositionIn]:
@@ -233,10 +239,15 @@ def book_regression(request: Request, req: BookRegressionRequest) -> BookRegress
     symbol_map = store.read_symbol_map()
 
     positions = _resolve_book(store, req.book, req.book_ref)
+    # All-or-none descriptor guard + delta-one share-equivalent netting
+    # (whatif's convention, Batch-2 final review item 2): an option leg
+    # contributes qty x effective multiplier — 10 SPY calls regress as 1000
+    # shares of underlier notional, never silently as 10 shares.
+    _validate_option_legs(positions, "book")
     symbols = list(dict.fromkeys(p.symbol for p in positions))
     qtys: dict[str, float] = {}
     for p in positions:
-        qtys[p.symbol] = qtys.get(p.symbol, 0.0) + p.qty
+        qtys[p.symbol] = qtys.get(p.symbol, 0.0) + p.qty * _effective_multiplier(p)
 
     unknown = sorted(s for s in symbols if s not in symbol_map)
     if unknown:
@@ -302,6 +313,11 @@ def book_regression(request: Request, req: BookRegressionRequest) -> BookRegress
         hac_lags=result.hac_lags,
         book_gross=clean(gross),
         as_of=iso(result.residuals.index[-1]) if len(result.residuals) else None,
+        notes=(
+            [DELTA_ONE_OPTION_NOTE]
+            if any(p.right is not None for p in positions)
+            else []
+        ),
     )
 
 

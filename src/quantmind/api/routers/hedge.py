@@ -94,7 +94,16 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
 from quantmind.analytics.correlation import rolling_correlation
-from quantmind.api.routers._shared import PositionIn, clean, iso, read_close_series, weighted_portfolio_returns
+from quantmind.api.routers._shared import (
+    DELTA_ONE_OPTION_NOTE,
+    PositionIn,
+    _effective_multiplier,
+    _validate_option_legs,
+    clean,
+    iso,
+    read_close_series,
+    weighted_portfolio_returns,
+)
 from quantmind.api.routers.book import read_book_positions
 from quantmind.datastore.options_store import OptionsStore
 from quantmind.hedge.bootstrap import delta_es_ci
@@ -235,6 +244,9 @@ class HedgeResponse(BaseModel):
     ci_note: str
     tail_note: str
     as_of: str | None
+    # Declared approximations/caveats (whatif parity, Batch-2 final review
+    # item 2): e.g. the option delta-one proxy when the book carries OPT legs.
+    notes: list[str] = Field(default_factory=list)
 
 
 def _portfolio_returns(
@@ -276,10 +288,20 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     if len(book_positions) > _MAX_BOOK_POSITIONS:
         raise HTTPException(422, detail=f"book has {len(book_positions)} positions; max {_MAX_BOOK_POSITIONS}")
 
+    # All-or-none descriptor guard (whatif parity, Batch-2 final review item
+    # 2): with multiplier-aware pricing keyed on `right`, a partial inline
+    # descriptor would otherwise silently misprice; book_ref-resolved legs
+    # were already validated at pin/read time.
+    _validate_option_legs(book_positions, "book")
+
     unique_book = list(dict.fromkeys(p.symbol for p in book_positions))
+    # Net per symbol in DELTA-ONE SHARE-EQUIVALENT qty (whatif's convention,
+    # Batch-2 final review item 2): an option leg contributes qty x effective
+    # multiplier, so 5 SPY calls price as 500 shares of underlier notional —
+    # never silently as 5 shares (the 100x understatement).
     qtys: dict[str, float] = {}
     for p in book_positions:
-        qtys[p.symbol] = qtys.get(p.symbol, 0.0) + p.qty
+        qtys[p.symbol] = qtys.get(p.symbol, 0.0) + p.qty * _effective_multiplier(p)
 
     unknown = sorted(s for s in unique_book if s not in symbol_map)
     if req.candidates is not None:
@@ -563,6 +585,11 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
             f"days in the window, with vs without each hedge"
         ),
         as_of=iso(book_prices.index[-1]) if len(book_prices) else None,
+        notes=(
+            [DELTA_ONE_OPTION_NOTE]
+            if any(p.right is not None for p in book_positions)
+            else []
+        ),
     )
 
 

@@ -327,6 +327,47 @@ def test_book_regression_nan_ci_serialized_as_null_not_500(client, monkeypatch):
     assert body["beta_usd_per_bp"] is not None  # the estimate itself survives
 
 
+# --- Batch-2 final review, item 2: option-leg parity in book-regression ---
+
+
+def test_book_regression_full_opt_book_scales_gross_by_multiplier_with_note(client):
+    # 10 SPY calls (multiplier 100) = the underlier notional of 1000 shares:
+    # gross and the estimated $/bp beta must both scale 100x vs the share
+    # book, and the delta-one approximation must be declared in `notes`.
+    r_stk = _book_regression(client)
+    r_opt = _book_regression(
+        client,
+        book=[{"symbol": "SPY", "qty": 10, "strike": 400.0, "expiry": "20260918", "right": "C"}],
+    )
+    assert r_stk.status_code == r_opt.status_code == 200
+    body_stk, body_opt = r_stk.json(), r_opt.json()
+    assert body_opt["book_gross"] == pytest.approx(100.0 * body_stk["book_gross"], rel=1e-9)
+    assert body_opt["beta_usd_per_bp"] == pytest.approx(
+        100.0 * body_stk["beta_usd_per_bp"], rel=1e-6
+    )
+    assert any("delta-one" in n for n in body_opt["notes"])
+    assert body_stk["notes"] == []
+
+
+def test_book_regression_option_book_ref_matches_inline(client):
+    opt_book = [{"symbol": "SPY", "qty": 10, "strike": 400.0, "expiry": "20260918", "right": "C"}]
+    pin = client.post("/api/book/pin", json={"positions": opt_book})
+    assert pin.status_code == 200
+    via_ref = _book_regression(client, book=None, book_ref=pin.json()["snapshot_id"])
+    inline = _book_regression(client, book=opt_book)
+    assert via_ref.status_code == inline.status_code == 200
+    assert via_ref.json()["beta_usd_per_bp"] == pytest.approx(
+        inline.json()["beta_usd_per_bp"], rel=1e-9
+    )
+    assert via_ref.json()["book_gross"] == pytest.approx(inline.json()["book_gross"], rel=1e-9)
+
+
+def test_book_regression_inline_partial_option_descriptor_is_422(client):
+    r = _book_regression(client, book=[{"symbol": "SPY", "qty": 10, "right": "C"}])
+    assert r.status_code == 422
+    assert "together" in r.json()["detail"]
+
+
 # --- EG→OU pair pipeline (wave-3B spec item 5) ---
 
 
