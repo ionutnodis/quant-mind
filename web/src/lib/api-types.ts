@@ -157,6 +157,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/lab/book-regression": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Book Regression */
+        post: operations["book_regression_api_lab_book_regression_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/lab/pair": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Pair Pipeline */
+        post: operations["pair_pipeline_api_lab_pair_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/macro": {
         parameters: {
             query?: never;
@@ -480,6 +514,31 @@ export interface components {
             /** Name */
             name: string;
         };
+        /**
+         * BaseRiskOut
+         * @description The CURRENT (pinned) book's risk, computed on the SAME aligned panel
+         *     and CRN seed as the hypothetical — the amber side of the comparison.
+         */
+        BaseRiskOut: {
+            /** Ann Vol */
+            ann_vol: number | null;
+            /** Beta */
+            beta: number | null;
+            /** Book Ref */
+            book_ref: string;
+            /** Es 975 */
+            es_975: number | null;
+            /** N Positions */
+            n_positions: number;
+            /** P5 */
+            p5: number | null;
+            /** P50 */
+            p50: number | null;
+            /** P95 */
+            p95: number | null;
+            /** Valuation Ts */
+            valuation_ts: string | null;
+        };
         /** BenchmarkOut */
         BenchmarkOut: {
             /** Ann Vol */
@@ -554,6 +613,65 @@ export interface components {
             /** Symbol */
             symbol: string;
         };
+        /** BookRegressionRequest */
+        BookRegressionRequest: {
+            /** Book */
+            book?: components["schemas"]["PositionIn"][] | null;
+            /** Book Ref */
+            book_ref?: string | null;
+            /**
+             * Factor Series
+             * @default US10Y
+             */
+            factor_series: string;
+            /**
+             * Years
+             * @default 5
+             */
+            years: number;
+        };
+        /** BookRegressionResponse */
+        BookRegressionResponse: {
+            /** Alpha Se */
+            alpha_se: number | null;
+            /** Alpha Usd */
+            alpha_usd: number | null;
+            /** As Of */
+            as_of: string | null;
+            /** Beta Ci */
+            beta_ci: [
+                number,
+                number
+            ] | null;
+            /** Beta Se */
+            beta_se: number | null;
+            /** Beta Usd Per Bp */
+            beta_usd_per_bp: number | null;
+            /** Book Gross */
+            book_gross: number | null;
+            /**
+             * Exposure Units
+             * @default usd_per_bp
+             * @constant
+             */
+            exposure_units: "usd_per_bp";
+            /** Factor Series */
+            factor_series: string;
+            /** Hac Lags */
+            hac_lags: number;
+            /**
+             * Horizon
+             * @default daily
+             * @constant
+             */
+            horizon: "daily";
+            /** N Obs */
+            n_obs: number;
+            /** Notes */
+            notes?: string[];
+            /** R Squared */
+            r_squared: number | null;
+        };
         /** BookSnapshotOut */
         BookSnapshotOut: {
             /** Base Currency */
@@ -622,6 +740,50 @@ export interface components {
             matrix: (number | null)[][];
             /** Symbols */
             symbols: string[];
+        };
+        /** CurveBlock */
+        CurveBlock: {
+            /** Note */
+            note: string;
+            /** Spread 2S10S M1 */
+            spread_2s10s_m1: number | null;
+            /** Spread 2S10S M3 */
+            spread_2s10s_m3: number | null;
+            /** Spread 2S10S Today */
+            spread_2s10s_today: number | null;
+            /** Tenors */
+            tenors: components["schemas"]["CurveTenor"][];
+        };
+        /** CurveTenor */
+        CurveTenor: {
+            /** M1 */
+            m1: number | null;
+            /** M3 */
+            m3: number | null;
+            /** Tenor */
+            tenor: string;
+            /** Today */
+            today: number | null;
+            /** Years */
+            years: number;
+        };
+        /**
+         * DeltaOut
+         * @description Hypothetical − current, CRN-paired (identical books ⇒ exactly 0.0).
+         */
+        DeltaOut: {
+            /** Ann Vol */
+            ann_vol: number | null;
+            /** Beta */
+            beta: number | null;
+            /** Es 975 */
+            es_975: number | null;
+            /** P5 */
+            p5: number | null;
+            /** P50 */
+            p50: number | null;
+            /** P95 */
+            p95: number | null;
         };
         /**
          * ExpiryBucketsOut
@@ -737,8 +899,18 @@ export interface components {
         HedgeCandidateOut: {
             /** Beta */
             beta: number | null;
+            /** Borrow Proxy Annual */
+            borrow_proxy_annual: number | null;
+            /** Carry Drag Annual */
+            carry_drag_annual: number | null;
             /** Corr Stability */
             corr_stability: number | null;
+            /** Cost Annual */
+            cost_annual: number | null;
+            /** Delta Es Ci High */
+            delta_es_ci_high: number | null;
+            /** Delta Es Ci Low */
+            delta_es_ci_low: number | null;
             /** Es After */
             es_after: number | null;
             /** Es Before */
@@ -747,12 +919,22 @@ export interface components {
             hedge_notional: number | null;
             /** Hedge Qty */
             hedge_qty: number | null;
+            /** N Obs */
+            n_obs: number | null;
             /** Protection */
             protection: number | null;
+            /** Protection Per Cost */
+            protection_per_cost: number | null;
             /** Residual Beta */
             residual_beta: number | null;
             /** Symbol */
             symbol: string;
+            /** Tail Mean Book */
+            tail_mean_book: number | null;
+            /** Tail Mean Hedged */
+            tail_mean_hedged: number | null;
+            /** Tail N Days */
+            tail_n_days: number | null;
             /** Unusable */
             unusable: boolean;
         };
@@ -775,6 +957,8 @@ export interface components {
         HedgeResponse: {
             /** As Of */
             as_of: string | null;
+            /** Bench Expected Return Annual */
+            bench_expected_return_annual: number | null;
             /** Benchmark */
             benchmark: string;
             /** Book Beta */
@@ -783,11 +967,29 @@ export interface components {
             book_value: number | null;
             /** Candidates */
             candidates: components["schemas"]["HedgeCandidateOut"][];
+            /** Ci Note */
+            ci_note: string;
+            /** Cost Note */
+            cost_note: string;
             /** Es Before */
             es_before: number | null;
+            /** Es Note */
+            es_note: string;
             /** N Candidates Evaluated */
             n_candidates_evaluated: number;
+            /** Notes */
+            notes?: string[];
             objective: components["schemas"]["Objective"];
+            /** Option Chain As Of */
+            option_chain_as_of: string | null;
+            /** Option Hedges */
+            option_hedges: components["schemas"]["OptionHedgeOut"][];
+            /** Option Note */
+            option_note: string | null;
+            /** Option Underlier */
+            option_underlier: string | null;
+            /** Tail Note */
+            tail_note: string;
         };
         /** Histogram */
         Histogram: {
@@ -882,18 +1084,25 @@ export interface components {
         MacroResponse: {
             /** As Of */
             as_of: string | null;
+            curve: components["schemas"]["CurveBlock"] | null;
             /** Factors */
             factors: components["schemas"]["RotationRow"][];
             /** Missing */
             missing: string[];
             net_liquidity: components["schemas"]["NetLiquidityBlock"] | null;
+            /** Note */
+            note?: string | null;
+            regime_rotation: components["schemas"]["RegimeRotationBlock"] | null;
             /** Sectors */
             sectors: components["schemas"]["RotationRow"][];
+            sensitivity: components["schemas"]["SensitivityBlock"] | null;
             yields: components["schemas"]["YieldsBlock"] | null;
         };
         /** MonteCarloOut */
         MonteCarloOut: {
             histogram: components["schemas"]["Histogram"];
+            /** Horizon Days */
+            horizon_days: number;
             /** N Nonfinite */
             n_nonfinite: number;
             /** P5 */
@@ -902,6 +1111,8 @@ export interface components {
             p50: number | null;
             /** P95 */
             p95: number | null;
+            /** Seed */
+            seed: number;
         };
         /** MonteCarloParams */
         MonteCarloParams: {
@@ -997,6 +1208,63 @@ export interface components {
             /** Value */
             value: number;
         };
+        /** OptionHedgeOut */
+        OptionHedgeOut: {
+            /** Contracts */
+            contracts: number | null;
+            /** Cost Annual */
+            cost_annual: number | null;
+            /** Delta Es Ci High */
+            delta_es_ci_high: number | null;
+            /** Delta Es Ci Low */
+            delta_es_ci_low: number | null;
+            /** Es After */
+            es_after: number | null;
+            /** Es Before */
+            es_before: number | null;
+            /** Expiry */
+            expiry: string;
+            /** Expiry Years */
+            expiry_years: number | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "protective_put" | "put_spread" | "collar";
+            /** Legs */
+            legs: components["schemas"]["OptionLegOut"][];
+            /** N Obs */
+            n_obs: number | null;
+            /** Net Premium Per Contract */
+            net_premium_per_contract: number | null;
+            /** Protection */
+            protection: number | null;
+            /** Protection Per Cost */
+            protection_per_cost: number | null;
+            /** Tail Mean Book */
+            tail_mean_book: number | null;
+            /** Tail Mean Hedged */
+            tail_mean_hedged: number | null;
+            /** Tail N Days */
+            tail_n_days: number | null;
+        };
+        /** OptionLegOut */
+        OptionLegOut: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "long" | "short";
+            /** Price */
+            price: number | null;
+            /**
+             * Right
+             * @enum {string}
+             */
+            right: "C" | "P";
+            /** Strike */
+            strike: number | null;
+        };
         /** OptionQuoteOut */
         OptionQuoteOut: {
             /** Ask */
@@ -1042,6 +1310,63 @@ export interface components {
             score: number | null;
             /** Symbol */
             symbol: string;
+        };
+        /** PairRequest */
+        PairRequest: {
+            /** X Symbol */
+            x_symbol: string;
+            /** Y Symbol */
+            y_symbol: string;
+            /**
+             * Years
+             * @default 5
+             */
+            years: number;
+        };
+        /** PairResponse */
+        PairResponse: {
+            /** As Of */
+            as_of: string | null;
+            /** Coint Pvalue */
+            coint_pvalue: number | null;
+            /** Current Z */
+            current_z: number | null;
+            /** Dates */
+            dates: string[];
+            fit: components["schemas"]["FitResponse"];
+            /** Half Life Ci */
+            half_life_ci: [
+                number,
+                number
+            ] | null;
+            /** Half Life Days */
+            half_life_days: number | null;
+            /** Hedge Ratio */
+            hedge_ratio: number | null;
+            /** Hedge Ratio Se */
+            hedge_ratio_se: number | null;
+            /**
+             * Horizon
+             * @default daily
+             * @constant
+             */
+            horizon: "daily";
+            /** Is Cointegrated */
+            is_cointegrated: boolean;
+            /** Mean Reversion Established */
+            mean_reversion_established: boolean;
+            /** Mu */
+            mu: number | null;
+            /** N Obs */
+            n_obs: number;
+            /** Spread */
+            spread: (number | null)[];
+            /** Stationary Sigma */
+            stationary_sigma: number | null;
+            /** X Symbol */
+            x_symbol: string;
+            /** Y Symbol */
+            y_symbol: string;
         };
         /** PnlHistogram */
         PnlHistogram: {
@@ -1118,6 +1443,39 @@ export interface components {
             factor_added: string;
             /** R Squared */
             r_squared: number | null;
+        };
+        /** RegimeBucketOut */
+        RegimeBucketOut: {
+            /** Bucket */
+            bucket: string;
+            /** Hi */
+            hi: number | null;
+            /** Lo */
+            lo: number | null;
+            /** N Days */
+            n_days: number;
+            /** Rows */
+            rows: components["schemas"]["RegimeSymbolStat"][];
+        };
+        /** RegimeRotationBlock */
+        RegimeRotationBlock: {
+            /** As Of */
+            as_of: string | null;
+            /** Buckets */
+            buckets: components["schemas"]["RegimeBucketOut"][];
+            /** Note */
+            note?: string | null;
+            /** Regime Note */
+            regime_note: string;
+        };
+        /** RegimeSymbolStat */
+        RegimeSymbolStat: {
+            /** Mean Daily */
+            mean_daily: number | null;
+            /** Se Daily */
+            se_daily: number | null;
+            /** Symbol */
+            symbol: string;
         };
         /** RegressionResponse */
         RegressionResponse: {
@@ -1262,6 +1620,46 @@ export interface components {
             /** Factor */
             factor: number | null;
         };
+        /** SensitivityBlock */
+        SensitivityBlock: {
+            /** As Of */
+            as_of: string | null;
+            /** Book Gross */
+            book_gross: number | null;
+            /** Book Ref */
+            book_ref: string;
+            /** Excluded */
+            excluded: string[];
+            /** Note */
+            note?: string | null;
+            /** Rows */
+            rows: components["schemas"]["SensitivityRow"][];
+            /** Window Note */
+            window_note: string;
+        };
+        /** SensitivityRow */
+        SensitivityRow: {
+            /** Beta */
+            beta: number | null;
+            /** Ci High */
+            ci_high: number | null;
+            /** Ci Low */
+            ci_low: number | null;
+            /** Dollar Response */
+            dollar_response: number | null;
+            /** Driver */
+            driver: string;
+            /** Group */
+            group: string;
+            /** N Obs */
+            n_obs: number | null;
+            /** Note */
+            note?: string | null;
+            /** Se */
+            se: number | null;
+            /** Shock Label */
+            shock_label: string;
+        };
         /** SeriesPoint */
         SeriesPoint: {
             /** Date */
@@ -1355,6 +1753,41 @@ export interface components {
             /** Job Id */
             job_id: string;
         };
+        /**
+         * TicketLineOut
+         * @description One line of the current→hypothetical trade ticket: the qty change on
+         *     a single leg, keyed on (symbol, strike, expiry, right, multiplier).
+         */
+        TicketLineOut: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "BUY" | "SELL";
+            /** Expiry */
+            expiry: string | null;
+            /** Multiplier */
+            multiplier: number;
+            /** Price */
+            price: number | null;
+            /** Qty Delta */
+            qty_delta: number;
+            /** Qty From */
+            qty_from: number;
+            /** Qty To */
+            qty_to: number;
+            /** Right */
+            right: ("C" | "P") | null;
+            /**
+             * Sec Type
+             * @enum {string}
+             */
+            sec_type: "STK" | "OPT";
+            /** Strike */
+            strike: number | null;
+            /** Symbol */
+            symbol: string;
+        };
         /** Tile */
         Tile: {
             /** Change 1D */
@@ -1430,12 +1863,29 @@ export interface components {
         };
         /** WeightOut */
         WeightOut: {
+            /** Expiry */
+            expiry?: string | null;
             /** Market Value */
             market_value: number | null;
+            /**
+             * Multiplier
+             * @default 1
+             */
+            multiplier: number;
             /** Price */
             price: number | null;
             /** Qty */
             qty: number;
+            /** Right */
+            right?: ("C" | "P") | null;
+            /**
+             * Sec Type
+             * @default STK
+             * @enum {string}
+             */
+            sec_type: "STK" | "OPT";
+            /** Strike */
+            strike?: number | null;
             /** Symbol */
             symbol: string;
             /** Weight */
@@ -1443,6 +1893,8 @@ export interface components {
         };
         /** WhatIfRequest */
         WhatIfRequest: {
+            /** Base Book Ref */
+            base_book_ref?: string | null;
             /** Book Ref */
             book_ref?: string | null;
             mc?: components["schemas"]["MonteCarloParams"];
@@ -1460,14 +1912,20 @@ export interface components {
             ann_vol: number | null;
             /** As Of */
             as_of: string | null;
+            base?: components["schemas"]["BaseRiskOut"] | null;
             benchmark: components["schemas"]["BenchmarkOut"];
             /** Beta */
             beta: number | null;
+            delta?: components["schemas"]["DeltaOut"] | null;
             /** Es 975 */
             es_975: number | null;
             mc: components["schemas"]["MonteCarloOut"];
             /** N Obs */
             n_obs: number;
+            /** Notes */
+            notes?: string[];
+            /** Trade Ticket */
+            trade_ticket?: components["schemas"]["TicketLineOut"][] | null;
             /** Weights */
             weights: components["schemas"]["WeightOut"][];
         };
@@ -1749,9 +2207,78 @@ export interface operations {
             };
         };
     };
-    macro_api_macro_get: {
+    book_regression_api_lab_book_regression_post: {
         parameters: {
             query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BookRegressionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BookRegressionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pair_pipeline_api_lab_pair_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PairRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PairResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    macro_api_macro_get: {
+        parameters: {
+            query?: {
+                /** @description pinned book snapshot id — enables the book-sensitivity column */
+                book_ref?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -1765,6 +2292,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MacroResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
