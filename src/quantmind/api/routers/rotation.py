@@ -121,8 +121,11 @@ def cluster_order(corr: pd.DataFrame) -> list[str]:
     # on an empty series (never-500, batch-1 final review F1).
     start = avg_corr.idxmax() if not avg_corr.empty else symbols[0]
     order = [start]
-    remaining = set(symbols)
-    remaining.remove(start)
+    # A list (column order), not a set: max() returns the FIRST maximal
+    # element, so tied scores (e.g. the all-NaN -2.0 case) break toward
+    # column order instead of hash-seed-dependent set iteration order —
+    # the docstring's determinism promise depends on this.
+    remaining = [s for s in symbols if s != start]
     while remaining:
         last = order[-1]
         best = max(remaining, key=lambda s: score(last, s))
