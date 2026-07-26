@@ -298,6 +298,35 @@ def test_book_regression_unknown_book_ref_is_422(client):
     assert r.status_code == 422
 
 
+def test_book_regression_nan_ci_serialized_as_null_not_500(client, monkeypatch):
+    # Fix round 1 (bundled minor): a degenerate HAC fit can put NaN inside
+    # beta_ci/beta_se — those must serialize as null (repo NaN→null policy),
+    # never crash JSON encoding. Unit-level exercise of the response-building
+    # path: wrap the real regression and poison its uncertainty fields.
+    import dataclasses
+
+    import quantmind.api.routers.lab as lab_router
+
+    real = lab_router.factor_regression
+
+    def poisoned(y, factors, **kwargs):
+        result = real(y, factors, **kwargs)
+        name = next(iter(factors))
+        return dataclasses.replace(
+            result,
+            beta_ci={name: (float("nan"), float("nan"))},
+            beta_se={name: float("nan")},
+        )
+
+    monkeypatch.setattr(lab_router, "factor_regression", poisoned)
+    r = _book_regression(client)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["beta_ci"] is None
+    assert body["beta_se"] is None
+    assert body["beta_usd_per_bp"] is not None  # the estimate itself survives
+
+
 # --- EG→OU pair pipeline (wave-3B spec item 5) ---
 
 

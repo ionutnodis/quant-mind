@@ -80,9 +80,16 @@ class OrnsteinUhlenbeck:
         )
 
         adf_pvalue = float(adfuller(x, autolag="AIC")[1])
+        gate = rw_gate(x)
         diagnostics: dict[str, float] = {
             "adf_pvalue": adf_pvalue,
-            "aic": float(ols.aic),
+            # ONE AIC convention across the exported trio (fix round 1): the
+            # grid renders AIC, AIC (RW) and ΔAIC (RW−OU) side by side, so
+            # they must close exactly (aic_rw − aic == delta_aic). The gate's
+            # aic_ou (k counts σ, models/diagnostics.py) deliberately replaces
+            # statsmodels' ols.aic here — ols.aic omits σ from k and would
+            # make the rendered difference contradict ΔAIC by exactly 2.
+            "aic": gate.aic_ou,
             "log_likelihood": float(ols.llf),
             "r_squared": float(ols.rsquared),
         }
@@ -96,7 +103,6 @@ class OrnsteinUhlenbeck:
         x_last = float(x[-1])
         put("x_last", x_last)
 
-        gate = rw_gate(x)
         put("aic_rw", gate.aic_rw)
         put("delta_aic", gate.delta_aic)
         put("lr_stat", gate.lr_stat)

@@ -159,6 +159,16 @@ def test_fit_reports_half_life_and_displacement_diagnostics():
     assert d["x_last"] == pytest.approx(float(series.iloc[-1]))
 
 
+def test_fit_aic_diagnostics_close_exactly():
+    # Fix round 1: the diagnostics grid renders AIC, AIC (RW) and ΔAIC
+    # (RW−OU) side by side, so the exported trio must close EXACTLY under
+    # ONE convention (k counts σ): aic_rw − aic == delta_aic. Mixing
+    # statsmodels' ols.aic (σ not counted) with the gate's hand AICs made
+    # the rendered difference contradict the displayed ΔAIC by exactly 2.
+    d = OrnsteinUhlenbeck().fit(_synthetic_ou()).diagnostics
+    assert d["aic_rw"] - d["aic"] == pytest.approx(d["delta_aic"])
+
+
 def test_fit_random_walk_gate_composes_aic_and_adf():
     fit = OrnsteinUhlenbeck().fit(_synthetic_ou())
     assert fit.diagnostics["mean_reversion"] == 1.0

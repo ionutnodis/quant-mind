@@ -283,11 +283,18 @@ def book_regression(request: Request, req: BookRegressionRequest) -> BookRegress
     except InsufficientDataError as e:
         raise HTTPException(422, detail=str(e))
 
+    # NaN→null policy applies INSIDE the CI tuple too (fix round 1): a
+    # degenerate HAC fit can emit NaN bounds, and a NaN inside a
+    # tuple[float, float] is invalid JSON. A CI with any non-finite bound is
+    # no CI — serialize the whole tuple as null.
+    ci_lo, ci_hi = (clean(v) for v in result.beta_ci[factor_name])
+    beta_ci = (ci_lo, ci_hi) if ci_lo is not None and ci_hi is not None else None
+
     return BookRegressionResponse(
         factor_series=req.factor_series,
         beta_usd_per_bp=clean(result.betas[factor_name]),
         beta_se=clean(result.beta_se[factor_name]),
-        beta_ci=result.beta_ci[factor_name],
+        beta_ci=beta_ci,
         alpha_usd=clean(result.alpha),
         alpha_se=clean(result.alpha_se),
         r_squared=clean(result.r_squared),
