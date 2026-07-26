@@ -161,6 +161,11 @@ function runPair(body: { y_symbol: string; x_symbol: string; years: number }) {
   });
 }
 
+// The cached FRED yield series (decimal levels) — the only fit sources whose
+// Δ×1e4 is genuinely basis points, so the only ones Apply accepts (user
+// decision 2026-07-26; the fit endpoint itself accepts any symbol).
+const RATE_SERIES = new Set(["US10Y", "US2Y", "US3M"]);
+
 // Mirrors quantmind.exposure.bridge._CONVERSIONS — the only exposure units
 // each factor kind's units can be dimensionally converted into.
 const UNIT_OPTIONS: Record<string, string[]> = {
@@ -262,6 +267,11 @@ export function Lab() {
   // final review item 5): "uses ?book_ref= if pinned" alone left the user
   // guessing WHICH book the regression would hit.
   const [pinnedBookRef] = useState<string | null>(() => readActiveBookRef());
+  // User decision 2026-07-26: Apply assumes a rate-level factor (Δbp shocks),
+  // so it gates on WHAT was fit — an OU fit on SPY closes would feed the
+  // bridge Δprice×1e4 "bp" nonsense. Tracked at fit time, not from the
+  // symbol input (which can change after the fit).
+  const [fittedSymbol, setFittedSymbol] = useState<string | null>(null);
 
   const schema = useMemo(() => {
     if (!models.data || models.data.length === 0) return undefined;
@@ -271,7 +281,15 @@ export function Lab() {
   const allowedUnits = schema ? (UNIT_OPTIONS[schema.factor.units] ?? []) : [];
   const activeUnits = allowedUnits.includes(exposureUnits) ? exposureUnits : allowedUnits[0];
 
-  const fit = useMutation({ mutationFn: () => fitModel(activeName, symbol, years) });
+  const fit = useMutation({
+    mutationFn: () => {
+      const source = symbol;
+      return fitModel(activeName, source, years).then((r) => {
+        setFittedSymbol(source);
+        return r;
+      });
+    },
+  });
   const simulate = useMutation({
     mutationFn: () => {
       if (!fit.data) throw new Error("fit a model first");
@@ -303,8 +321,10 @@ export function Lab() {
   });
 
   const bookBeta = bookReg.data?.beta_usd_per_bp ?? null;
+  const isRateFit = fittedSymbol !== null && RATE_SERIES.has(fittedSymbol);
   const canFeedApply =
     fit.data !== undefined &&
+    isRateFit &&
     bookBeta !== null &&
     (schema ? (UNIT_OPTIONS[schema.factor.units] ?? []).includes("usd_per_bp") : false);
 
@@ -556,11 +576,19 @@ export function Lab() {
           <button
             type="button"
             className="w-full border border-you/60 bg-you/10 hover:bg-you/20 text-you text-[12px] py-1.5 disabled:opacity-40 disabled:text-muted disabled:border-hairline disabled:bg-transparent"
-            disabled={!fit.data || !activeUnits || apply.isPending}
+            disabled={!fit.data || !activeUnits || apply.isPending || !isRateFit}
             onClick={() => apply.mutate(undefined)}
           >
             {apply.isPending ? "Applying…" : "Apply"}
           </button>
+
+          {fit.data && !isRateFit && (
+            <p data-testid="apply-rate-gate" className="text-muted text-[11px]">
+              Apply assumes a rate-level model (shocks in Δbp) — this fit is on {fittedSymbol},
+              not a rate series (US10Y · US2Y · US3M). Fit on a rate series to apply it to the
+              book.
+            </p>
+          )}
 
           {apply.isError && (
             <p className="text-down text-[11px]">{String(apply.error.message ?? apply.error)}</p>

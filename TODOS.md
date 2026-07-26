@@ -54,7 +54,7 @@
 - **BookBuilder option-leg inputs** — strike/expiry/right rows in the shared builder (Batch 2 What-If spec).
 - **Cosmetics** — dead `rng` fixture and aligned-sample comment cleanups flagged in review.
 - **Drift-artifact commit-ordering process note (F9)** — regenerate `openapi.json` + `web/src/lib/api-types.ts` in the SAME commit as the schema change, per-commit not per-batch, so no intermediate commit fails the drift gate.
-- **Radix vs plain-div popovers** — InstrumentHover/Sheet are plain positioned divs today; adopting Radix primitives (DESIGN.md component base) is pending user decision.
+- **Radix vs plain-div popovers** — DECIDED 2026-07-26: lazy adoption (see DESIGN.md Decisions Log); migrate InstrumentHover/Sheet when a wave next touches them.
 - **NewsTicker relevance-filter tuning** — keyword/symbol filter precision beyond the new "showing latest broadtape" fallback.
 
 ## Pre-wave-3 consolidation pass (final-review mandated, 2026-07-25)
@@ -71,6 +71,6 @@
 - **Seed-convention unification + Lab seed exposure** — Lab simulate/apply don't expose the seed actually used, so Lab sims are currently non-reproducible from the UI.
 - **Negative-ppc rank edge policy** — a candidate with negative protection-per-cost currently sorts among the costed ones; decide whether it should sink below the un-costed tail.
 - **Pins cross-tab last-write-wins** — pinned-scenario localStorage writes from two tabs silently clobber each other.
-- **Amber action buttons + hover:text-you scenario load + tail-column emphasis** — PENDING USER DECISION (amber-law adjudication).
-- **Radix vs plain-div** — PENDING USER DECISION (carried from Batch-1).
-- **Lab one-click Apply rate-series gating** — PENDING USER DECISION.
+- ~~Amber action buttons~~ — DECIDED 2026-07-26 (DESIGN.md Decisions Log): the one book-result button per page is sanctioned amber; decorative `hover:text-you` on scenario load repainted neutral. Open remainder: tail without-hedge column emphasis (with-hedge amber, without-hedge plain — both book P&L; unify or keep the asymmetry).
+- ~~Radix vs plain-div~~ — DECIDED 2026-07-26 (DESIGN.md Decisions Log): lazy adoption — migrate a component to Radix whenever a wave touches it; no big-bang.
+- ~~Lab one-click Apply rate-series gating~~ — DECIDED 2026-07-26 and implemented: Apply (and Use in Apply) gate on the fitted source being US10Y/US2Y/US3M with an honest note.

@@ -862,7 +862,7 @@ export function WhatIf() {
             <div key={name} className="flex items-center gap-1 border border-hairline px-2 py-1">
               <button
                 type="button"
-                className="text-[12px] text-ink hover:text-you"
+                className="text-[12px] text-ink hover:underline"
                 onClick={() => loadScenario(name)}
               >
                 {name}

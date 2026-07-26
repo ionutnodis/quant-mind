@@ -194,7 +194,9 @@ test("apply to book renders the amber P&L results panel", async () => {
     http.post("/api/lab/apply", () => HttpResponse.json(APPLY_RESPONSE))
   );
   renderLab();
-  fireEvent.click(await screen.findByRole("button", { name: /^fit$/i }));
+  // Apply is rate-gated (user decision 2026-07-26) — fit on a rate series
+  fireEvent.change(await screen.findByLabelText(/symbol/i), { target: { value: "US10Y" } });
+  fireEvent.click(screen.getByRole("button", { name: /^fit$/i }));
   await screen.findByText(/θ/);
 
   const valueInput = screen.getByLabelText(/exposure value/i);
@@ -219,7 +221,8 @@ test("apply is honest when some paths were dropped as non-finite", async () => {
     )
   );
   renderLab();
-  fireEvent.click(await screen.findByRole("button", { name: /^fit$/i }));
+  fireEvent.change(await screen.findByLabelText(/symbol/i), { target: { value: "US10Y" } });
+  fireEvent.click(screen.getByRole("button", { name: /^fit$/i }));
   await screen.findByText(/θ/);
   fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
   expect(await screen.findByText(/12 paths produced non-finite/i)).toBeInTheDocument();
@@ -292,7 +295,8 @@ test("one-click Use in Apply feeds the regression beta into apply-to-book", asyn
     })
   );
   renderLab();
-  fireEvent.click(await screen.findByRole("button", { name: /^fit$/i }));
+  fireEvent.change(await screen.findByLabelText(/symbol/i), { target: { value: "US10Y" } });
+  fireEvent.click(screen.getByRole("button", { name: /^fit$/i }));
   await screen.findByText(/θ/);
   fireEvent.click(screen.getByRole("button", { name: /regress/i }));
   await screen.findByTestId("book-regression-results");
@@ -301,6 +305,31 @@ test("one-click Use in Apply feeds the regression beta into apply-to-book", asyn
   await screen.findByTestId("apply-results");
   expect(captured.applyBody?.exposure?.units).toBe("usd_per_bp");
   expect(captured.applyBody?.exposure?.value).toBe(-612.4);
+});
+
+test("Apply is rate-gated: an equity fit disables Apply with an honest note", async () => {
+  // User decision 2026-07-26 (batch-2 final review carry): Apply assumes a
+  // rate-level factor (Δbp shocks); a fit on SPY closes would feed the
+  // bridge a dimensionally wrong number, so Apply gates on the fit source.
+  server.use(
+    http.get("/api/models", () => HttpResponse.json([MODEL_SCHEMA])),
+    http.post("/api/models/ou/fit", () => HttpResponse.json(FIT_RESPONSE))
+  );
+  renderLab();
+  // default symbol is SPY — an equity price series, not a rate level
+  fireEvent.click(await screen.findByRole("button", { name: /^fit$/i }));
+  await screen.findByText(/θ/);
+  expect(screen.getByRole("button", { name: /^apply$/i })).toBeDisabled();
+  const note = screen.getByTestId("apply-rate-gate");
+  expect(note.textContent).toMatch(/SPY/);
+  expect(note.textContent).toMatch(/US10Y/);
+  // refitting on a rate series unlocks Apply
+  fireEvent.change(screen.getByLabelText(/symbol/i), { target: { value: "US10Y" } });
+  fireEvent.click(screen.getByRole("button", { name: /^fit$/i }));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: /^apply$/i })).toBeEnabled()
+  );
+  expect(screen.queryByTestId("apply-rate-gate")).not.toBeInTheDocument();
 });
 
 test("pair pipeline renders the EG→OU readout with the z-bands chart", async () => {
@@ -358,7 +387,8 @@ test("unsupported exposure mapping surfaces the backend's refusing message, not 
     )
   );
   renderLab();
-  fireEvent.click(await screen.findByRole("button", { name: /^fit$/i }));
+  fireEvent.change(await screen.findByLabelText(/symbol/i), { target: { value: "US10Y" } });
+  fireEvent.click(screen.getByRole("button", { name: /^fit$/i }));
   await screen.findByText(/θ/);
   fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
   expect(await screen.findByText(/refusing/i)).toBeInTheDocument();
