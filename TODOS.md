@@ -74,3 +74,6 @@
 - ~~Amber action buttons~~ — DECIDED 2026-07-26 (DESIGN.md Decisions Log): the one book-result button per page is sanctioned amber; decorative `hover:text-you` on scenario load repainted neutral. Open remainder: tail without-hedge column emphasis (with-hedge amber, without-hedge plain — both book P&L; unify or keep the asymmetry).
 - ~~Radix vs plain-div~~ — DECIDED 2026-07-26 (DESIGN.md Decisions Log): lazy adoption — migrate a component to Radix whenever a wave touches it; no big-bang.
 - ~~Lab one-click Apply rate-series gating~~ — DECIDED 2026-07-26 and implemented: Apply (and Use in Apply) gate on the fitted source being US10Y/US2Y/US3M with an honest note.
+
+## Reliability (incident 2026-07-27)
+- **Gateway session auto-recovery** — a long-running API server whose IB session dies (daily Gateway restart/relogin) keeps failing with "Gateway connection error" until the server is manually restarted, even after a fresh Gateway is up. ConnectionManager should detect a dead session on request and reconnect (fresh IB() if needed) instead of assuming the startup connection lives forever. Distinct failure mode from the stale-code incidents QM_RELOAD fixed.
