@@ -15,8 +15,9 @@ class FakeIB:
     def isConnected(self):
         return self._connected
 
-    async def connectAsync(self, host, port, clientId):
+    async def connectAsync(self, host, port, clientId, readonly=False):
         self.connect_calls.append((host, port, clientId))
+        self.readonly_flags = getattr(self, "readonly_flags", []) + [readonly]
         if len(self.connect_calls) <= self.fail_times:
             raise ConnectionRefusedError("gateway not ready")
         self._connected = True
@@ -74,6 +75,19 @@ async def test_reconnects_after_drop():
     await mgr.ensure_connected()  # health probe before scheduled job
     assert ib.isConnected()
     assert len(ib.connect_calls) == 2
+
+
+async def test_connects_readonly_never_requesting_order_access():
+    # Live-account incident 2026-07-27: ib_async's default connect handshake
+    # syncs order state (open/completed orders), which the Gateway classifies
+    # as requiring full API access — with "Read-Only API" checked it pops a
+    # "remove read-only?" dialog at the user on every connect. v1 is
+    # read-only by design (Engineering Constraint: place_order disabled), so
+    # every connect must pass readonly=True and skip the order sync entirely.
+    ib, sleeper = FakeIB(), FakeSleeper()
+    mgr = ConnectionManager(ib, host="127.0.0.1", port=4001, client_id=17, sleep=sleeper)
+    await mgr.ensure_connected()
+    assert ib.readonly_flags == [True]
 
 
 def test_place_order_is_disabled_in_v1():

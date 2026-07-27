@@ -48,7 +48,14 @@ class ConnectionManager:
         last_error: Exception | None = None
         for attempt in range(self._max_attempts):
             try:
-                await self._ib.connectAsync(self._host, self._port, clientId=self._client_id)
+                # readonly=True: skip ib_async's connect-time ORDER-state sync
+                # (open/completed orders) — the Gateway classifies those as
+                # full-access requests and, with "Read-Only API" checked,
+                # prompts the user to remove read-only on every connect
+                # (2026-07-27 live-account incident). v1 never reads orders.
+                await self._ib.connectAsync(
+                    self._host, self._port, clientId=self._client_id, readonly=True
+                )
                 return
             except (ConnectionError, OSError, asyncio.TimeoutError) as exc:
                 last_error = exc
