@@ -112,6 +112,52 @@ async def sync_index_bars(
     return symbol_map
 
 
+async def sync_book_bars(
+    store: BarStore,
+    broker,
+    positions,
+    years: int = 5,
+    sleep=asyncio.sleep,
+    pace_seconds: float = 0.5,
+) -> dict[str, int]:
+    """Sync adjusted daily bars for a live book's STOCK positions BY THEIR
+    OWN conId — never by symbol resolution (2026-07-27 live-account
+    incident: `resolve_stock_con_id("SEMI")` returned the US listing while
+    the held position is the LSE-listed UCITS ETF with the same ticker; the
+    conId on the position IS the instrument's identity, the ticker is just
+    a colliding label). Option legs are skipped — chain ingestion owns
+    those, and their underliers must be synced by their own listing.
+
+    Read-modify-writes the symbol map like every other sync pass, and
+    REPOINTS a symbol already mapped to a different conId: the instrument
+    the user actually holds wins the ticker."""
+    persisted_map = store.read_symbol_map()
+    synced: dict[str, int] = {}
+    for p in positions:
+        if p.sec_type != "STK":
+            continue
+        watermark = store.watermark(con_id=p.con_id, bar_size="1d")
+        fetch_years = years if watermark is None else 1
+        new = await broker.get_daily_bars(p.con_id, years=fetch_years)
+
+        if watermark is not None:
+            existing, _ = store.read_bars(con_id=p.con_id, bar_size="1d")
+            new = merge_bars(existing, new)
+
+        store.write_bars(
+            con_id=p.con_id,
+            bar_size="1d",
+            bars=new,
+            meta=BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today())),
+        )
+        persisted_map[p.symbol] = p.con_id
+        synced[p.symbol] = p.con_id
+        await sleep(pace_seconds)
+
+    store.write_symbol_map(persisted_map)
+    return synced
+
+
 async def sync_instrument_metadata(
     store: BarStore,
     broker,

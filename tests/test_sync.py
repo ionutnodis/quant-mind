@@ -206,6 +206,74 @@ def test_yfinance_pseudo_con_id_is_negative_deterministic_and_distinct():
     assert a != c
 
 
+class FakeConIdBroker:
+    """Fake for sync_book_bars: serves daily bars keyed by conId directly —
+    no symbol resolution involved."""
+
+    def __init__(self):
+        self.bar_calls = []  # (con_id, years)
+
+    async def get_daily_bars(self, con_id, years=5):
+        self.bar_calls.append((con_id, years))
+        return _bars("2026-01-05", 250, price0=30.0)
+
+
+def _pos(con_id, symbol, qty, sec_type="STK", **kw):
+    from quantmind.portfolio import Position
+
+    return Position(con_id=con_id, symbol=symbol, qty=qty, sec_type=sec_type, **kw)
+
+
+async def test_sync_book_bars_fetches_by_position_con_id_not_symbol_resolution(tmp_path):
+    # Live-account incident 2026-07-27: symbol-based resolution grabbed the
+    # US listing for an LSE-listed UCITS ticker (SEMI). A book position
+    # carries its own conId — THAT is the instrument's identity; book sync
+    # must fetch by it and never resolve the symbol.
+    store, broker, sleeper = BarStore(tmp_path), FakeConIdBroker(), FakeSleeper()
+    from quantmind.sources.sync import sync_book_bars
+
+    synced = await sync_book_bars(
+        store, broker,
+        [_pos(676368104, "SEMI", 224.0), _pos(10672, "O", 60.0)],
+        years=5, sleep=sleeper, pace_seconds=0.5,
+    )
+    assert synced == {"SEMI": 676368104, "O": 10672}
+    assert [c for c, _ in broker.bar_calls] == [676368104, 10672]
+    bars, meta = store.read_bars(con_id=676368104, bar_size="1d")
+    assert len(bars) == 250
+    assert meta.bar_type == "ADJUSTED_LAST"
+    assert sleeper.delays == [0.5, 0.5]
+
+
+async def test_sync_book_bars_repoints_symbol_map_to_the_position_con_id(tmp_path):
+    # A prior symbol-based sync may have mapped the ticker to the WRONG
+    # listing (e.g. US SEMI). The user's held instrument wins the symbol.
+    store, broker, sleeper = BarStore(tmp_path), FakeConIdBroker(), FakeSleeper()
+    store.write_symbol_map({"SEMI": 553616137, "SPY": 756733})
+    from quantmind.sources.sync import sync_book_bars
+
+    await sync_book_bars(store, broker, [_pos(676368104, "SEMI", 224.0)], sleep=sleeper)
+    persisted = store.read_symbol_map()
+    assert persisted["SEMI"] == 676368104  # repointed to the held listing
+    assert persisted["SPY"] == 756733  # untouched
+
+
+async def test_sync_book_bars_skips_option_legs_and_is_incremental(tmp_path):
+    store, broker, sleeper = BarStore(tmp_path), FakeConIdBroker(), FakeSleeper()
+    from quantmind.sources.sync import sync_book_bars
+
+    legs = [
+        _pos(879671249, "DRAM", 1.0, sec_type="OPT", multiplier=100.0,
+             strike=60.0, expiry="20261218", right="C"),
+        _pos(10672, "O", 60.0),
+    ]
+    await sync_book_bars(store, broker, legs, sleep=sleeper)
+    assert [c for c, _ in broker.bar_calls] == [10672]  # OPT leg skipped
+    broker.bar_calls.clear()
+    await sync_book_bars(store, broker, legs, sleep=sleeper)
+    assert broker.bar_calls[0] == (10672, 1)  # watermark exists -> incremental
+
+
 class FakeYFinanceProvider:
     name = "yfinance"
 

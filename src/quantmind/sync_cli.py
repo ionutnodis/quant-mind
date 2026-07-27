@@ -18,6 +18,7 @@ from quantmind.config import Settings
 from quantmind.datastore.store import BarStore
 from quantmind.sources.providers.yfinance_provider import YFinanceProvider
 from quantmind.sources.sync import (
+    sync_book_bars,
     sync_daily_bars,
     sync_index_bars,
     sync_instrument_metadata,
@@ -56,6 +57,22 @@ DEFAULT_UNIVERSE = [
 INDEX_UNIVERSE = {"VIX": "CBOE", "SPX": "CBOE"}
 
 
+async def sync_book(store: BarStore, broker: IbBroker) -> None:
+    """`--book` mode: sync the LIVE account's stock positions by their own
+    conId (2026-07-27 incident: ticker-based resolution grabs the wrong
+    listing for non-US instruments — e.g. LSE-listed UCITS ETFs sharing a
+    US ticker). The held instrument wins the symbol-map entry."""
+    portfolio = await broker.get_portfolio()
+    synced = await sync_book_bars(store, broker, portfolio.positions, years=5, pace_seconds=2.0)
+    for symbol, con_id in synced.items():
+        wm = store.watermark(con_id=con_id, bar_size="1d")
+        print(f"{symbol:>6} conId={con_id:<12} bars through {wm.date()} (book)")
+    skipped = sorted({p.symbol for p in portfolio.positions if p.sec_type != "STK"})
+    if skipped:
+        print(f"option legs skipped (chain ingestion owns those): {skipped}")
+    await sync_instrument_metadata(store, broker, synced, pace_seconds=1.0)
+
+
 async def main(symbols: list[str]) -> None:
     settings = Settings()
     store = BarStore(settings.data_dir)
@@ -65,6 +82,12 @@ async def main(symbols: list[str]) -> None:
     )
     await mgr.ensure_connected()
     broker = IbBroker(ib)
+
+    if symbols == ["--book"]:
+        await sync_book(store, broker)
+        ib.disconnect()
+        return
+
     symbol_map = await sync_daily_bars(store, broker, symbols, years=5, pace_seconds=2.0)
     for symbol, con_id in symbol_map.items():
         wm = store.watermark(con_id=con_id, bar_size="1d")

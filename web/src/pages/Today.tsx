@@ -120,12 +120,98 @@ function regimeLine(tiles: { symbol: string; change_1d: number }[]): string {
   return `${tape} — ${lead.symbol} leads, ${dir} ${(Math.abs(lead.change_1d) * 100).toFixed(2)}%.`;
 }
 
-const VITALS = [
-  { label: "Est. open P&L", unit: "" },
-  { label: "Beta (60d)", unit: "" },
-  { label: "Expected shortfall", unit: "97.5%" },
-  { label: "Vega", unit: "/vol pt" },
-];
+// Book vitals (2026-07-27: wired to the live portfolio — the panel was a
+// static placeholder until the real account connected and proved it).
+// Page-scoped types per the ownership rule; only the fields the vitals read.
+interface VitalsResponse {
+  valuation_ts: string | null;
+  totals: { market_value: number | null; n_positions: number; unrealized_pnl: number | null } | null;
+  attribution: { available: boolean; beta: number | null; window_days: number | null } | null;
+  options_sleeve: { available: boolean; reason: string | null } | null;
+}
+function getPortfolioVitals(): Promise<VitalsResponse> {
+  return request<VitalsResponse>("/api/portfolio");
+}
+
+function money(x: number): string {
+  const sign = x >= 0 ? "+" : "−";
+  return `${sign}$${Math.abs(x).toFixed(2)}`;
+}
+
+function BookVitals() {
+  const book = useQuery({
+    queryKey: ["portfolio-vitals"],
+    queryFn: getPortfolioVitals,
+    staleTime: 60_000,
+  });
+  const totals = book.data?.totals ?? null;
+  const attr = book.data?.attribution ?? null;
+  const sleeve = book.data?.options_sleeve ?? null;
+  const hasBook = (totals?.n_positions ?? 0) > 0;
+  const pnl = hasBook ? totals?.unrealized_pnl ?? null : null;
+  const beta = hasBook && attr?.available ? attr.beta : null;
+  const asOf = book.data?.valuation_ts?.slice(0, 10);
+
+  return (
+    <Panel title="Your book" note={hasBook ? `live · as of ${asOf}` : "awaiting book"}>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+        <div>
+          <div className="text-[10px] tracking-wider uppercase text-muted">Est. open P&L</div>
+          <div
+            data-testid="vital-pnl"
+            className={`num text-lg ${pnl !== null ? "text-you" : "text-muted"}`}
+          >
+            {pnl !== null ? money(pnl) : "—"}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] tracking-wider uppercase text-muted">
+            Beta ({beta !== null && attr?.window_days != null ? attr.window_days : 60}d)
+          </div>
+          <div
+            data-testid="vital-beta"
+            className={`num text-lg ${beta !== null ? "text-you" : "text-muted"}`}
+          >
+            {beta !== null ? beta.toFixed(2) : "—"}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] tracking-wider uppercase text-muted">Expected shortfall</div>
+          <div className="num text-lg text-muted">
+            —<span className="text-[10px] ml-1">97.5%</span>
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] tracking-wider uppercase text-muted">Vega</div>
+          <div className="num text-lg text-muted" title={sleeve?.reason ?? undefined}>
+            —<span className="text-[10px] ml-1">/vol pt</span>
+          </div>
+        </div>
+      </div>
+      <p className="text-[11px] text-muted mt-2 border-t border-hairline pt-2">
+        {hasBook ? (
+          <>
+            {totals!.n_positions} positions
+            {totals!.market_value != null && (
+              <>
+                {" · $"}
+                {totals!.market_value.toLocaleString("en-US", { maximumFractionDigits: 0 })}
+                {" market value"}
+              </>
+            )}
+            {" — ES & vega compute in Hedge / What-If"}
+            {sleeve && !sleeve.available && sleeve.reason ? <>; {sleeve.reason}</> : null}.
+          </>
+        ) : (
+          <>
+            No positions yet — vitals light up in <span className="text-you">amber</span> when the
+            book connects.
+          </>
+        )}
+      </p>
+    </Panel>
+  );
+}
 
 export function Today() {
   const { data, isLoading, error } = useQuery({
@@ -188,22 +274,7 @@ export function Today() {
             <NewsTicker />
           </div>
         </Panel>
-        <Panel title="Your book" note="paper account">
-          <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-            {VITALS.map((v) => (
-              <div key={v.label}>
-                <div className="text-[10px] tracking-wider uppercase text-muted">{v.label}</div>
-                <div className="num text-lg text-muted">
-                  —<span className="text-[10px] ml-1">{v.unit}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-          <p className="text-[11px] text-muted mt-2 border-t border-hairline pt-2">
-            No positions yet — vitals light up in <span className="text-you">amber</span> when the
-            book connects.
-          </p>
-        </Panel>
+        <BookVitals />
       </div>
 
       {/* Zone A2 — glance charts: major indices, VIX, oil, gold, 2s10s */}

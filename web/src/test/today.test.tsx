@@ -9,7 +9,19 @@ import { setupServer } from "msw/node";
 import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
 import { Today } from "../pages/Today";
 
-const server = setupServer();
+// Default: an empty book — individual tests override with PORTFOLIO_LIVE.
+// Registered at setup (not per-test) because resetHandlers() restores these
+// and every Today render now fetches /api/portfolio for the vitals panel.
+const EMPTY_PORTFOLIO = {
+  valuation_ts: "2026-07-27T11:00:00Z",
+  totals: { market_value: 0, n_positions: 0, unrealized_pnl: null },
+  attribution: { available: false, beta: null, window_days: null },
+  options_sleeve: { available: false, reason: null },
+};
+
+const server = setupServer(
+  http.get("/api/portfolio", () => HttpResponse.json(EMPTY_PORTFOLIO))
+);
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
@@ -88,6 +100,45 @@ test("renders tiles with direction glyphs and ES from the API", async () => {
   expect(screen.getByTestId("news-ticker-stub")).toBeInTheDocument();
   expect(screen.getByTestId("glance-charts-stub")).toBeInTheDocument();
   expect(screen.getByTestId("rotation-heatmap-stub")).toBeInTheDocument();
+});
+
+test("book vitals light up amber from the live portfolio", async () => {
+  // 2026-07-27: the real account connected but the panel still said "No
+  // positions yet" — the vitals were a static placeholder, never wired.
+  server.use(
+    http.get("/api/brief", () => HttpResponse.json(BRIEF)),
+    http.get("/api/models", () => HttpResponse.json(MODELS)),
+    http.get("/api/portfolio", () =>
+      HttpResponse.json({
+        valuation_ts: "2026-07-27T11:24:06Z",
+        totals: { market_value: 48721.48, n_positions: 9, unrealized_pnl: 195.2938 },
+        attribution: { available: true, beta: 0.4820764, window_days: 90 },
+        options_sleeve: { available: false, reason: "chain not ingested — run options_sync" },
+      })
+    )
+  );
+  renderToday();
+  const pnl = await screen.findByTestId("vital-pnl");
+  expect(pnl).toHaveTextContent("+$195.29");
+  expect(pnl).toHaveClass("text-you"); // book quantity — amber law
+  const beta = screen.getByTestId("vital-beta");
+  expect(beta).toHaveTextContent("0.48");
+  expect(beta).toHaveClass("text-you");
+  // beta labeled with the window it was actually computed over (90d), never
+  // a hardcoded convention
+  expect(screen.getByText(/Beta \(90d\)/)).toBeInTheDocument();
+  expect(screen.getByText(/9 positions/)).toBeInTheDocument();
+  expect(screen.queryByText(/No positions yet/)).not.toBeInTheDocument();
+});
+
+test("book vitals keep the honest empty state when no positions exist", async () => {
+  server.use(
+    http.get("/api/brief", () => HttpResponse.json(BRIEF)),
+    http.get("/api/models", () => HttpResponse.json(MODELS))
+  );
+  renderToday();
+  expect(await screen.findByText(/No positions yet/)).toBeInTheDocument();
+  expect(screen.getByTestId("vital-pnl")).toHaveTextContent("—");
 });
 
 test("staleness flag shows when data is old", async () => {
