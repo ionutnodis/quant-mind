@@ -1392,6 +1392,8 @@ export interface components {
             /** Snapshot Id */
             snapshot_id: string;
             totals: components["schemas"]["Totals"];
+            /** Totals Note */
+            totals_note: string | null;
             /** Valuation Ts */
             valuation_ts: string;
         };

@@ -89,8 +89,14 @@ class IbBroker(ReadOnlyBroker):
         requests the FULL fixed tag set and returns `None`, populating
         `ib.accountSummary()` as a side effect (its own documented shape) — a
         tag absent from the response, or present with an unparseable value,
-        maps to an honest `None` rather than a fabricated 0.0."""
-        await self._ib.reqAccountSummaryAsync()
+        maps to an honest `None` rather than a fabricated 0.0.
+
+        Subscribe-once (2026-07-27 live-account incident, Error 322): IBKR
+        caps concurrent account-summary subscriptions per session and the
+        subscription live-updates on its own — so request only when no
+        values exist yet (fresh session or post-reconnect), read thereafter."""
+        if not self._ib.accountSummary():
+            await self._ib.reqAccountSummaryAsync()
         values = self._ib.accountSummary()
         out: dict[str, float | None] = {key: None for key in self._ACCOUNT_SUMMARY_TAGS.values()}
         for v in values:

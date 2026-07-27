@@ -78,6 +78,7 @@ const TWO_POSITIONS = {
     },
   ],
   totals: { market_value: 3500.0, n_positions: 2, unrealized_pnl: 100.0 },
+  totals_note: null,
   account: {
     net_liquidation: 125000.5,
     total_cash_value: 20000.0,
@@ -107,6 +108,7 @@ const EMPTY = {
   base_currency: "USD",
   positions: [],
   totals: { market_value: null, n_positions: 0, unrealized_pnl: null },
+  totals_note: null,
   account: null,
   account_note: "NO MATERIAL LINK — no broker connected",
   exposure: [],
@@ -140,6 +142,24 @@ test("renders positions table with cost basis, unrealized P&L, and totals from t
   expect(table.getByText("3500.00")).toBeInTheDocument();
   // snapshot/valuation-ts note (Panel-level, outside the table)
   expect(screen.getByText(/abc123def456/)).toBeInTheDocument();
+});
+
+test("mixed-currency totals note renders as a warning on the positions panel", async () => {
+  // 2026-07-27 live-account incident: GBP + USD positions summed unconverted
+  // — the API's disclosure must reach the user, not just the wire.
+  server.use(
+    http.get("/api/portfolio", () =>
+      HttpResponse.json({
+        ...TWO_POSITIONS,
+        totals_note:
+          "positions span currencies (GBP, USD) — totals sum unconverted native amounts; FX-aware valuation is on the roadmap",
+      })
+    )
+  );
+  renderPortfolio();
+  const note = await screen.findByTestId("totals-note");
+  expect(note).toHaveTextContent(/GBP, USD/);
+  expect(note).toHaveTextContent(/unconverted/);
 });
 
 test("null price fields render as em-dash placeholders, not crashes", async () => {

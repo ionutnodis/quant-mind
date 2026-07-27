@@ -195,6 +195,11 @@ class PortfolioResponse(BaseModel):
     base_currency: str
     positions: list[PositionOut]
     totals: Totals
+    # Honest-disclosure note on totals (2026-07-27 live-account incident):
+    # a multi-currency book (LSE UCITS in GBP + US names in USD) sums
+    # UNCONVERTED native amounts until FX-aware valuation lands — that must
+    # be said on the wire, never silently rendered as one dollar figure.
+    totals_note: str | None
     account: AccountOut | None
     # DESIGN.md convention: "NO MATERIAL LINK is stated honestly when
     # portfolio linkage is immaterial" — explains a null `account` (no
@@ -580,6 +585,26 @@ async def get_portfolio(
         unrealized_pnl=(sum(unrealized_values) if unrealized_values else None),
     )
 
+    # Mixed-currency disclosure (2026-07-27): bar closes are stored in each
+    # instrument's native quote currency (metadata `currency` from contract
+    # details), so a book spanning currencies sums apples and oranges in
+    # `market_value`/`unrealized_pnl`. Disclose until FX-aware valuation
+    # lands (TODOS). Symbols without cached metadata can't vouch either way
+    # and are ignored here — absence of proof is not proof of one currency.
+    currencies = sorted(
+        {
+            cur
+            for p in portfolio.positions
+            if (md := store.read_instrument_metadata(p.symbol)) and (cur := md.get("currency"))
+        }
+    )
+    totals_note = (
+        f"positions span currencies ({', '.join(currencies)}) — totals sum "
+        "unconverted native amounts; FX-aware valuation is on the roadmap"
+        if len(currencies) > 1
+        else None
+    )
+
     if broker_failed:
         account, account_note = None, _BROKER_FAILED_NOTE
     else:
@@ -708,6 +733,7 @@ async def get_portfolio(
         base_currency="USD",
         positions=positions_out,
         totals=totals,
+        totals_note=totals_note,
         account=account,
         account_note=account_note,
         exposure=exposure_out,

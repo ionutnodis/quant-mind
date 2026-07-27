@@ -126,6 +126,7 @@ function regimeLine(tiles: { symbol: string; change_1d: number }[]): string {
 interface VitalsResponse {
   valuation_ts: string | null;
   totals: { market_value: number | null; n_positions: number; unrealized_pnl: number | null } | null;
+  totals_note: string | null;
   attribution: { available: boolean; beta: number | null; window_days: number | null } | null;
   options_sleeve: { available: boolean; reason: string | null } | null;
 }
@@ -201,6 +202,9 @@ function BookVitals() {
             )}
             {" — ES & vega compute in Hedge / What-If"}
             {sleeve && !sleeve.available && sleeve.reason ? <>; {sleeve.reason}</> : null}.
+            {book.data?.totals_note ? (
+              <span className="text-warning"> {book.data.totals_note}.</span>
+            ) : null}
           </>
         ) : (
           <>

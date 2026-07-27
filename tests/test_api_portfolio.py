@@ -101,6 +101,43 @@ def _expiry_str(days_out: int) -> str:
     return (date.today() + timedelta(days=days_out)).strftime("%Y%m%d")
 
 
+def test_totals_disclose_mixed_position_currencies(store):
+    # Live-account incident 2026-07-27: a GBP-based book holding LSE UCITS
+    # (GBP bars) alongside US names (USD bars) — totals silently summed
+    # unconverted native amounts. Until FX-aware valuation lands, mixed
+    # currencies MUST be disclosed on the response, never silent.
+    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
+    store.write_instrument_metadata("QQQ", {"con_id": 3, "currency": "GBP"})
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=1, symbol="SPY", qty=10),
+            Position(con_id=3, symbol="QQQ", qty=5),
+        ),
+        as_of="2026-07-27",
+    )
+    r = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+    assert r.status_code == 200
+    note = r.json()["totals_note"]
+    assert note is not None
+    assert "GBP" in note and "USD" in note
+    assert "unconverted" in note
+
+
+def test_totals_note_is_null_for_a_single_currency_book(store):
+    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
+    store.write_instrument_metadata("QQQ", {"con_id": 3, "currency": "USD"})
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=1, symbol="SPY", qty=10),
+            Position(con_id=3, symbol="QQQ", qty=5),
+        ),
+        as_of="2026-07-27",
+    )
+    r = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+    assert r.status_code == 200
+    assert r.json()["totals_note"] is None
+
+
 def test_portfolio_no_broker_is_structured_empty(store):
     client = _client(store, broker=None)
     r = client.get("/api/portfolio")

@@ -77,3 +77,9 @@
 
 ## Reliability (incident 2026-07-27)
 - **Gateway session auto-recovery** — a long-running API server whose IB session dies (daily Gateway restart/relogin) keeps failing with "Gateway connection error" until the server is manually restarted, even after a fresh Gateway is up. ConnectionManager should detect a dead session on request and reconnect (fresh IB() if needed) instead of assuming the startup connection lives forever. Distinct failure mode from the stale-code incidents QM_RELOAD fixed.
+
+## FX-aware valuation (live-account finding, 2026-07-27)
+- **What:** Convert per-position market values into the account base currency (GBP for this account) before totals/weights/attribution: per-instrument quote currency already cached in metadata; needs an FX-rate source (IBKR IDEALPRO midpoints cached like bars) and a labeled valuation currency on every dollar figure.
+- **Why:** The real book mixes GBP-quoted LSE UCITS with USD-quoted US names; totals currently sum unconverted native amounts (disclosed via `totals_note` since 2026-07-27, but disclosure is a stopgap, not valuation).
+- **Also:** `base_currency` is hardcoded "USD" in snapshots/responses; the account reports GBP. Fold into the same pass.
+- **Depends on:** FX bars source decision (IBKR forex bars are free); single-provenance law applies.

@@ -15,6 +15,7 @@ import { Today } from "../pages/Today";
 const EMPTY_PORTFOLIO = {
   valuation_ts: "2026-07-27T11:00:00Z",
   totals: { market_value: 0, n_positions: 0, unrealized_pnl: null },
+  totals_note: null,
   attribution: { available: false, beta: null, window_days: null },
   options_sleeve: { available: false, reason: null },
 };
@@ -112,6 +113,7 @@ test("book vitals light up amber from the live portfolio", async () => {
       HttpResponse.json({
         valuation_ts: "2026-07-27T11:24:06Z",
         totals: { market_value: 48721.48, n_positions: 9, unrealized_pnl: 195.2938 },
+        totals_note: "positions span currencies (GBP, USD) — totals sum unconverted native amounts; FX-aware valuation is on the roadmap",
         attribution: { available: true, beta: 0.4820764, window_days: 90 },
         options_sleeve: { available: false, reason: "chain not ingested — run options_sync" },
       })
@@ -129,6 +131,8 @@ test("book vitals light up amber from the live portfolio", async () => {
   expect(screen.getByText(/Beta \(90d\)/)).toBeInTheDocument();
   expect(screen.getByText(/9 positions/)).toBeInTheDocument();
   expect(screen.queryByText(/No positions yet/)).not.toBeInTheDocument();
+  // mixed-currency disclosure reaches the vitals footer too
+  expect(screen.getByText(/unconverted native amounts/)).toBeInTheDocument();
 });
 
 test("book vitals keep the honest empty state when no positions exist", async () => {

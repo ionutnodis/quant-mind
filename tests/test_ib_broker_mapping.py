@@ -136,7 +136,9 @@ class FakeIB:
         return None
 
     def accountSummary(self, account=""):
-        return self._account_values
+        # Realistic: values exist only once a subscription is active — the
+        # live Gateway serves nothing before reqAccountSummary.
+        return self._account_values if self.reqAccountSummary_calls > 0 else []
 
 
 def _vix_contract_details(con_id=13455763):
@@ -249,6 +251,20 @@ async def test_get_account_summary_maps_wanted_tags_to_floats():
         "buying_power": 60000.00,
     }
     assert ib.reqAccountSummary_calls == 1
+
+
+async def test_get_account_summary_reuses_one_subscription():
+    # Live-account incident 2026-07-27 (Error 322): every /api/portfolio call
+    # opened a NEW account-summary subscription; IBKR caps them per session,
+    # so after the first few requests every summary failed. The subscription
+    # live-updates on its own — subscribe once, read thereafter.
+    ib = FakeIB(account_values=[_account_value("NetLiquidation", "50098.72", currency="GBP")])
+    broker = IbBroker(ib)
+    first = await broker.get_account_summary()
+    second = await broker.get_account_summary()
+    assert first["net_liquidation"] == 50098.72
+    assert second["net_liquidation"] == 50098.72
+    assert ib.reqAccountSummary_calls == 1  # NOT one per call
 
 
 async def test_get_account_summary_missing_tags_are_honest_none():

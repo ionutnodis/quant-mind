@@ -104,6 +104,7 @@ interface PortfolioResponse {
   base_currency: string;
   positions: Position[];
   totals: Totals;
+  totals_note: string | null;
   account: Account | null;
   account_note: string | null;
   exposure: UnderlyingExposure[];
@@ -237,6 +238,11 @@ export function Portfolio() {
               </tr>
             </tfoot>
           </table>
+          {data.totals_note && (
+            <p data-testid="totals-note" className="text-warning text-[11px] mt-2 border-t border-hairline pt-2">
+              {data.totals_note}
+            </p>
+          )}
         </Panel>
       )}
 

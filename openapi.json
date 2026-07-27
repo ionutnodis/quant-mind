@@ -3640,6 +3640,17 @@
           "totals": {
             "$ref": "#/components/schemas/Totals"
           },
+          "totals_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Totals Note"
+          },
           "valuation_ts": {
             "title": "Valuation Ts",
             "type": "string"
@@ -3651,6 +3662,7 @@
           "base_currency",
           "positions",
           "totals",
+          "totals_note",
           "account",
           "account_note",
           "exposure",
