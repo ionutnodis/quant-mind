@@ -34,6 +34,11 @@ interface RiskResponse {
   alpha_note: string;
   es_975: number | null;
   ann_vol: number | null;
+  mean_arith_annual: number | null;
+  cagr: number | null;
+  drag_exact: number | null;
+  drag_approx: number | null;
+  drag_note: string;
   as_of: string | null;
 }
 
@@ -105,6 +110,9 @@ interface RegressionResponse {
   alpha_annualized: number | null;
   alpha_se: number | null;
   alpha_ci: [number | null, number | null];
+  alpha_tstat: number | null;
+  information_ratio: number | null;
+  alpha_note: string;
   betas: BetaEstimate[];
   r_squared: number | null;
   r_squared_progression: R2Step[];
@@ -153,12 +161,12 @@ function postMontecarlo(body: {
   });
 }
 
-function pct(x: number | null): string {
-  return x === null ? "—" : `${(x * 100).toFixed(2)}%`;
+function pct(x: number | null | undefined): string {
+  return x == null ? "—" : `${(x * 100).toFixed(2)}%`;
 }
 
-function num(x: number | null, digits = 2): string {
-  return x === null ? "—" : x.toFixed(digits);
+function num(x: number | null | undefined, digits = 2): string {
+  return x == null ? "—" : x.toFixed(digits);
 }
 
 function ciText(lo: number | null, hi: number | null, fmt: (x: number | null) => string): string {
@@ -446,6 +454,21 @@ export function Risk() {
                   {num(regression.data.alpha_se, 5)}
                 </div>
               </div>
+              <div className="col-span-2">
+                <div className="text-[10px] tracking-wider uppercase text-muted">
+                  Skill vs luck — t-stat / information ratio
+                </div>
+                <div className="num text-lg">
+                  {num(regression.data.alpha_tstat, 2)} / {num(regression.data.information_ratio, 2)}
+                </div>
+                <div className="num text-muted text-[10px]">
+                  {regression.data.alpha_note}
+                  {" · "}
+                  {regression.data.alpha_tstat != null && Math.abs(regression.data.alpha_tstat) >= 2
+                    ? "alpha is statistically distinguishable from luck (|t|≥2)"
+                    : "alpha not distinguishable from luck (|t|<2)"}
+                </div>
+              </div>
               <div className="col-span-2 text-muted text-[10px]">{regression.data.horizon_note}</div>
             </div>
           ) : (
@@ -603,6 +626,21 @@ export function Risk() {
             <div>
               <div className="text-[10px] tracking-wider uppercase text-muted">Ann. vol (252d)</div>
               <div className="num text-lg">{risk60.data ? pct(risk60.data.ann_vol) : "—"}</div>
+            </div>
+            <div>
+              <div className="text-[10px] tracking-wider uppercase text-muted">Arith. mean / CAGR</div>
+              <div className="num text-lg">
+                {risk60.data ? pct(risk60.data.mean_arith_annual) : "—"} / {risk60.data ? pct(risk60.data.cagr) : "—"}
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] tracking-wider uppercase text-muted">Vol drag (exact / ½σ²)</div>
+              <div className="num text-lg">
+                {risk60.data ? pct(risk60.data.drag_exact) : "—"} / {risk60.data ? pct(risk60.data.drag_approx) : "—"}
+              </div>
+              <div className="num text-muted text-[10px]">
+                {risk60.data?.drag_note ?? "drag = mean − CAGR, the tax volatility takes from compounding"}
+              </div>
             </div>
           </div>
         </Panel>

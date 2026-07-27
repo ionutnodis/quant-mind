@@ -80,3 +80,29 @@ def test_annualized_vol_requires_two_observations():
     r = pd.Series([0.01], index=pd.bdate_range("2026-01-05", periods=1))
     with pytest.raises(InsufficientDataError):
         annualized_vol(r)
+
+
+def test_volatility_drag_golden_values():
+    from quantmind.risk.returns import volatility_drag
+
+    # returns [0.10,-0.05,0.10,-0.05], periods_per_year=4 (small ppy keeps the
+    # geometric annualization hand-computable).
+    r = pd.Series([0.10, -0.05, 0.10, -0.05])
+    d = volatility_drag(r, periods_per_year=4)
+    # mean = 0.025; *4 = 0.10
+    assert d.mean_arith_annual == pytest.approx(0.10)
+    # prod(1+r) = 1.045^2 = 1.092025; ^(4/4) - 1 = 0.092025
+    assert d.cagr == pytest.approx(0.092025)
+    # drag_exact = 0.10 - 0.092025
+    assert d.drag_exact == pytest.approx(0.007975)
+    # var_daily(ddof=1)=0.0075; annualized var=0.03; sigma=sqrt(0.03)
+    assert d.sigma_annual == pytest.approx(0.03 ** 0.5)
+    # drag_approx = 0.5 * sigma^2 = 0.5 * 0.03 = 0.015
+    assert d.drag_approx == pytest.approx(0.015)
+
+
+def test_volatility_drag_requires_two_observations():
+    from quantmind.risk.returns import volatility_drag
+
+    with pytest.raises(InsufficientDataError):
+        volatility_drag(pd.Series([0.01]))

@@ -157,6 +157,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/leverage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Leverage
+         * @description Resilience construction: the book's historical max drawdown, the
+         *     drawdown-budget leverage headroom (assumption-bound scenario leverage, NOT a
+         *     safe-leverage guarantee — H4), and the diversification ratio (how orthogonal
+         *     the legs are). Thin composition over quantmind.hedge.core.
+         */
+        post: operations["leverage_api_leverage_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/macro": {
         parameters: {
             query?: never;
@@ -355,6 +378,27 @@ export interface paths {
         put?: never;
         /** Rotation */
         post: operations["rotation_api_rotation_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rotation/crisis": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotation Crisis
+         * @description Normal vs crisis (benchmark worst-day) correlation over a universe —
+         *     the "diversification decays in a crisis" lens. Store-only, deep history.
+         */
+        post: operations["rotation_crisis_api_rotation_crisis_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -623,6 +667,61 @@ export interface components {
             /** Symbols */
             symbols: string[];
         };
+        /** CrisisRequest */
+        CrisisRequest: {
+            /**
+             * Min Tail
+             * @default 20
+             */
+            min_tail: number;
+            /** Symbols */
+            symbols?: string[] | null;
+            /**
+             * Tail
+             * @default 0.1
+             */
+            tail: number;
+            /**
+             * Universe
+             * @enum {string}
+             */
+            universe: "sectors" | "factors" | "world" | "custom";
+            /**
+             * Years
+             * @default 5
+             */
+            years: number;
+        };
+        /** CrisisResponse */
+        CrisisResponse: {
+            /** As Of */
+            as_of: string | null;
+            /** Benchmark */
+            benchmark: string;
+            /** Caveat */
+            caveat: string;
+            /** Crisis Matrix */
+            crisis_matrix: (number | null)[][];
+            /** Crisis Mean Corr */
+            crisis_mean_corr: number | null;
+            /** Crisis Mean Corr Ci */
+            crisis_mean_corr_ci: [
+                number | null,
+                number | null
+            ];
+            /** Missing */
+            missing: string[];
+            /** Normal Matrix */
+            normal_matrix: (number | null)[][];
+            /** Normal Mean Corr */
+            normal_mean_corr: number | null;
+            /** Symbols */
+            symbols: string[];
+            /** Tail N */
+            tail_n: number;
+            /** Universe */
+            universe: string;
+        };
         /**
          * ExpiryBucketsOut
          * @description Requirement 5: option legs bucketed by days-to-expiry. Only legs that
@@ -876,6 +975,46 @@ export interface components {
             /** P95 */
             p95: number | null;
         };
+        /** LeverageRequest */
+        LeverageRequest: {
+            /** Book */
+            book?: components["schemas"]["PositionIn"][] | null;
+            /** Book Ref */
+            book_ref?: string | null;
+            /**
+             * Drawdown Budget
+             * @default 0.25
+             */
+            drawdown_budget: number;
+            /**
+             * Years
+             * @default 5
+             */
+            years: number;
+        };
+        /** LeverageResponse */
+        LeverageResponse: {
+            /** As Of */
+            as_of: string | null;
+            /** Book Value */
+            book_value: number | null;
+            /** Diversification Ratio */
+            diversification_ratio: number | null;
+            /** Drawdown Budget */
+            drawdown_budget: number;
+            /** Gross */
+            gross: number | null;
+            /** Leverage Headroom */
+            leverage_headroom: number | null;
+            /** Max Drawdown */
+            max_drawdown: number | null;
+            /** N Obs */
+            n_obs: number;
+            /** Note */
+            note: string;
+            /** Symbols */
+            symbols: string[];
+        };
         /** MacroResponse */
         MacroResponse: {
             /** As Of */
@@ -1128,8 +1267,12 @@ export interface components {
             ];
             /** Alpha Daily */
             alpha_daily: number | null;
+            /** Alpha Note */
+            alpha_note: string;
             /** Alpha Se */
             alpha_se: number | null;
+            /** Alpha Tstat */
+            alpha_tstat: number | null;
             /** As Of */
             as_of: string | null;
             /** Attribution */
@@ -1143,6 +1286,8 @@ export interface components {
             hac_lags: number;
             /** Horizon Note */
             horizon_note: string;
+            /** Information Ratio */
+            information_ratio: number | null;
             /** N Obs */
             n_obs: number;
             /** R Squared */
@@ -1183,8 +1328,18 @@ export interface components {
             benchmark: string;
             /** Beta Series */
             beta_series: components["schemas"]["BetaPoint"][];
+            /** Cagr */
+            cagr: number | null;
+            /** Drag Approx */
+            drag_approx: number | null;
+            /** Drag Exact */
+            drag_exact: number | null;
+            /** Drag Note */
+            drag_note: string;
             /** Es 975 */
             es_975: number | null;
+            /** Mean Arith Annual */
+            mean_arith_annual: number | null;
             /** N Obs */
             n_obs: number;
             /** Symbol */
@@ -1747,6 +1902,39 @@ export interface operations {
             };
         };
     };
+    leverage_api_leverage_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LeverageRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LeverageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     macro_api_macro_get: {
         parameters: {
             query?: never;
@@ -2096,6 +2284,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RotationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rotation_crisis_api_rotation_crisis_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CrisisRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CrisisResponse"];
                 };
             };
             /** @description Validation Error */

@@ -7,12 +7,32 @@ Insufficient data is an explicit error, never a silent NaN.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import pandas as pd
 
 
 class InsufficientDataError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class VolatilityDrag:
+    """Volatility-drag decomposition of a return series.
+
+    `drag_exact` is the honest gap between the arithmetic mean return and the
+    geometric CAGR (the compounding "tax" volatility takes). `drag_approx` is
+    the classic leading-order approximation ½σ² — reported alongside so the two
+    can be compared (they converge for low-vol series and diverge for large
+    swings). All figures are annualized by `periods_per_year`.
+    """
+
+    n_obs: int
+    mean_arith_annual: float
+    sigma_annual: float
+    cagr: float
+    drag_exact: float
+    drag_approx: float
 
 
 def simple_returns(prices: pd.Series) -> pd.Series:
@@ -78,6 +98,33 @@ def historical_es(returns: pd.Series, confidence: float = 0.975) -> float:
     _require(n_tail >= 1, f"{len(returns)} observations give an empty tail at confidence {confidence}")
     tail = returns.sort_values().iloc[:n_tail]
     return float(-tail.mean())
+
+
+def volatility_drag(returns: pd.Series, periods_per_year: int = 252) -> VolatilityDrag:
+    """Decompose a return series into arithmetic mean, geometric CAGR, and the
+    volatility drag between them.
+
+    `drag_exact = mean_arith_annual - cagr` is computed directly from the two
+    (no approximation); `drag_approx = ½ * sigma_annual**2` is the leading-order
+    term. Works on a single instrument's returns or a portfolio's return series
+    (per gross dollar, equity sleeve — see design H2/H3). Insufficient data is
+    an explicit error, never a silent NaN.
+    """
+    _require(len(returns) >= 2, f"{len(returns)} observations cannot estimate volatility drag")
+    n = len(returns)
+    mean_arith_annual = float(returns.mean() * periods_per_year)
+    sigma_annual = annualized_vol(returns, periods_per_year)
+    cagr = float((1.0 + returns).prod() ** (periods_per_year / n) - 1.0)
+    drag_exact = mean_arith_annual - cagr
+    drag_approx = 0.5 * sigma_annual**2
+    return VolatilityDrag(
+        n_obs=n,
+        mean_arith_annual=mean_arith_annual,
+        sigma_annual=sigma_annual,
+        cagr=cagr,
+        drag_exact=drag_exact,
+        drag_approx=drag_approx,
+    )
 
 
 def _require(condition: bool, message: str) -> None:

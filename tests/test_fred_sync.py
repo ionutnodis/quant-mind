@@ -17,6 +17,7 @@ def fake_fetcher(series_id: str) -> pd.Series:
         "WALCL": _pct([6.6e6, 6.61e6]),    # $mn
         "WTREGEN": _pct([8.0e5, 8.1e5]),   # $mn
         "RRPONTSYD": _pct([100.0, 98.0]),  # $bn
+        "VIXCLS": _pct([18.5, 20.0]),      # index level (no scaling)
     }
     return data[series_id]
 
@@ -24,9 +25,17 @@ def fake_fetcher(series_id: str) -> pd.Series:
 def test_sync_fred_normalizes_rates_to_decimal_and_stores_net_liquidity(tmp_path):
     store = BarStore(tmp_path)
     written = sync_fred(store, fetcher=fake_fetcher)
-    assert set(written) == {"US10Y", "US2Y", "US3M", "NET_LIQUIDITY"}
+    assert set(written) == {"US10Y", "US2Y", "US3M", "VIX", "NET_LIQUIDITY"}
     us10y = store.read_series("US10Y")
     assert abs(us10y.iloc[-1] - 0.0420) < 1e-9  # 4.20% -> decimal
     nl = store.read_series("NET_LIQUIDITY")
     # 6.61e6mn*1e-3 - 8.1e5mn*1e-3 - 98bn = 6610 - 810 - 98 = 5702 ($bn)
     assert abs(nl.iloc[-1] - 5702.0) < 1e-6
+
+
+def test_sync_fred_stores_vix_as_raw_index_level(tmp_path):
+    store = BarStore(tmp_path)
+    sync_fred(store, fetcher=fake_fetcher)
+    vix = store.read_series("VIX")
+    # VIX is an index level, not a rate — stored unscaled (scale 1.0).
+    assert abs(vix.iloc[-1] - 20.0) < 1e-9

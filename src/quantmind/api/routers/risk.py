@@ -32,6 +32,7 @@ from quantmind.risk.returns import (
     rolling_alpha,
     rolling_beta,
     simple_returns,
+    volatility_drag,
 )
 
 router = APIRouter()
@@ -103,6 +104,11 @@ class RiskResponse(BaseModel):
     alpha_note: str
     es_975: float | None
     ann_vol: float | None
+    mean_arith_annual: float | None
+    cagr: float | None
+    drag_exact: float | None
+    drag_approx: float | None
+    drag_note: str
     as_of: str | None
 
 
@@ -178,6 +184,15 @@ def risk(
     except InsufficientDataError:
         ann_vol = None
 
+    try:
+        drag = volatility_drag(asset_returns)
+        mean_arith_annual = clean(drag.mean_arith_annual)
+        cagr = clean(drag.cagr)
+        drag_exact = clean(drag.drag_exact)
+        drag_approx = clean(drag.drag_approx)
+    except InsufficientDataError:
+        mean_arith_annual = cagr = drag_exact = drag_approx = None
+
     return RiskResponse(
         symbol=symbol,
         benchmark=benchmark,
@@ -189,6 +204,11 @@ def risk(
         alpha_note=f"vs {benchmark}, rf=0 until FRED wiring",
         es_975=clean(es),
         ann_vol=ann_vol,
+        mean_arith_annual=mean_arith_annual,
+        cagr=cagr,
+        drag_exact=drag_exact,
+        drag_approx=drag_approx,
+        drag_note="equity sleeve, per-symbol; drag = mean - CAGR ~= 1/2 sigma^2",
         as_of=iso(prices.index[-1]) if len(prices) else None,
     )
 
@@ -320,6 +340,14 @@ class RegressionResponse(BaseModel):
     alpha_annualized: float | None
     alpha_se: float | None
     alpha_ci: tuple[float | None, float | None]
+    # HAC t-stat of the intercept and the annualized appraisal ratio (Jensen
+    # alpha / annualized residual vol) — the "is this alpha real / worth it"
+    # pair that a raw annualized-alpha number alone can't answer.
+    alpha_tstat: float | None
+    information_ratio: float | None
+    # Honest provenance of the intercept: excess-return Jensen alpha (rf wired)
+    # vs a raw-return fallback with rf=0 (see the endpoint for when each holds).
+    alpha_note: str
     betas: list[BetaEstimate]
     r_squared: float | None
     r_squared_progression: list[R2Step]
@@ -357,12 +385,39 @@ def regression(
     y = aligned["asset"]
     xs = {name: aligned[name] for name in factor_names}
 
+    # True excess-return Jensen alpha: subtract the daily risk-free (US3M level
+    # / 252) from both the asset and the ONE market factor, but only when the
+    # benchmark is actually among the requested factors — otherwise there is no
+    # market column to de-risk and subtracting rf from an arbitrary factor set
+    # would be dishonest, so we fall back to the raw-return (rf=0) intercept.
+    # A missing US3M cache also falls back to rf=0 (structured, never a 500).
+    benchmark = request.app.state.benchmark
+    rf_series: pd.Series | None = None
+    market_factor: str | None = None
+    rf_applied = False
+    if benchmark in factor_names:
+        try:
+            rf_levels = request.app.state.store.read_series("US3M")
+        except FileNotFoundError:
+            rf_levels = None
+        if rf_levels is not None:
+            rf_series = (rf_levels / _PERIODS_PER_YEAR).reindex(aligned.index)
+            market_factor = benchmark
+            rf_applied = True
+
     try:
-        full = factor_regression(y, xs)
+        full = factor_regression(y, xs, rf=rf_series, market_factor=market_factor)
         single = factor_regression(y, {factor_names[0]: xs[factor_names[0]]})
         progression = r_squared_progression(y, [(name, xs[name]) for name in factor_names])
     except InsufficientDataError as e:
         raise HTTPException(422, detail=str(e))
+
+    if rf_applied:
+        alpha_note = f"excess-return Jensen alpha vs {benchmark}, rf=US3M/252"
+    elif benchmark in factor_names:
+        alpha_note = f"vs {benchmark}, rf=0 (US3M unavailable)"
+    else:
+        alpha_note = f"rf=0; raw-return intercept ({benchmark} not among factors)"
 
     primary = factor_names[0]
     scatter_points = [
@@ -420,6 +475,9 @@ def regression(
         alpha_annualized=clean(alpha_daily * _PERIODS_PER_YEAR),
         alpha_se=clean(full.alpha_se),
         alpha_ci=(clean(full.alpha_ci[0]), clean(full.alpha_ci[1])),
+        alpha_tstat=clean(full.alpha_tstat),
+        information_ratio=clean(full.information_ratio),
+        alpha_note=alpha_note,
         betas=betas,
         r_squared=clean(full.r_squared),
         r_squared_progression=[R2Step(factor_added=name, r_squared=clean(r)) for name, r in progression],

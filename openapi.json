@@ -833,6 +833,206 @@
         "title": "Correlation",
         "type": "object"
       },
+      "CrisisRequest": {
+        "properties": {
+          "min_tail": {
+            "default": 20,
+            "maximum": 250.0,
+            "minimum": 2.0,
+            "title": "Min Tail",
+            "type": "integer"
+          },
+          "symbols": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Symbols"
+          },
+          "tail": {
+            "default": 0.1,
+            "exclusiveMaximum": 1.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Tail",
+            "type": "number"
+          },
+          "universe": {
+            "enum": [
+              "sectors",
+              "factors",
+              "world",
+              "custom"
+            ],
+            "title": "Universe",
+            "type": "string"
+          },
+          "years": {
+            "default": 5,
+            "maximum": 25.0,
+            "minimum": 1.0,
+            "title": "Years",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "universe"
+        ],
+        "title": "CrisisRequest",
+        "type": "object"
+      },
+      "CrisisResponse": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "benchmark": {
+            "title": "Benchmark",
+            "type": "string"
+          },
+          "caveat": {
+            "title": "Caveat",
+            "type": "string"
+          },
+          "crisis_matrix": {
+            "items": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "title": "Crisis Matrix",
+            "type": "array"
+          },
+          "crisis_mean_corr": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Crisis Mean Corr"
+          },
+          "crisis_mean_corr_ci": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            ],
+            "title": "Crisis Mean Corr Ci",
+            "type": "array"
+          },
+          "missing": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing",
+            "type": "array"
+          },
+          "normal_matrix": {
+            "items": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "title": "Normal Matrix",
+            "type": "array"
+          },
+          "normal_mean_corr": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Normal Mean Corr"
+          },
+          "symbols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Symbols",
+            "type": "array"
+          },
+          "tail_n": {
+            "title": "Tail N",
+            "type": "integer"
+          },
+          "universe": {
+            "title": "Universe",
+            "type": "string"
+          }
+        },
+        "required": [
+          "universe",
+          "symbols",
+          "normal_matrix",
+          "crisis_matrix",
+          "normal_mean_corr",
+          "crisis_mean_corr",
+          "crisis_mean_corr_ci",
+          "tail_n",
+          "benchmark",
+          "caveat",
+          "as_of",
+          "missing"
+        ],
+        "title": "CrisisResponse",
+        "type": "object"
+      },
       "ExpiryBucketsOut": {
         "description": "Requirement 5: option legs bucketed by days-to-expiry. Only legs that\nresolved to a priceable BookLeg (matching cached-chain IV) are bucketed \u2014\nan unpriceable OPT position has no known expiry to bucket by.",
         "properties": {
@@ -1755,6 +1955,156 @@
         "title": "LabApplyResponse",
         "type": "object"
       },
+      "LeverageRequest": {
+        "properties": {
+          "book": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PositionIn"
+                },
+                "maxItems": 50,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book"
+          },
+          "book_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book Ref"
+          },
+          "drawdown_budget": {
+            "default": 0.25,
+            "exclusiveMinimum": 0.0,
+            "maximum": 1.0,
+            "title": "Drawdown Budget",
+            "type": "number"
+          },
+          "years": {
+            "default": 5,
+            "maximum": 25.0,
+            "minimum": 1.0,
+            "title": "Years",
+            "type": "integer"
+          }
+        },
+        "title": "LeverageRequest",
+        "type": "object"
+      },
+      "LeverageResponse": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "book_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book Value"
+          },
+          "diversification_ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diversification Ratio"
+          },
+          "drawdown_budget": {
+            "title": "Drawdown Budget",
+            "type": "number"
+          },
+          "gross": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gross"
+          },
+          "leverage_headroom": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leverage Headroom"
+          },
+          "max_drawdown": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Drawdown"
+          },
+          "n_obs": {
+            "title": "N Obs",
+            "type": "integer"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "symbols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Symbols",
+            "type": "array"
+          }
+        },
+        "required": [
+          "symbols",
+          "n_obs",
+          "max_drawdown",
+          "drawdown_budget",
+          "leverage_headroom",
+          "diversification_ratio",
+          "book_value",
+          "gross",
+          "note",
+          "as_of"
+        ],
+        "title": "LeverageResponse",
+        "type": "object"
+      },
       "MacroResponse": {
         "properties": {
           "as_of": {
@@ -2670,6 +3020,10 @@
             ],
             "title": "Alpha Daily"
           },
+          "alpha_note": {
+            "title": "Alpha Note",
+            "type": "string"
+          },
           "alpha_se": {
             "anyOf": [
               {
@@ -2680,6 +3034,17 @@
               }
             ],
             "title": "Alpha Se"
+          },
+          "alpha_tstat": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha Tstat"
           },
           "as_of": {
             "anyOf": [
@@ -2723,6 +3088,17 @@
           "horizon_note": {
             "title": "Horizon Note",
             "type": "string"
+          },
+          "information_ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Information Ratio"
           },
           "n_obs": {
             "title": "N Obs",
@@ -2800,6 +3176,9 @@
           "alpha_annualized",
           "alpha_se",
           "alpha_ci",
+          "alpha_tstat",
+          "information_ratio",
+          "alpha_note",
           "betas",
           "r_squared",
           "r_squared_progression",
@@ -2887,6 +3266,43 @@
             "title": "Beta Series",
             "type": "array"
           },
+          "cagr": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cagr"
+          },
+          "drag_approx": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drag Approx"
+          },
+          "drag_exact": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drag Exact"
+          },
+          "drag_note": {
+            "title": "Drag Note",
+            "type": "string"
+          },
           "es_975": {
             "anyOf": [
               {
@@ -2897,6 +3313,17 @@
               }
             ],
             "title": "Es 975"
+          },
+          "mean_arith_annual": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mean Arith Annual"
           },
           "n_obs": {
             "title": "N Obs",
@@ -2926,6 +3353,11 @@
           "alpha_note",
           "es_975",
           "ann_vol",
+          "mean_arith_annual",
+          "cagr",
+          "drag_exact",
+          "drag_approx",
+          "drag_note",
           "as_of"
         ],
         "title": "RiskResponse",
@@ -4336,6 +4768,45 @@
         "summary": "Apply To Book Route"
       }
     },
+    "/api/leverage": {
+      "post": {
+        "description": "Resilience construction: the book's historical max drawdown, the\ndrawdown-budget leverage headroom (assumption-bound scenario leverage, NOT a\nsafe-leverage guarantee \u2014 H4), and the diversification ratio (how orthogonal\nthe legs are). Thin composition over quantmind.hedge.core.",
+        "operationId": "leverage_api_leverage_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LeverageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeverageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Leverage"
+      }
+    },
     "/api/macro": {
       "get": {
         "operationId": "macro_api_macro_get",
@@ -4838,6 +5309,45 @@
           }
         },
         "summary": "Rotation"
+      }
+    },
+    "/api/rotation/crisis": {
+      "post": {
+        "description": "Normal vs crisis (benchmark worst-day) correlation over a universe \u2014\nthe \"diversification decays in a crisis\" lens. Store-only, deep history.",
+        "operationId": "rotation_crisis_api_rotation_crisis_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CrisisRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CrisisResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rotation Crisis"
       }
     },
     "/api/sync": {

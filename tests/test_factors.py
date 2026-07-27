@@ -166,3 +166,121 @@ def test_factor_regression_result_is_frozen_dataclass():
     assert isinstance(result, FactorRegressionResult)
     with pytest.raises(Exception):
         result.alpha = 1.0  # type: ignore[misc]
+
+
+# --- PART A: alpha t-stat + information ratio (annualized appraisal ratio) ---
+
+
+def test_factor_regression_reports_alpha_tstat_and_information_ratio():
+    # y = alpha + beta*x + eps with a KNOWN positive alpha and a controlled-
+    # variance eps: a real +alpha over small idiosyncratic noise is comfortably
+    # significant, and the information ratio recovers the hand-formula exactly.
+    n = 400
+    rng = np.random.default_rng(41)
+    idx = _idx(n)
+    bench = pd.Series(rng.normal(0.0, 0.01, n), index=idx)
+    alpha_true, beta_true = 0.001, 1.2
+    eps = pd.Series(rng.normal(0.0, 0.002, n), index=idx)
+    y = alpha_true + beta_true * bench + eps
+
+    result = factor_regression(y, {"SPY": bench})
+
+    # alpha_tstat is EXACTLY alpha / alpha_se; here it is positive and large.
+    assert result.alpha_se > 0
+    assert result.alpha_tstat == pytest.approx(result.alpha / result.alpha_se, rel=1e-12)
+    assert result.alpha_tstat > 2.0
+
+    # information_ratio == annualized appraisal ratio
+    #   = alpha * sqrt(252) / residual_std_daily  (residuals.std(ddof=1)).
+    resid_std_daily = result.residuals.std(ddof=1)
+    expected_ir = result.alpha * np.sqrt(252.0) / resid_std_daily
+    assert result.information_ratio == pytest.approx(expected_ir, rel=1e-12)
+    assert result.information_ratio > 0
+
+
+def test_factor_regression_derived_stats_stay_finite_on_near_perfect_fit():
+    # A near-perfect fit drives alpha_se and residual std toward (but not
+    # exactly) zero; the derived stats stay finite (no inf/nan division
+    # blow-up) and still satisfy their defining identities.
+    n = 300
+    bench = _rand(n, seed=51)
+    y = 0.0003 + 1.7 * bench  # ~zero noise (float residuals ~1e-18)
+    result = factor_regression(y, {"SPY": bench})
+    assert np.isfinite(result.alpha_tstat)
+    assert np.isfinite(result.information_ratio)
+    assert result.alpha_tstat == pytest.approx(result.alpha / result.alpha_se, rel=1e-9)
+
+
+# --- PART B: rf wiring for a true excess-return Jensen alpha ---
+
+
+def test_factor_regression_rf_series_recovers_jensens_alpha():
+    n = 400
+    rng = np.random.default_rng(31)
+    idx = _idx(n)
+    bench = pd.Series(rng.normal(0.0, 0.01, n), index=idx)
+    rf_daily = 0.0002
+    rf = pd.Series(rf_daily, index=idx)
+    alpha_true, beta_true = 0.0005, 1.4
+    # Exact CAPM construction: r_a = rf + beta*(r_m - rf) + alpha, zero noise.
+    asset = rf + beta_true * (bench - rf) + alpha_true
+
+    # rf wired (asset AND the market factor de-risked) -> intercept == Jensen alpha.
+    jensen = factor_regression(asset, {"SPY": bench}, rf=rf, market_factor="SPY")
+    assert jensen.alpha == pytest.approx(alpha_true, abs=1e-9)
+    assert jensen.betas["SPY"] == pytest.approx(beta_true, abs=1e-9)
+
+    # rf=None reproduces the OLD (raw-return, biased) intercept, unchanged.
+    raw = factor_regression(asset, {"SPY": bench})
+    biased = alpha_true + (1 - beta_true) * rf_daily
+    assert raw.alpha == pytest.approx(biased, abs=1e-9)
+    # And the Jensen intercept differs from the raw one by exactly that bias.
+    assert jensen.alpha != pytest.approx(raw.alpha, abs=1e-6)
+
+
+def test_factor_regression_scalar_rf_matches_constant_series():
+    n = 400
+    rng = np.random.default_rng(32)
+    idx = _idx(n)
+    bench = pd.Series(rng.normal(0.0, 0.01, n), index=idx)
+    rf_daily = 0.0002
+    alpha_true, beta_true = 0.0005, 1.4
+    asset = rf_daily + beta_true * (bench - rf_daily) + alpha_true
+
+    scalar = factor_regression(asset, {"SPY": bench}, rf=rf_daily, market_factor="SPY")
+    assert scalar.alpha == pytest.approx(alpha_true, abs=1e-9)
+    assert scalar.betas["SPY"] == pytest.approx(beta_true, abs=1e-9)
+
+
+def test_factor_regression_rf_only_subtracts_named_market_factor():
+    # With two factors, rf must be subtracted from ONLY the market factor,
+    # leaving the other factor untouched. Build y so that the market leg is an
+    # excess-return relationship but the second factor is a plain factor.
+    n = 400
+    rng = np.random.default_rng(33)
+    idx = _idx(n)
+    mkt = pd.Series(rng.normal(0.0, 0.01, n), index=idx)
+    f2 = pd.Series(rng.normal(0.0, 0.008, n), index=idx)
+    rf_daily = 0.0002
+    rf = pd.Series(rf_daily, index=idx)
+    alpha_true, bm_true, b2_true = 0.0004, 1.2, -0.5
+    asset = rf + bm_true * (mkt - rf) + b2_true * f2 + alpha_true
+
+    result = factor_regression(asset, {"SPY": mkt, "F2": f2}, rf=rf, market_factor="SPY")
+    assert result.alpha == pytest.approx(alpha_true, abs=1e-9)
+    assert result.betas["SPY"] == pytest.approx(bm_true, abs=1e-9)
+    assert result.betas["F2"] == pytest.approx(b2_true, abs=1e-9)
+
+
+def test_factor_regression_rf_aligns_on_shared_index_and_drops_gaps():
+    # An rf series with a NaN gap must drop that row consistently (concat/dropna),
+    # so n_obs reflects the shared index of y, factors and rf.
+    n = 300
+    rng = np.random.default_rng(34)
+    idx = _idx(n)
+    bench = pd.Series(rng.normal(0.0, 0.01, n), index=idx)
+    asset = 0.0002 + 1.1 * (bench - 0.0002) + 0.0005
+    rf = pd.Series(0.0002, index=idx)
+    rf.iloc[100] = np.nan  # one missing rf observation
+    result = factor_regression(asset, {"SPY": bench}, rf=rf, market_factor="SPY")
+    assert result.n_obs == n - 1

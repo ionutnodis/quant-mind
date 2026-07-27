@@ -44,6 +44,10 @@ from quantmind.risk.returns import InsufficientDataError
 _MIN_OBS_PER_PARAM = 10
 _MIN_OBS_FLOOR = 30
 
+# Trading days per year: annualizes the daily intercept/residual-vol into the
+# information ratio (annualized appraisal ratio).
+_PERIODS_PER_YEAR = 252
+
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
@@ -76,6 +80,11 @@ class FactorRegressionResult:
     alpha: float
     alpha_se: float
     alpha_ci: tuple[float, float]
+    # HAC t-statistic of the intercept (alpha / alpha_se); NaN when alpha_se==0.
+    alpha_tstat: float
+    # Annualized appraisal ratio: alpha*sqrt(252) / residual_std_daily
+    # (== annualized alpha / annualized residual vol). NaN when residual_std==0.
+    information_ratio: float
     betas: dict[str, float]
     beta_se: dict[str, float]
     beta_ci: dict[str, tuple[float, float]]
@@ -95,6 +104,8 @@ def factor_regression(
     factors: dict[str, pd.Series],
     confidence: float = 0.95,
     hac_lags: int | None = None,
+    rf: pd.Series | float | None = None,
+    market_factor: str | None = None,
 ) -> FactorRegressionResult:
     """OLS regression of `y` on one or more `factors` (name -> series, inner-
     joined/aligned on index, NaN rows dropped), with Newey-West HAC standard
@@ -103,10 +114,36 @@ def factor_regression(
 
     `hac_lags` overrides the automatic Newey-West plug-in (`newey_west_lags`)
     when set; primarily a test seam.
+
+    Excess-return (Jensen) alpha: pass a daily risk-free `rf` (scalar or series)
+    to subtract it from `y` (excess asset return) and — when `market_factor`
+    names one of the factors — from that ONE factor column (excess market
+    return), leaving every other factor unchanged. The resulting intercept is
+    then a true excess-return Jensen alpha rather than a raw-return drift. `rf`
+    is aligned on the shared index (concat/dropna) before subtracting. With
+    `rf=None` (the default) behavior is unchanged (raw-return intercept).
     """
     _require(len(factors) > 0, "factor_regression requires at least one factor")
     names = list(factors.keys())
-    aligned = pd.concat({"y": y, **factors}, axis=1).dropna()
+    if market_factor is not None:
+        _require(
+            market_factor in names,
+            f"market_factor {market_factor!r} is not among the factors {names}",
+        )
+    rf_is_series = isinstance(rf, pd.Series)
+    frames = {"y": y, **factors}
+    if rf_is_series:
+        # Carry rf through the same concat/dropna so alignment is consistent:
+        # rows missing rf are dropped alongside rows missing y/factors.
+        frames["__rf__"] = rf
+    aligned = pd.concat(frames, axis=1).dropna()
+
+    if rf is not None:
+        rf_col = aligned.pop("__rf__") if rf_is_series else float(rf)
+        aligned["y"] = aligned["y"] - rf_col
+        if market_factor is not None:
+            aligned[market_factor] = aligned[market_factor] - rf_col
+
     n_obs = len(aligned)
     k = len(names)
     min_obs = max(_MIN_OBS_FLOOR, _MIN_OBS_PER_PARAM * (k + 1))
@@ -133,6 +170,17 @@ def factor_regression(
     residuals = model.resid
     r_squared = float(model.rsquared)
 
+    # HAC t-stat of the intercept, and the annualized appraisal ratio.
+    # Annualized alpha = alpha*252 and annualized residual vol = resid_std*sqrt(252),
+    # so their ratio collapses to alpha*sqrt(252)/resid_std_daily.
+    alpha_tstat = alpha / alpha_se if alpha_se > 0 else float("nan")
+    resid_std_daily = float(residuals.std(ddof=1))
+    information_ratio = (
+        alpha * np.sqrt(_PERIODS_PER_YEAR) / resid_std_daily
+        if resid_std_daily > 0
+        else float("nan")
+    )
+
     var_y = float(y_aligned.var(ddof=1))
     _require(var_y > 0, "y has zero variance; cannot decompose")
     resid_var = float(residuals.var(ddof=1))
@@ -155,6 +203,8 @@ def factor_regression(
         alpha=alpha,
         alpha_se=alpha_se,
         alpha_ci=alpha_ci,
+        alpha_tstat=alpha_tstat,
+        information_ratio=information_ratio,
         betas=betas,
         beta_se=beta_se,
         beta_ci=beta_ci,

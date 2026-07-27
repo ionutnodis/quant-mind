@@ -294,3 +294,52 @@ def test_rank_other_side_null_score_and_corr_sink_last():
         _row("MOVING", -0.4, 0.01, 0.004),
     ]
     assert [r.symbol for r in rank_other_side(rows)] == ["MOVING", "INVERSE_FLAT", "NULL_SCORE"]
+
+
+def _crisis_store(tmp_path) -> BarStore:
+    """SPY (benchmark) + a 2-name universe with ~260 days so a 20% tail has
+    ~52 crisis days — enough for the crisis-correlation min-tail guard."""
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    rng = np.random.default_rng(3)
+    n = 260
+    factor = rng.normal(0.0, 0.012, n)  # market factor == SPY's driver
+    a = 0.0005 + 0.6 * factor + rng.normal(0.0, 0.004, n)
+    b = 0.0005 + 0.6 * factor + rng.normal(0.0, 0.004, n)
+    for con_id, series in ((1, factor), (2, a), (3, b)):
+        store.write_bars(con_id=con_id, bar_size="1d", bars=_bars_from_returns(series), meta=meta)
+    store.write_symbol_map({"SPY": 1, "A": 2, "B": 3})
+    return store
+
+
+def test_rotation_crisis_returns_normal_and_crisis_matrices(tmp_path):
+    client = _client(_crisis_store(tmp_path))
+    r = client.post(
+        "/api/rotation/crisis",
+        json={"universe": "custom", "symbols": ["A", "B"], "tail": 0.2, "min_tail": 10, "years": 5},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["benchmark"] == "SPY"
+    assert body["symbols"] == sorted(["A", "B"]) or set(body["symbols"]) == {"A", "B"}
+    assert len(body["normal_matrix"]) == 2 and len(body["crisis_matrix"]) == 2
+    assert body["tail_n"] >= 10
+    lo, hi = body["crisis_mean_corr_ci"]
+    assert lo is not None and hi is not None and lo <= hi
+    assert "range-restriction" in body["caveat"].lower()
+
+
+def test_rotation_crisis_min_tail_guard_is_422(tmp_path):
+    client = _client(_crisis_store(tmp_path))
+    r = client.post(
+        "/api/rotation/crisis",
+        json={"universe": "custom", "symbols": ["A", "B"], "tail": 0.02, "min_tail": 20, "years": 5},
+    )
+    assert r.status_code == 422
+    assert "min_tail" in r.json()["detail"]
+
+
+def test_rotation_crisis_needs_two_instruments(tmp_path):
+    client = _client(_crisis_store(tmp_path))
+    r = client.post("/api/rotation/crisis", json={"universe": "custom", "symbols": ["A"]})
+    assert r.status_code == 422

@@ -71,6 +71,7 @@ from pydantic import BaseModel, Field, model_validator
 from quantmind.analytics.correlation import rolling_correlation
 from quantmind.api.routers._shared import PositionIn, clean, iso, read_close_series, weighted_portfolio_returns
 from quantmind.api.routers.book import read_book_positions
+from quantmind.hedge.core import diversification_ratio, leverage_headroom, max_drawdown
 from quantmind.risk.returns import InsufficientDataError, historical_es, rolling_beta
 
 router = APIRouter()
@@ -102,6 +103,33 @@ class HedgeRequest(BaseModel):
         if bool(self.book) == bool(self.book_ref):
             raise ValueError("provide exactly one of book or book_ref")
         return self
+
+
+class LeverageRequest(BaseModel):
+    book: list[PositionIn] | None = Field(None, min_length=1, max_length=50)
+    book_ref: str | None = None
+    # Target worst-case drawdown the book should be sized to (e.g. 0.25 = 25%).
+    drawdown_budget: float = Field(0.25, gt=0.0, le=1.0)
+    years: int = Field(5, ge=1, le=25)
+
+    @model_validator(mode="after")
+    def _book_xor_book_ref(self) -> "LeverageRequest":
+        if bool(self.book) == bool(self.book_ref):
+            raise ValueError("provide exactly one of book or book_ref")
+        return self
+
+
+class LeverageResponse(BaseModel):
+    symbols: list[str]
+    n_obs: int
+    max_drawdown: float | None
+    drawdown_budget: float
+    leverage_headroom: float | None
+    diversification_ratio: float | None
+    book_value: float | None
+    gross: float | None
+    note: str
+    as_of: str | None
 
 
 class HedgeCandidateOut(BaseModel):
@@ -345,4 +373,77 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         n_candidates_evaluated=n_evaluated,
         candidates=results[:_MAX_CANDIDATES_OUT],
         as_of=iso(book_prices.index[-1]) if len(book_prices) else None,
+    )
+
+
+@router.post("/leverage", response_model=LeverageResponse)
+def leverage(request: Request, req: LeverageRequest) -> LeverageResponse:
+    """Resilience construction: the book's historical max drawdown, the
+    drawdown-budget leverage headroom (assumption-bound scenario leverage, NOT a
+    safe-leverage guarantee — H4), and the diversification ratio (how orthogonal
+    the legs are). Thin composition over quantmind.hedge.core."""
+    store = request.app.state.store
+    symbol_map = store.read_symbol_map()
+
+    book_positions = req.book if req.book is not None else read_book_positions(store, req.book_ref)
+    if not book_positions:
+        raise HTTPException(422, detail="book_ref resolved to an empty book")
+    if len(book_positions) > _MAX_BOOK_POSITIONS:
+        raise HTTPException(422, detail=f"book has {len(book_positions)} positions; max {_MAX_BOOK_POSITIONS}")
+
+    unique_book = list(dict.fromkeys(p.symbol for p in book_positions))
+    qtys: dict[str, float] = {}
+    for p in book_positions:
+        qtys[p.symbol] = qtys.get(p.symbol, 0.0) + p.qty
+
+    unknown = sorted(s for s in unique_book if s not in symbol_map)
+    if unknown:
+        raise HTTPException(422, detail=f"unknown symbols: {unknown}")
+
+    series_map = {sym: read_close_series(store, symbol_map[sym], sym, req.years) for sym in unique_book}
+    # Non-finite last close -> a NaN gross would slip past `gross <= 0` (NaN<=0
+    # is False) and return a 200 of nulls; name the 422 instead (mirrors /hedge).
+    unpriceable = sorted(sym for sym in unique_book if clean(float(series_map[sym].iloc[-1])) is None)
+    if unpriceable:
+        raise HTTPException(
+            422, detail=f"non-finite last close in cached bars for: {unpriceable} — re-sync before computing"
+        )
+    book_returns, weights, book_value, gross, prices = _portfolio_returns(series_map, qtys, unique_book)
+    if gross <= 0:
+        raise HTTPException(422, detail="portfolio has zero gross market value")
+    if book_returns is None or len(book_returns) < 2:
+        raise HTTPException(422, detail="insufficient overlapping history for the book")
+
+    try:
+        mdd: float | None = max_drawdown(book_returns)
+    except InsufficientDataError:
+        mdd = None
+    try:
+        headroom: float | None = leverage_headroom(book_returns, req.drawdown_budget) if mdd is not None else None
+    except ValueError:
+        headroom = None  # no historical drawdown -> headroom undefined, not a 500
+
+    per_symbol = prices.pct_change().dropna()
+    try:
+        div_ratio: float | None = diversification_ratio(
+            per_symbol, np.array([weights[s] for s in unique_book])
+        )
+    except InsufficientDataError:
+        div_ratio = None  # single instrument or degenerate -> undefined
+
+    return LeverageResponse(
+        symbols=unique_book,
+        n_obs=len(book_returns),
+        max_drawdown=clean(mdd),
+        drawdown_budget=req.drawdown_budget,
+        leverage_headroom=clean(headroom),
+        diversification_ratio=clean(div_ratio),
+        book_value=clean(book_value),
+        gross=clean(gross),
+        note=(
+            "leverage headroom is assumption-bound scenario leverage (scales historical "
+            "drawdown; ignores margin/gap/options nonlinearity) — not a safe-leverage "
+            "guarantee. Equity sleeve, per gross dollar."
+        ),
+        as_of=iso(prices.index[-1]) if len(prices) else None,
     )

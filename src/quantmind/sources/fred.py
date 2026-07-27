@@ -70,11 +70,14 @@ def fetch_net_liquidity() -> pd.Series:  # pragma: no cover - network
 
 
 # store names -> (fred id, scale). Rates normalize percent -> DECIMAL so the
-# exposure bridge's ("decimal","usd_per_bp") conversion stays honest.
+# exposure bridge's ("decimal","usd_per_bp") conversion stays honest. VIX is an
+# index LEVEL (e.g. 18.5), not a rate — stored unscaled (scale 1.0) so the
+# regime tagger reads real VIX points, not a decimal.
 FRED_STORE_SERIES = {
     "US10Y": ("DGS10", 1e-2),
     "US2Y": ("DGS2", 1e-2),
     "US3M": ("DGS3MO", 1e-2),
+    "VIX": ("VIXCLS", 1.0),
 }
 
 

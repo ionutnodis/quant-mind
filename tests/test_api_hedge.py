@@ -445,3 +445,54 @@ def test_hedge_both_book_and_book_ref_is_422(client):
 def test_hedge_neither_book_nor_book_ref_is_422(client):
     r = client.post("/api/hedge", json={"objective": {"kind": "beta_target", "value": 0.0}})
     assert r.status_code == 422
+
+
+def test_leverage_reports_drawdown_headroom_and_diversification(client):
+    r = client.post(
+        "/api/leverage",
+        json={"book": [{"symbol": "QQQ", "qty": 10}, {"symbol": "IWM", "qty": 10}], "drawdown_budget": 0.25},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body["symbols"]) == {"QQQ", "IWM"}
+    assert body["drawdown_budget"] == 0.25
+    assert body["max_drawdown"] is not None and body["max_drawdown"] >= 0
+    # headroom = budget / MDD; a positive number when the book drew down
+    assert body["leverage_headroom"] is None or body["leverage_headroom"] > 0
+    # DR >= 1 for a long-only two-name book (>= 1 minus float slack)
+    assert body["diversification_ratio"] is not None and body["diversification_ratio"] >= 0.999
+    assert "assumption-bound" in body["note"]
+    assert body["n_obs"] >= 2
+
+
+def test_leverage_single_name_has_no_diversification_ratio(client):
+    r = client.post("/api/leverage", json={"book": [{"symbol": "QQQ", "qty": 10}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["diversification_ratio"] is None  # needs >= 2 instruments
+
+
+def test_leverage_unknown_symbol_is_422(client):
+    r = client.post("/api/leverage", json={"book": [{"symbol": "NOPE", "qty": 1}]})
+    assert r.status_code == 422
+
+
+def test_leverage_requires_book_xor_book_ref(client):
+    r = client.post("/api/leverage", json={"drawdown_budget": 0.25})
+    assert r.status_code == 422
+
+def test_leverage_nonfinite_book_last_close_is_422_naming_the_symbol(tmp_path):
+    # /leverage must not silently return a 200 of nulls when a book leg has a
+    # NaN last close (NaN gross slips past `gross <= 0`) — mirror /hedge's guard.
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)
+    bad_bars = _bars(seed=2)
+    bad_bars.loc[bad_bars.index[-1], "close"] = np.nan
+    store.write_bars(con_id=2, bar_size="1d", bars=bad_bars, meta=meta)
+    store.write_symbol_map({"SPY": 1, "QQQ": 2})
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    c = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+
+    r = c.post("/api/leverage", json={"book": [{"symbol": "QQQ", "qty": 10}], "years": 1})
+    assert r.status_code == 422
+    assert "QQQ" in r.json()["detail"]

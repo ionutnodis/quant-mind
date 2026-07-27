@@ -54,6 +54,28 @@ function runHedge(body: {
   return request<HedgeResponse>("/api/hedge", { method: "POST", body: JSON.stringify(body) });
 }
 
+interface LeverageResponse {
+  symbols: string[];
+  n_obs: number;
+  max_drawdown: number | null;
+  drawdown_budget: number;
+  leverage_headroom: number | null;
+  diversification_ratio: number | null;
+  book_value: number | null;
+  gross: number | null;
+  note: string;
+  as_of: string | null;
+}
+
+function runLeverage(body: {
+  book?: { symbol: string; qty: number }[];
+  book_ref?: string;
+  drawdown_budget: number;
+  years: number;
+}) {
+  return request<LeverageResponse>("/api/leverage", { method: "POST", body: JSON.stringify(body) });
+}
+
 function num(x: number | null | undefined, digits = 2): string {
   if (x === null || x === undefined || !Number.isFinite(x)) return "—";
   return x.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
@@ -75,6 +97,8 @@ export function Hedge() {
   const [bookRef, setBookRef] = useState<string | null>(null);
   const [targetBeta, setTargetBeta] = useState(0);
   const [years, setYears] = useState(5);
+  // Drawdown budget for the resilience / leverage-headroom lens (0.25 = 25%).
+  const [drawdownBudget, setDrawdownBudget] = useState(0.25);
 
   const run = useMutation({
     mutationFn: () => {
@@ -84,6 +108,16 @@ export function Hedge() {
       const book = rowsToPositions(rows);
       if (book.length === 0) throw new Error("add at least one book position (symbol + nonzero qty)");
       return runHedge({ book, objective: { kind: "beta_target", value: targetBeta }, years });
+    },
+  });
+
+  const leverage = useMutation({
+    mutationFn: () => {
+      if (!(drawdownBudget > 0)) throw new Error("drawdown budget must be a positive fraction (e.g. 0.25)");
+      if (bookRef) return runLeverage({ book_ref: bookRef, drawdown_budget: drawdownBudget, years });
+      const book = rowsToPositions(rows);
+      if (book.length === 0) throw new Error("add at least one book position (symbol + nonzero qty)");
+      return runLeverage({ book, drawdown_budget: drawdownBudget, years });
     },
   });
 
@@ -146,6 +180,21 @@ export function Hedge() {
                 onChange={(e) => setYears(Number(e.target.value))}
               />
             </div>
+            <div>
+              <label htmlFor="hedge-drawdown-budget" className="text-[10px] tracking-wider uppercase text-muted block mb-1">
+                Drawdown budget (resilience)
+              </label>
+              <input
+                id="hedge-drawdown-budget"
+                type="number"
+                step={0.05}
+                min={0.05}
+                max={1}
+                className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
+                value={drawdownBudget}
+                onChange={(e) => setDrawdownBudget(Number(e.target.value))}
+              />
+            </div>
           </div>
         </Panel>
 
@@ -162,12 +211,41 @@ export function Hedge() {
           type="button"
           className="w-full border border-you/60 bg-you/10 hover:bg-you/20 text-you text-[12px] py-1.5 disabled:opacity-40 disabled:text-muted disabled:border-hairline disabled:bg-transparent"
           disabled={run.isPending}
-          onClick={() => run.mutate()}
+          onClick={() => {
+            run.mutate();
+            leverage.mutate();
+          }}
         >
           {run.isPending ? "Running…" : "Run"}
         </button>
         {run.isError && (
           <p className="text-down text-[11px]">{String(run.error?.message ?? run.error)}</p>
+        )}
+        {leverage.isError && (
+          <p className="text-down text-[11px]">Resilience: {String(leverage.error?.message ?? leverage.error)}</p>
+        )}
+
+        {leverage.data && (
+          <Panel title="Resilience" note={`drawdown budget ${pct(leverage.data.drawdown_budget)}`}>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+              <div>
+                <div className="text-[10px] tracking-wider uppercase text-muted">Max drawdown (hist.)</div>
+                <div className="num text-lg">{pct(leverage.data.max_drawdown)}</div>
+              </div>
+              <div>
+                <div className="text-[10px] tracking-wider uppercase text-muted">Leverage headroom</div>
+                <div className="num text-lg">{num(leverage.data.leverage_headroom, 2)}×</div>
+              </div>
+              <div className="col-span-2">
+                <div className="text-[10px] tracking-wider uppercase text-muted">Diversification ratio</div>
+                <div className="num text-lg">{num(leverage.data.diversification_ratio, 2)}</div>
+                <div className="num text-muted text-[10px]">
+                  1.00 = collinear book; higher = more orthogonal legs
+                </div>
+              </div>
+              <div className="col-span-2 text-muted text-[10px]">{leverage.data.note}</div>
+            </div>
+          </Panel>
         )}
       </div>
 

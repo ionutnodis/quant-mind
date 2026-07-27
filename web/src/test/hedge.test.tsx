@@ -16,7 +16,22 @@ import { setupServer } from "msw/node";
 import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
 import { Hedge } from "../pages/Hedge";
 
-const server = setupServer();
+// The Run button fires POST /api/leverage alongside /api/hedge, so a default
+// leverage handler is registered on the server (persists across resetHandlers).
+const LEVERAGE_RESPONSE = {
+  symbols: ["SPY"],
+  n_obs: 250,
+  max_drawdown: 0.18,
+  drawdown_budget: 0.25,
+  leverage_headroom: 1.39,
+  diversification_ratio: 1.32,
+  book_value: 10000.0,
+  gross: 10000.0,
+  note: "leverage headroom is assumption-bound scenario leverage — not a safe-leverage guarantee.",
+  as_of: "2026-07-24T00:00:00Z",
+};
+
+const server = setupServer(http.post("/api/leverage", () => HttpResponse.json(LEVERAGE_RESPONSE)));
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
@@ -214,4 +229,41 @@ test("editing a row after loading the current book reverts to inline positions",
 
   fireEvent.click(screen.getByRole("button", { name: /^run$/i }));
   await screen.findByRole("table");
+});
+
+test("Run also surfaces the resilience lens (drawdown / leverage headroom / diversification)", async () => {
+  server.use(http.post("/api/hedge", () => HttpResponse.json(HEDGE_RESPONSE)));
+  renderHedge();
+
+  const symbolInputs = screen.getAllByLabelText(/symbol/i);
+  fireEvent.change(symbolInputs[0], { target: { value: "spy" } });
+  const qtyInputs = screen.getAllByLabelText(/qty/i);
+  fireEvent.change(qtyInputs[0], { target: { value: "10" } });
+  fireEvent.click(screen.getByRole("button", { name: /^run$/i }));
+
+  expect(await screen.findByText(/^Resilience$/)).toBeInTheDocument();
+  expect(screen.getByText(/18\.00%/)).toBeInTheDocument(); // max drawdown
+  expect(screen.getByText(/1\.39×/)).toBeInTheDocument(); // leverage headroom
+  expect(screen.getByText(/1\.32/)).toBeInTheDocument(); // diversification ratio
+  expect(screen.getByText(/assumption-bound scenario leverage/i)).toBeInTheDocument();
+});
+
+test("a failed resilience/leverage request surfaces an error instead of silently vanishing", async () => {
+  server.use(
+    http.post("/api/hedge", () => HttpResponse.json(HEDGE_RESPONSE)),
+    http.post("/api/leverage", () =>
+      HttpResponse.json({ detail: "portfolio has zero gross market value" }, { status: 422 })
+    )
+  );
+  renderHedge();
+  const symbolInputs = screen.getAllByLabelText(/symbol/i);
+  fireEvent.change(symbolInputs[0], { target: { value: "spy" } });
+  const qtyInputs = screen.getAllByLabelText(/qty/i);
+  fireEvent.change(qtyInputs[0], { target: { value: "10" } });
+  fireEvent.click(screen.getByRole("button", { name: /^run$/i }));
+
+  // candidates still render (hedge ok), but the resilience failure is visible
+  expect(await screen.findByRole("table")).toBeInTheDocument();
+  expect(await screen.findByText(/Resilience:.*zero gross/i)).toBeInTheDocument();
+  expect(screen.queryByText(/^Resilience$/)).not.toBeInTheDocument(); // panel absent
 });
