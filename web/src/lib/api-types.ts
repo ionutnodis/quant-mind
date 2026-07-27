@@ -361,6 +361,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/rotation/crisis": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotation Crisis
+         * @description Normal vs crisis (benchmark worst-day) correlation over a universe —
+         *     the "diversification decays in a crisis" lens. Store-only, deep history.
+         */
+        post: operations["rotation_crisis_api_rotation_crisis_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sync": {
         parameters: {
             query?: never;
@@ -622,6 +643,61 @@ export interface components {
             matrix: (number | null)[][];
             /** Symbols */
             symbols: string[];
+        };
+        /** CrisisRequest */
+        CrisisRequest: {
+            /**
+             * Min Tail
+             * @default 20
+             */
+            min_tail: number;
+            /** Symbols */
+            symbols?: string[] | null;
+            /**
+             * Tail
+             * @default 0.1
+             */
+            tail: number;
+            /**
+             * Universe
+             * @enum {string}
+             */
+            universe: "sectors" | "factors" | "world" | "custom";
+            /**
+             * Years
+             * @default 5
+             */
+            years: number;
+        };
+        /** CrisisResponse */
+        CrisisResponse: {
+            /** As Of */
+            as_of: string | null;
+            /** Benchmark */
+            benchmark: string;
+            /** Caveat */
+            caveat: string;
+            /** Crisis Matrix */
+            crisis_matrix: (number | null)[][];
+            /** Crisis Mean Corr */
+            crisis_mean_corr: number | null;
+            /** Crisis Mean Corr Ci */
+            crisis_mean_corr_ci: [
+                number | null,
+                number | null
+            ];
+            /** Missing */
+            missing: string[];
+            /** Normal Matrix */
+            normal_matrix: (number | null)[][];
+            /** Normal Mean Corr */
+            normal_mean_corr: number | null;
+            /** Symbols */
+            symbols: string[];
+            /** Tail N */
+            tail_n: number;
+            /** Universe */
+            universe: string;
         };
         /**
          * ExpiryBucketsOut
@@ -2112,6 +2188,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RotationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rotation_crisis_api_rotation_crisis_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CrisisRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CrisisResponse"];
                 };
             };
             /** @description Validation Error */

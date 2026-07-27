@@ -35,8 +35,10 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
+from quantmind.analytics.correlation import crisis_correlation
 from quantmind.api.routers._shared import clean, iso
 from quantmind.api.routers.macro import FACTORS, SECTORS
+from quantmind.risk.returns import InsufficientDataError
 
 router = APIRouter()
 
@@ -200,6 +202,99 @@ def rank_other_side(rows: list[OtherSideOut]) -> list[OtherSideOut]:
             o.corr is None,
             o.corr if o.corr is not None else 0.0,
         ),
+    )
+
+
+class CrisisRequest(BaseModel):
+    universe: Literal["sectors", "factors", "world", "custom"]
+    symbols: list[str] | None = Field(None, max_length=_MAX_CUSTOM_SYMBOLS)
+    # Worst `tail` fraction of benchmark days define the crisis regime; deep
+    # history (`years`) is needed so the tail has enough days to be meaningful.
+    tail: float = Field(0.10, gt=0.0, lt=1.0)
+    min_tail: int = Field(20, ge=2, le=250)
+    years: int = Field(5, ge=1, le=25)
+
+    @model_validator(mode="after")
+    def _custom_requires_symbols(self) -> "CrisisRequest":
+        if self.universe == "custom" and not self.symbols:
+            raise ValueError("universe 'custom' requires a non-empty `symbols` list")
+        if self.symbols is not None and len(self.symbols) == 0:
+            raise ValueError("`symbols` must be non-empty when provided")
+        return self
+
+
+class CrisisResponse(BaseModel):
+    universe: str
+    symbols: list[str]  # clustered order (from the normal-regime matrix)
+    normal_matrix: list[list[float | None]]
+    crisis_matrix: list[list[float | None]]
+    normal_mean_corr: float | None
+    crisis_mean_corr: float | None
+    crisis_mean_corr_ci: tuple[float | None, float | None]
+    tail_n: int
+    benchmark: str
+    caveat: str
+    as_of: str | None
+    missing: list[str]
+
+
+def _benchmark_returns(store, symbol_map: dict[str, int], benchmark: str, years: int) -> pd.Series | None:
+    if benchmark not in symbol_map:
+        return None
+    try:
+        bars, _ = store.read_bars(con_id=symbol_map[benchmark], bar_size="1d")
+    except FileNotFoundError:
+        return None
+    close = bars["close"]
+    if years > 0:
+        close = close.iloc[-(years * 252):]
+    return close.pct_change().dropna()
+
+
+@router.post("/rotation/crisis", response_model=CrisisResponse)
+def rotation_crisis(request: Request, req: CrisisRequest) -> CrisisResponse:
+    """Normal vs crisis (benchmark worst-day) correlation over a universe —
+    the "diversification decays in a crisis" lens. Store-only, deep history."""
+    store = request.app.state.store
+    symbol_map = store.read_symbol_map()
+    benchmark = request.app.state.benchmark
+
+    universe_symbols = req.symbols if req.symbols is not None else _DEFAULT_UNIVERSES[req.universe]
+    closes, missing = _closes_for(store, symbol_map, universe_symbols, strict=req.symbols is not None)
+    symbols = sorted(closes)
+    if len(symbols) < 2:
+        raise HTTPException(422, detail="crisis correlation needs >= 2 cached instruments")
+
+    def _windowed(s: pd.Series) -> pd.Series:
+        return s.iloc[-(req.years * 252):] if req.years > 0 else s
+
+    returns_df = pd.DataFrame({s: _windowed(closes[s]).pct_change().dropna() for s in symbols}).dropna()
+    bench = _benchmark_returns(store, symbol_map, benchmark, req.years)
+    if bench is None:
+        raise HTTPException(422, detail=f"benchmark {benchmark!r} not cached")
+
+    try:
+        res = crisis_correlation(returns_df, bench, tail=req.tail, min_tail=req.min_tail, seed=0)
+    except InsufficientDataError as e:
+        raise HTTPException(422, detail=str(e))
+
+    clustered = cluster_order(res.normal_corr)
+    normal = res.normal_corr.loc[clustered, clustered]
+    crisis = res.crisis_corr.loc[clustered, clustered]
+
+    return CrisisResponse(
+        universe=req.universe,
+        symbols=clustered,
+        normal_matrix=[[clean(v) for v in row] for row in normal.to_numpy().tolist()],
+        crisis_matrix=[[clean(v) for v in row] for row in crisis.to_numpy().tolist()],
+        normal_mean_corr=clean(res.normal_mean_corr),
+        crisis_mean_corr=clean(res.crisis_mean_corr),
+        crisis_mean_corr_ci=(clean(res.crisis_mean_corr_ci[0]), clean(res.crisis_mean_corr_ci[1])),
+        tail_n=res.tail_n,
+        benchmark=benchmark,
+        caveat=res.caveat,
+        as_of=iso(max(closes[s].index[-1] for s in symbols)),
+        missing=missing,
     )
 
 
