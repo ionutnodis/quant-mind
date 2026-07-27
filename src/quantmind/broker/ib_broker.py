@@ -34,6 +34,13 @@ def positions_to_portfolio(ib_positions, as_of: str) -> Portfolio:
             continue
         raw_mult = getattr(p.contract, "multiplier", "") or ""
         multiplier = float(raw_mult) if str(raw_mult).strip() else 1.0
+        # Option contract terms (2026-07-27 live-account incident: real legs
+        # pinned with null strike/expiry/right because these were never read
+        # off the contract). ib_async's non-option sentinels — strike 0.0,
+        # empty strings — map to honest Nones, never a phantom 0.0-strike leg.
+        raw_strike = getattr(p.contract, "strike", 0.0) or 0.0
+        raw_expiry = str(getattr(p.contract, "lastTradeDateOrContractMonth", "") or "").strip()
+        raw_right = str(getattr(p.contract, "right", "") or "").strip()
         positions.append(
             Position(
                 con_id=p.contract.conId,
@@ -41,6 +48,9 @@ def positions_to_portfolio(ib_positions, as_of: str) -> Portfolio:
                 qty=float(p.position),
                 sec_type=p.contract.secType,
                 multiplier=multiplier,
+                strike=float(raw_strike) if raw_strike else None,
+                expiry=raw_expiry or None,
+                right=raw_right or None,
             )
         )
     return Portfolio(positions=tuple(positions), as_of=as_of)

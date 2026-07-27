@@ -20,6 +20,14 @@ class Position:
     qty: float
     sec_type: str = "STK"
     multiplier: float = 1.0
+    # Option-leg contract terms (None for non-options). Added 2026-07-27 when
+    # the live-account read surfaced real option legs: the broker path builds
+    # Positions directly (never PositionIn), so without room for these fields
+    # every auto-pinned option leg persisted null terms and book_ref
+    # consumers had to refuse the whole book. Expiry is YYYYMMDD.
+    strike: float | None = None
+    expiry: str | None = None
+    right: str | None = None
 
 
 @dataclass(frozen=True)

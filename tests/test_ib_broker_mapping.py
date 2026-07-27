@@ -16,8 +16,17 @@ from ib_async import AccountValue, BarData, Contract, ContractDetails
 from quantmind.broker.ib_broker import IbBroker, positions_to_cost_basis, positions_to_portfolio
 
 
-def _ib_pos(con_id, symbol, qty, sec_type="STK", multiplier="", avg_cost=0.0):
-    contract = SimpleNamespace(conId=con_id, symbol=symbol, secType=sec_type, multiplier=multiplier)
+def _ib_pos(
+    con_id, symbol, qty, sec_type="STK", multiplier="", avg_cost=0.0,
+    strike=0.0, expiry="", right="",
+):
+    # ib_async Contract defaults for non-options: strike 0.0,
+    # lastTradeDateOrContractMonth "", right "" — mirrored here so the
+    # mapping's None-guards are exercised against the real sentinel values.
+    contract = SimpleNamespace(
+        conId=con_id, symbol=symbol, secType=sec_type, multiplier=multiplier,
+        strike=strike, lastTradeDateOrContractMonth=expiry, right=right,
+    )
     return SimpleNamespace(contract=contract, position=qty, avgCost=avg_cost)
 
 
@@ -40,6 +49,31 @@ def test_option_position_maps_string_multiplier_to_float():
     assert pos.sec_type == "OPT"
     assert pos.multiplier == 100.0
     assert pos.qty == -2.0
+
+
+def test_option_position_maps_contract_terms():
+    # Live-account incident 2026-07-27: real option legs pinned with null
+    # strike/expiry/right because the mapping never read them off the
+    # contract — every book_ref consumer then (correctly) refused the book.
+    p = positions_to_portfolio(
+        [_ib_pos(879671249, "DRAM", 1.0, sec_type="OPT", multiplier="100",
+                 strike=25.0, expiry="20261218", right="C")],
+        as_of="2026-07-27",
+    )
+    pos = p.positions[0]
+    assert pos.strike == 25.0
+    assert pos.expiry == "20261218"
+    assert pos.right == "C"
+
+
+def test_stock_position_maps_contract_sentinels_to_none():
+    # IB's non-option sentinels (strike 0.0, empty strings) must become
+    # honest Nones, never a phantom 0.0-strike descriptor.
+    p = positions_to_portfolio([_ib_pos(265598, "AAPL", 100.0)], as_of="2026-07-27")
+    pos = p.positions[0]
+    assert pos.strike is None
+    assert pos.expiry is None
+    assert pos.right is None
 
 
 def test_empty_or_blank_multiplier_defaults_to_one():

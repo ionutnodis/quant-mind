@@ -151,6 +151,53 @@ def test_current_book_with_broker_reads_live_positions_and_auto_pins(store):
     assert r2.json() == body
 
 
+def test_current_book_persists_broker_option_leg_terms(store):
+    # Live-account incident 2026-07-27: the real book's option legs pinned
+    # with null strike/expiry/right (the broker mapping dropped them), so
+    # every book_ref consumer refused the auto-pinned book. A broker
+    # Position now carries the contract terms and the auto-pin path must
+    # persist them — making the snapshot consumable, not just honest.
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=1, symbol="SPY", qty=7, sec_type="STK", multiplier=1.0),
+            Position(
+                con_id=879671249, symbol="QQQ", qty=1, sec_type="OPT", multiplier=100.0,
+                strike=680.0, expiry="20261218", right="C",
+            ),
+        ),
+        as_of="2026-07-24T00:00:00Z",
+    )
+    client = _client(store, broker=FakeBroker(portfolio))
+    body = client.get("/api/book/current").json()
+    leg = next(p for p in body["positions"] if p["sec_type"] == "OPT")
+    assert leg["strike"] == 680.0
+    assert leg["expiry"] == "20261218"
+    assert leg["right"] == "C"
+    # the persisted snapshot is consumable: read_book_positions accepts it
+    from quantmind.api.routers.book import read_book_positions
+
+    legs = read_book_positions(store, body["snapshot_id"])
+    opt = next(l for l in legs if l.right is not None)
+    assert (opt.strike, opt.expiry, opt.right) == (680.0, "20261218", "C")
+
+
+def test_current_book_snapshots_differing_only_by_strike_get_distinct_ids(store):
+    def book(strike):
+        return Portfolio(
+            positions=(
+                Position(
+                    con_id=879671249, symbol="QQQ", qty=1, sec_type="OPT",
+                    multiplier=100.0, strike=strike, expiry="20261218", right="C",
+                ),
+            ),
+            as_of="2026-07-24T00:00:00Z",
+        )
+
+    a = _client(store, broker=FakeBroker(book(680.0))).get("/api/book/current").json()
+    b = _client(store, broker=FakeBroker(book(700.0))).get("/api/book/current").json()
+    assert a["snapshot_id"] != b["snapshot_id"]
+
+
 def test_repinning_identical_content_at_the_same_valuation_ts_is_idempotent(store):
     # Content-hashed ids (quantmind.core.snapshot.BookSnapshot, unit-tested in
     # tests/test_snapshot.py for determinism): pinning the identical

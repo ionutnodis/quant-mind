@@ -101,12 +101,12 @@ def write_book(store, snapshot: BookSnapshot, legs: list[PositionIn] | None = No
     `legs` is the ORIGINAL posted `PositionIn` list (same order as
     `snapshot.portfolio.positions` — see `_portfolio_from_positions`, which
     builds one `Position` per `PositionIn` in list order), carrying
-    strike/expiry/right that `Position` itself doesn't have room for
-    (Engineering Constraint 9's one Portfolio type). `None` (the live-broker
-    auto-pin path — a broker `Portfolio` was never built from `PositionIn`s)
-    persists null option fields for every leg, even an OPT one; see
-    `read_book_positions`'s honest-refusal guard for why that's the safe
-    default rather than a silent stock mispricing (final-fix-wave finding 1)."""
+    strike/expiry/right. `None` is the live-broker auto-pin path: since
+    2026-07-27 a broker `Position` carries the contract terms itself, so the
+    fallback persists those — a real option leg from the live account pins
+    complete and consumable. A broker leg IBKR somehow returned without
+    terms still persists nulls and is refused at consumption by
+    `read_book_positions`'s honest-refusal guard (final-fix-wave finding 1)."""
     path = _books_dir(store) / f"{snapshot.snapshot_id}.json"
     positions = snapshot.portfolio.positions
     leg_by_position = legs if legs is not None else [None] * len(positions)
@@ -121,9 +121,9 @@ def write_book(store, snapshot: BookSnapshot, legs: list[PositionIn] | None = No
                 "qty": p.qty,
                 "sec_type": p.sec_type,
                 "multiplier": p.multiplier,
-                "strike": leg.strike if leg is not None else None,
-                "expiry": leg.expiry if leg is not None else None,
-                "right": leg.right if leg is not None else None,
+                "strike": leg.strike if leg is not None else p.strike,
+                "expiry": leg.expiry if leg is not None else p.expiry,
+                "right": leg.right if leg is not None else p.right,
             }
             for p, leg in zip(positions, leg_by_position)
         ],
@@ -249,10 +249,14 @@ def _option_hash_extra(portfolio: Portfolio, legs: list[PositionIn] | None) -> s
     (by con_id) so the pairing stays correct: two books identical at the
     `Position` level (same con_id/qty/multiplier/sec_type) but differing
     only in an option leg's strike must NOT collide on the same snapshot id
-    (final-fix-wave finding 1.iii) — `Position` has no room for those fields,
-    so the base hash alone can't tell them apart."""
+    (final-fix-wave finding 1.iii) — the base hash alone can't tell them
+    apart. `legs is None` is the live-broker path: since 2026-07-27 broker
+    `Position`s carry the terms themselves, so the fold reads them off the
+    positions (two live books differing only by an option leg's strike would
+    otherwise collide the same way)."""
     if legs is None:
-        return ""
+        ordered = sorted(portfolio.positions, key=lambda p: p.con_id)
+        return "|".join(f"{p.strike}:{p.expiry}:{p.right}" for p in ordered)
     paired = sorted(zip(portfolio.positions, legs), key=lambda pl: pl[0].con_id)
     return "|".join(f"{leg.strike}:{leg.expiry}:{leg.right}" for _, leg in paired)
 
