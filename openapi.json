@@ -1955,6 +1955,156 @@
         "title": "LabApplyResponse",
         "type": "object"
       },
+      "LeverageRequest": {
+        "properties": {
+          "book": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PositionIn"
+                },
+                "maxItems": 50,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book"
+          },
+          "book_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book Ref"
+          },
+          "drawdown_budget": {
+            "default": 0.25,
+            "exclusiveMinimum": 0.0,
+            "maximum": 1.0,
+            "title": "Drawdown Budget",
+            "type": "number"
+          },
+          "years": {
+            "default": 5,
+            "maximum": 25.0,
+            "minimum": 1.0,
+            "title": "Years",
+            "type": "integer"
+          }
+        },
+        "title": "LeverageRequest",
+        "type": "object"
+      },
+      "LeverageResponse": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "book_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book Value"
+          },
+          "diversification_ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diversification Ratio"
+          },
+          "drawdown_budget": {
+            "title": "Drawdown Budget",
+            "type": "number"
+          },
+          "gross": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gross"
+          },
+          "leverage_headroom": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leverage Headroom"
+          },
+          "max_drawdown": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Drawdown"
+          },
+          "n_obs": {
+            "title": "N Obs",
+            "type": "integer"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "symbols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Symbols",
+            "type": "array"
+          }
+        },
+        "required": [
+          "symbols",
+          "n_obs",
+          "max_drawdown",
+          "drawdown_budget",
+          "leverage_headroom",
+          "diversification_ratio",
+          "book_value",
+          "gross",
+          "note",
+          "as_of"
+        ],
+        "title": "LeverageResponse",
+        "type": "object"
+      },
       "MacroResponse": {
         "properties": {
           "as_of": {
@@ -4616,6 +4766,45 @@
           }
         },
         "summary": "Apply To Book Route"
+      }
+    },
+    "/api/leverage": {
+      "post": {
+        "description": "Resilience construction: the book's historical max drawdown, the\ndrawdown-budget leverage headroom (assumption-bound scenario leverage, NOT a\nsafe-leverage guarantee \u2014 H4), and the diversification ratio (how orthogonal\nthe legs are). Thin composition over quantmind.hedge.core.",
+        "operationId": "leverage_api_leverage_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LeverageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeverageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Leverage"
       }
     },
     "/api/macro": {

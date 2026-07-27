@@ -172,3 +172,42 @@ test("422 from the backend surfaces as an error, not a crash", async () => {
   fireEvent.change(await screen.findByTestId("rotation-custom-symbols"), { target: { value: "GHOST" } });
   expect(await screen.findByText(/Rotation unavailable/)).toHaveTextContent(/GHOST/);
 });
+
+test("Crisis ρ toggle switches to benchmark worst-day correlation + shows diversification decay", async () => {
+  server.use(
+    http.post("/api/rotation", () => HttpResponse.json(BASE_RESPONSE)),
+    http.post("/api/rotation/crisis", () =>
+      HttpResponse.json({
+        universe: "sectors",
+        symbols: ["XLK", "XLF"],
+        normal_matrix: [
+          [1.0, 0.5],
+          [0.5, 1.0],
+        ],
+        crisis_matrix: [
+          [1.0, 0.92],
+          [0.92, 1.0],
+        ],
+        normal_mean_corr: 0.5,
+        crisis_mean_corr: 0.92,
+        crisis_mean_corr_ci: [0.85, 0.97],
+        tail_n: 52,
+        benchmark: "SPY",
+        caveat:
+          "Crisis correlation conditions on the 52 worst market days (tail=0.1); small selected samples plus range-restriction bias make these directional, not precise.",
+        as_of: "2026-07-26T00:00:00Z",
+        missing: [],
+      })
+    )
+  );
+  renderRotation();
+  await screen.findByTestId("corr-heatmap-stub");
+
+  fireEvent.click(screen.getByTestId("rotation-crisis-toggle"));
+
+  expect(await screen.findByTestId("crisis-header")).toHaveTextContent(/worst 52 SPY days/i);
+  const decay = await screen.findByTestId("crisis-decay");
+  expect(decay).toHaveTextContent(/0\.50 → 0\.92/);
+  expect(decay).toHaveTextContent(/CI 0\.85, 0\.97/);
+  expect(screen.getByText(/range-restriction/i)).toBeInTheDocument();
+});

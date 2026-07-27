@@ -63,6 +63,28 @@ function postRotation(body: {
   });
 }
 
+interface CrisisResponse {
+  universe: string;
+  symbols: string[];
+  normal_matrix: (number | null)[][];
+  crisis_matrix: (number | null)[][];
+  normal_mean_corr: number | null;
+  crisis_mean_corr: number | null;
+  crisis_mean_corr_ci: [number | null, number | null];
+  tail_n: number;
+  benchmark: string;
+  caveat: string;
+  as_of: string | null;
+  missing: string[];
+}
+
+function postCrisis(body: { universe: Universe; symbols?: string[] }): Promise<CrisisResponse> {
+  return request<CrisisResponse>("/api/rotation/crisis", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 function pct(x: number | null): string {
   if (x === null) return "—";
   return `${(x * 100).toFixed(2)}%`;
@@ -73,12 +95,20 @@ function num4(x: number | null): string {
   return x.toFixed(4);
 }
 
+function num2(x: number | null): string {
+  if (x === null) return "—";
+  return x.toFixed(2);
+}
+
 export function RotationHeatmap() {
   const [universe, setUniverse] = useState<Universe>("sectors");
   const [corrWindow, setCorrWindow] = useState<CorrWindow>(60);
   const [returnDays, setReturnDays] = useState(5);
   const [customText, setCustomText] = useState("");
   const [anchor, setAnchor] = useState<string | null>(null);
+  // Crisis-ρ: recompute correlations on the benchmark's worst days
+  // (diversification decay). Its own /api/rotation/crisis query.
+  const [crisis, setCrisis] = useState(false);
 
   const customSymbols = useMemo(
     () =>
@@ -114,6 +144,14 @@ export function RotationHeatmap() {
         anchor: anchor ?? undefined,
       }),
     enabled,
+    staleTime: 30 * 1000,
+    retry: false,
+  });
+
+  const crisisQuery = useQuery({
+    queryKey: ["rotation-crisis", universe, universe === "custom" ? customSymbols.join(",") : null],
+    queryFn: () => postCrisis({ universe, symbols: universe === "custom" ? customSymbols : undefined }),
+    enabled: crisis && enabled,
     staleTime: 30 * 1000,
     retry: false,
   });
@@ -165,7 +203,7 @@ export function RotationHeatmap() {
             className="num bg-surface border border-hairline px-1.5 py-1 text-ink flex-1 min-w-[160px]"
           />
         )}
-        {anchor && (
+        {anchor && !crisis && (
           <button
             type="button"
             data-testid="rotation-clear-anchor"
@@ -175,14 +213,27 @@ export function RotationHeatmap() {
             Clear {anchor} ✕
           </button>
         )}
+        <button
+          type="button"
+          data-testid="rotation-crisis-toggle"
+          onClick={() => setCrisis((c) => !c)}
+          className={`border px-2 py-1 ${
+            // Regime lens over MARKET data, not the book — steel accent, never amber.
+            crisis ? "border-market bg-elevated text-ink" : "border-hairline text-muted hover:text-ink"
+          }`}
+        >
+          {crisis ? "Crisis ρ ✓" : "Crisis ρ"}
+        </button>
       </div>
 
-      {isLoading && <p className="text-muted text-[11px]">Loading rotation…</p>}
-      {error && (
-        <p className="text-down text-[11px]">
-          Rotation unavailable: {(error as Error).message ?? String(error)}
-        </p>
-      )}
+      {!crisis && (
+        <>
+          {isLoading && <p className="text-muted text-[11px]">Loading rotation…</p>}
+          {error && (
+            <p className="text-down text-[11px]">
+              Rotation unavailable: {(error as Error).message ?? String(error)}
+            </p>
+          )}
 
       {data && data.symbols.length === 0 && (
         <p className="text-muted text-[11px]">
@@ -252,6 +303,50 @@ export function RotationHeatmap() {
                 ))}
               </div>
             </div>
+          )}
+        </>
+      )}
+        </>
+      )}
+
+      {crisis && (
+        <>
+          {crisisQuery.isLoading && (
+            <p className="text-muted text-[11px]">Loading crisis correlation…</p>
+          )}
+          {crisisQuery.error && (
+            <p className="text-down text-[11px]">
+              Crisis correlation unavailable:{" "}
+              {(crisisQuery.error as Error).message ?? String(crisisQuery.error)}
+            </p>
+          )}
+          {crisisQuery.data && crisisQuery.data.symbols.length === 0 && (
+            <p className="text-muted text-[11px]">No cached data for this universe yet.</p>
+          )}
+          {crisisQuery.data && crisisQuery.data.symbols.length > 0 && (
+            <>
+              <div
+                className="text-[10px] tracking-wider uppercase text-muted mb-1"
+                data-testid="crisis-header"
+              >
+                Crisis ρ — worst {crisisQuery.data.tail_n} {crisisQuery.data.benchmark} days
+              </div>
+              <CorrelationHeatmap
+                data={{ symbols: crisisQuery.data.symbols, matrix: crisisQuery.data.crisis_matrix }}
+              />
+              <div className="mt-2 text-[11px]" data-testid="crisis-decay">
+                <span className="text-muted">Diversification decay — mean pairwise ρ: </span>
+                <span className="num">
+                  {num2(crisisQuery.data.normal_mean_corr)} → {num2(crisisQuery.data.crisis_mean_corr)}
+                </span>
+                <span className="num text-muted">
+                  {" "}
+                  [CI {num2(crisisQuery.data.crisis_mean_corr_ci[0])},{" "}
+                  {num2(crisisQuery.data.crisis_mean_corr_ci[1])}]
+                </span>
+              </div>
+              <p className="text-muted text-[10px] mt-1">{crisisQuery.data.caveat}</p>
+            </>
           )}
         </>
       )}

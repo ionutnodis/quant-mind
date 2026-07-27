@@ -157,6 +157,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/leverage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Leverage
+         * @description Resilience construction: the book's historical max drawdown, the
+         *     drawdown-budget leverage headroom (assumption-bound scenario leverage, NOT a
+         *     safe-leverage guarantee — H4), and the diversification ratio (how orthogonal
+         *     the legs are). Thin composition over quantmind.hedge.core.
+         */
+        post: operations["leverage_api_leverage_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/macro": {
         parameters: {
             query?: never;
@@ -951,6 +974,46 @@ export interface components {
             p50: number | null;
             /** P95 */
             p95: number | null;
+        };
+        /** LeverageRequest */
+        LeverageRequest: {
+            /** Book */
+            book?: components["schemas"]["PositionIn"][] | null;
+            /** Book Ref */
+            book_ref?: string | null;
+            /**
+             * Drawdown Budget
+             * @default 0.25
+             */
+            drawdown_budget: number;
+            /**
+             * Years
+             * @default 5
+             */
+            years: number;
+        };
+        /** LeverageResponse */
+        LeverageResponse: {
+            /** As Of */
+            as_of: string | null;
+            /** Book Value */
+            book_value: number | null;
+            /** Diversification Ratio */
+            diversification_ratio: number | null;
+            /** Drawdown Budget */
+            drawdown_budget: number;
+            /** Gross */
+            gross: number | null;
+            /** Leverage Headroom */
+            leverage_headroom: number | null;
+            /** Max Drawdown */
+            max_drawdown: number | null;
+            /** N Obs */
+            n_obs: number;
+            /** Note */
+            note: string;
+            /** Symbols */
+            symbols: string[];
         };
         /** MacroResponse */
         MacroResponse: {
@@ -1826,6 +1889,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LabApplyResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    leverage_api_leverage_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LeverageRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LeverageResponse"];
                 };
             };
             /** @description Validation Error */
