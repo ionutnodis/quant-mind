@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     port: int = 4002  # IB Gateway paper-trading default; 4001 live
     client_id: int = 17  # fixed clientId — see Engineering Constraint 1
     benchmark: str = "SPY"
+    # Valuation base currency (FX-aware valuation, TODOS 2026-07-27): every
+    # market-value total/weight is expressed in THIS currency, converted at
+    # cached IDEALPRO midpoints. The real account is GBP-based — set
+    # QM_BASE_CURRENCY=GBP there; USD stays the neutral default.
+    base_currency: str = "USD"
     data_dir: Path = Path("data")
     fred_api_key: str = ""
     n_paths: int = 10_000  # Monte Carlo default, Engineering Constraint 10

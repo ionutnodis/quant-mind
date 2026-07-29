@@ -17,6 +17,18 @@ def test_env_override(monkeypatch):
     assert s.client_id == 23
 
 
+def test_base_currency_defaults_to_usd():
+    s = Settings(_env_file=None)
+    assert s.base_currency == "USD"
+
+
+def test_base_currency_env_override(monkeypatch):
+    # The real account is GBP-based (FX-aware valuation, TODOS 2026-07-27).
+    monkeypatch.setenv("QM_BASE_CURRENCY", "GBP")
+    s = Settings(_env_file=None)
+    assert s.base_currency == "GBP"
+
+
 def test_yfinance_symbol_list_defaults_empty():
     s = Settings(_env_file=None)
     assert s.yfinance_symbol_list() == []
