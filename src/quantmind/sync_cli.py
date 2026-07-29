@@ -16,10 +16,12 @@ from quantmind.broker.connection import ConnectionManager
 from quantmind.broker.ib_broker import IbBroker
 from quantmind.config import Settings
 from quantmind.datastore.store import BarStore
+from quantmind.fx import fx_pair
 from quantmind.sources.providers.yfinance_provider import YFinanceProvider
 from quantmind.sources.sync import (
     sync_book_bars,
     sync_daily_bars,
+    sync_fx_bars,
     sync_index_bars,
     sync_instrument_metadata,
     sync_yfinance_bars,
@@ -57,6 +59,33 @@ DEFAULT_UNIVERSE = [
 INDEX_UNIVERSE = {"VIX": "CBOE", "SPX": "CBOE"}
 
 
+def needed_fx_pairs(store: BarStore, base_currency: str) -> list[str]:
+    """IBKR pair names needed to value the STORED universe in
+    `base_currency` (FX-aware valuation, TODOS 2026-07-27): the distinct
+    metadata currencies of all cached instruments vs the base, deduped
+    through fx_pair's naming (GBP+USD book needs exactly GBPUSD whichever
+    of the two is base). Metadata without a currency can't vouch for one
+    and is skipped; a single-currency store needs no pairs at all."""
+    currencies = {
+        cur
+        for md in store.read_all_instrument_metadata().values()
+        if (cur := md.get("currency"))
+    }
+    return sorted({fx_pair(cur, base_currency)[0] for cur in currencies if cur != base_currency})
+
+
+async def sync_fx(store: BarStore, broker: IbBroker, base_currency: str) -> None:
+    """Shared FX step for BOTH sync modes (default universe and --book):
+    derive the needed pairs from stored metadata and sync their midpoint
+    closes. No non-base currencies -> honest no-op."""
+    pairs = needed_fx_pairs(store, base_currency)
+    if not pairs:
+        return
+    written = await sync_fx_bars(store, broker, pairs, years=5, pace_seconds=2.0)
+    for pair, last in written.items():
+        print(f"FX_{pair} series through {last} (fx, base {base_currency})")
+
+
 async def sync_book(store: BarStore, broker: IbBroker) -> None:
     """`--book` mode: sync the LIVE account's stock positions by their own
     conId (2026-07-27 incident: ticker-based resolution grabs the wrong
@@ -85,6 +114,9 @@ async def main(symbols: list[str]) -> None:
 
     if symbols == ["--book"]:
         await sync_book(store, broker)
+        # FX pairs derive from the freshly-written book metadata (a GBP-based
+        # account holding USD names needs GBPUSD before totals can be honest).
+        await sync_fx(store, broker, settings.base_currency)
         ib.disconnect()
         return
 
@@ -101,6 +133,9 @@ async def main(symbols: list[str]) -> None:
     extra_tags = {sym: {"region": region} for sym, region in WORLD_ETF_REGIONS.items()}
     ibkr_map = {**symbol_map, **index_map}
     await sync_instrument_metadata(store, broker, ibkr_map, extra_tags=extra_tags, pace_seconds=1.0)
+    # FX after metadata (currencies just landed), before disconnect — the
+    # same shared step --book mode runs.
+    await sync_fx(store, broker, settings.base_currency)
     ib.disconnect()
 
     yfinance_symbols = settings.yfinance_symbol_list()

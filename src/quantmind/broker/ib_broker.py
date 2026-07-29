@@ -171,6 +171,29 @@ class IbBroker(ReadOnlyBroker):
         df = df.set_index(pd.DatetimeIndex(pd.to_datetime(df["date"])))
         return df[["open", "high", "low", "close", "volume"]].astype(float)
 
+    async def get_forex_bars(self, pair: str, years: int = 5) -> pd.DataFrame:
+        """Daily FX bars for an IDEALPRO pair (FX-aware valuation, TODOS
+        2026-07-27). Forex has no trades feed, so whatToShow is MIDPOINT —
+        the same close-column DataFrame shape as get_daily_bars, consumed by
+        sources/sync.sync_fx_bars into an FX_{pair} named series."""
+        from ib_async import Forex, util
+
+        contract = Forex(pair)  # ib_async default exchange is IDEALPRO
+        bars = await self._ib.reqHistoricalDataAsync(
+            contract,
+            endDateTime="",
+            durationStr=f"{years} Y",
+            barSizeSetting="1 day",
+            whatToShow="MIDPOINT",
+            useRTH=True,
+            formatDate=1,
+        )
+        df = util.df(bars)
+        if df is None or df.empty:
+            raise LookupError(f"no historical forex bars returned for pair {pair!r}")
+        df = df.set_index(pd.DatetimeIndex(pd.to_datetime(df["date"])))
+        return df[["open", "high", "low", "close", "volume"]].astype(float)
+
     async def fetch_contract_details(self, con_id: int) -> dict:
         """Contract-details metadata cache (Task A2): longName/exchange/
         currency/secType/industry, keyed by conId (resolves by conId alone —

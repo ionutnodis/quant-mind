@@ -183,6 +183,45 @@ async def sync_instrument_metadata(
     return written
 
 
+async def sync_fx_bars(
+    store: BarStore,
+    broker,
+    pairs: list[str],
+    years: int = 5,
+    sleep=asyncio.sleep,
+    pace_seconds: float = 0.5,
+) -> dict[str, str]:
+    """FX midpoint CLOSES as named series `FX_{pair}` (FX-aware valuation,
+    TODOS 2026-07-27) — the same store mechanism FRED uses (write_series /
+    read_series), so the routers' FX loader reads rates exactly like any
+    other named series. Unlike sync_fred (which always refetches the full
+    keyless CSV), IBKR forex history is paced like bars: an existing series
+    fetches only a recent window and read-merge-writes it, new closes
+    winning on overlapping dates (merge_bars' convention).
+
+    Returns {pair: last_date} like sync_fred's {name: last_date}."""
+    written: dict[str, str] = {}
+    for pair in pairs:
+        name = f"FX_{pair}"
+        try:
+            existing = store.read_series(name)
+        except FileNotFoundError:
+            existing = None
+
+        fetch_years = years if existing is None else 1  # incremental window
+        bars = await broker.get_forex_bars(pair, years=fetch_years)
+        closes = bars["close"]
+
+        if existing is not None:
+            keep = existing.loc[~existing.index.isin(closes.index)]
+            closes = pd.concat([keep, closes]).sort_index()
+
+        store.write_series(name, closes)
+        written[pair] = str(closes.index[-1].date())
+        await sleep(pace_seconds)
+    return written
+
+
 def yfinance_pseudo_con_id(symbol: str) -> int:
     """Deterministic pseudo-conId for yfinance-sourced symbols. Always
     negative — real IBKR conIds are always positive — so this space can

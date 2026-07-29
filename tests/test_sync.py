@@ -274,6 +274,54 @@ async def test_sync_book_bars_skips_option_legs_and_is_incremental(tmp_path):
     assert broker.bar_calls[0] == (10672, 1)  # watermark exists -> incremental
 
 
+# --- FX-aware valuation: FX midpoint closes as named series (TODOS 2026-07-27) ---
+
+
+class FakeForexBroker:
+    """Fake for sync_fx_bars: serves daily midpoint bars keyed by pair name."""
+
+    def __init__(self, price0=1.25):
+        self.price0 = price0
+        self.calls = []  # (pair, years)
+
+    async def get_forex_bars(self, pair, years=5):
+        self.calls.append((pair, years))
+        return _bars("2026-01-05", 250, price0=self.price0)
+
+
+async def test_sync_fx_bars_writes_named_series_per_pair(tmp_path):
+    store, broker, sleeper = BarStore(tmp_path), FakeForexBroker(), FakeSleeper()
+    from quantmind.sources.sync import sync_fx_bars
+
+    written = await sync_fx_bars(
+        store, broker, ["GBPUSD", "EURUSD"], years=5, sleep=sleeper, pace_seconds=0.5
+    )
+    assert broker.calls == [("GBPUSD", 5), ("EURUSD", 5)]
+    # Closes land as NAMED SERIES (the same mechanism FRED uses) — readable
+    # by the routers' FX loader via store.read_series("FX_GBPUSD").
+    series = store.read_series("FX_GBPUSD")
+    assert len(series) == 250
+    assert series.iloc[0] == 1.25  # _bars: close = price0 + arange
+    assert "FX_GBPUSD" in store.list_series() and "FX_EURUSD" in store.list_series()
+    assert written == {"GBPUSD": "2026-12-18", "EURUSD": "2026-12-18"}
+    assert sleeper.delays == [0.5, 0.5]
+
+
+async def test_sync_fx_bars_incremental_fetches_short_duration_and_merges(tmp_path):
+    store, broker, sleeper = BarStore(tmp_path), FakeForexBroker(), FakeSleeper()
+    from quantmind.sources.sync import sync_fx_bars
+
+    await sync_fx_bars(store, broker, ["GBPUSD"], years=5, sleep=sleeper)
+    broker.calls.clear()
+    broker.price0 = 2.0  # refreshed quotes differ on the overlap
+    await sync_fx_bars(store, broker, ["GBPUSD"], years=5, sleep=sleeper)
+    assert broker.calls == [("GBPUSD", 1)]  # series exists -> incremental window
+    series = store.read_series("FX_GBPUSD")
+    assert len(series) == 250  # merge did not duplicate overlapping dates
+    assert series.iloc[-1] == 2.0 + 249  # new data wins on overlap
+    assert series.index.is_monotonic_increasing
+
+
 class FakeYFinanceProvider:
     name = "yfinance"
 

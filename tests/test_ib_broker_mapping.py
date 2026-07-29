@@ -192,6 +192,46 @@ async def test_get_index_bars_raises_lookup_error_on_empty_result():
         await broker.get_index_bars(13455763, "CBOE")
 
 
+# --- FX-aware valuation: forex midpoint bars (TODOS 2026-07-27) ---
+
+
+def _fx_bars(n=5):
+    idx = pd.bdate_range("2026-01-05", periods=n)
+    return [
+        # IB reports volume -1 for MIDPOINT bars — mirrored so util.df maps
+        # the real shape.
+        BarData(
+            date=d.strftime("%Y%m%d"),
+            open=1.25, high=1.26, low=1.24, close=1.25 + i * 0.001, volume=-1,
+        )
+        for i, d in enumerate(idx)
+    ]
+
+
+async def test_get_forex_bars_requests_idealpro_midpoint_for_the_pair():
+    from ib_async import Forex
+
+    ib = FakeIB(bars=_fx_bars())
+    broker = IbBroker(ib)
+    df = await broker.get_forex_bars("GBPUSD", years=2)
+    assert list(df.columns) == ["open", "high", "low", "close", "volume"]
+    assert len(df) == 5
+    contract, kwargs = ib.reqHistoricalData_calls[0]
+    assert isinstance(contract, Forex)
+    assert contract.symbol == "GBP" and contract.currency == "USD"
+    assert contract.exchange == "IDEALPRO"
+    assert kwargs["whatToShow"] == "MIDPOINT"  # forex has no trades feed
+    assert kwargs["durationStr"] == "2 Y"
+    assert kwargs["barSizeSetting"] == "1 day"
+
+
+async def test_get_forex_bars_raises_lookup_error_on_empty_result():
+    ib = FakeIB(bars=[])
+    broker = IbBroker(ib)
+    with pytest.raises(LookupError, match="GBPUSD"):
+        await broker.get_forex_bars("GBPUSD")
+
+
 async def test_fetch_contract_details_maps_expected_fields():
     ib = FakeIB(contract_details=[_vix_contract_details()])
     broker = IbBroker(ib)
