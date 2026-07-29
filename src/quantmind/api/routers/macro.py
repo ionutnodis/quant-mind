@@ -37,7 +37,14 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from quantmind.api.routers._shared import clean, downsample, iso, weighted_portfolio_returns
+from quantmind.api.routers._shared import (
+    clean,
+    downsample,
+    iso,
+    load_fx_converter,
+    symbol_currencies,
+    weighted_portfolio_returns,
+)
 from quantmind.api.routers.book import read_book_positions
 from quantmind.exposure.sensitivity import (
     Shock,
@@ -329,11 +336,16 @@ def _sensitivity_block(
     symbol_map: dict[str, int],
     book_ref: str,
     drivers: list[tuple[str, Shock, pd.Series]],
+    base_currency: str,
 ) -> SensitivityBlock:
     """The amber column's data: dollar response of the pinned book to each
-    driver's standard shock. Never a 500 past ref resolution: unpriceable
-    legs land in `excluded`, refused regressions land per-row in `note`."""
+    driver's standard shock, valued in `base_currency` (FX-aware valuation:
+    a leg's native close converts before gross/weights, so sensitivities
+    stop being FX-biased). Never a 500 past ref resolution: unpriceable
+    legs — including a known non-base currency with no cached FX rate —
+    land in `excluded`, refused regressions land per-row in `note`."""
     legs = read_book_positions(store, book_ref)  # unknown/corrupt ref -> structured 422
+    fx = load_fx_converter(store, base_currency)
 
     excluded: list[str] = []
     qtys: dict[str, float] = {}
@@ -343,11 +355,21 @@ def _sensitivity_block(
             continue
         qtys[p.symbol] = qtys.get(p.symbol, 0.0) + p.qty
 
+    currencies = symbol_currencies(store, list(qtys))
+    fx_rates: dict[str, float] = {}
     closes: dict[str, pd.Series] = {}
     for symbol in qtys:
         con_id = symbol_map.get(symbol)
         if con_id is None:
             excluded.append(f"{symbol} (not in symbol map)")
+            continue
+        currency = currencies.get(symbol)
+        if currency is None or currency == base_currency:
+            fx_rates[symbol] = 1.0  # no metadata can't vouch — value natively
+        elif currency in fx.rates:
+            fx_rates[symbol] = fx.rates[currency]
+        else:
+            excluded.append(f"{symbol} (no cached FX rate for {currency} — run sync)")
             continue
         try:
             bars, _ = store.read_bars(con_id=con_id, bar_size="1d")
@@ -383,7 +405,7 @@ def _sensitivity_block(
         return _empty_sensitivity(book_ref, excluded, "book legs share no overlapping cached history")
 
     last = prices.iloc[-1]
-    market_values = {s: qtys[s] * float(last[s]) for s in symbols}
+    market_values = {s: qtys[s] * float(last[s]) * fx_rates[s] for s in symbols}
     gross = sum(abs(v) for v in market_values.values())
     if gross == 0:
         return _empty_sensitivity(book_ref, excluded, "book has zero gross market value")
@@ -528,7 +550,9 @@ def macro(
         if vix_close is not None:
             drivers.append(("vol", vol_shock(VOL_SYMBOL), vix_close))
         try:
-            sensitivity_block = _sensitivity_block(store, symbol_map, book_ref, drivers)
+            sensitivity_block = _sensitivity_block(
+                store, symbol_map, book_ref, drivers, request.app.state.base_currency
+            )
         except HTTPException as e:
             # Batch-2 final review item 4: a well-formed but UNKNOWN ref
             # (stale bookmark, cleared pins) must not 422 the whole market

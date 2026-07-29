@@ -1023,3 +1023,67 @@ def test_hedge_option_note_distinguishes_no_overlap_from_no_payoff(tmp_path):
     assert note is not None
     assert "overlap" in note.lower()
     assert "stress node" not in note.lower()
+
+
+# --- FX-aware valuation: book gross/value in the base currency ---
+
+
+def _two_currency_client(tmp_path, with_rate=True):
+    """SPY (USD) + LSEQ (GBP-quoted, tracks SPY tick-for-tick so betas stay
+    hand-checkable) + IWM candidate; base USD, GBPUSD cached at 1.25."""
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    spy_bars = _bars(seed=1)
+    store.write_bars(con_id=1, bar_size="1d", bars=spy_bars, meta=meta)
+    store.write_bars(con_id=2, bar_size="1d", bars=spy_bars.copy(), meta=meta)  # LSEQ
+    store.write_bars(
+        con_id=3, bar_size="1d",
+        bars=_beta_correlated_bars(spy_bars["close"], beta=0.8, noise_scale=0.002, seed=3),
+        meta=meta,
+    )  # IWM
+    store.write_symbol_map({"SPY": 1, "LSEQ": 2, "IWM": 3})
+    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
+    store.write_instrument_metadata("LSEQ", {"con_id": 2, "currency": "GBP"})
+    store.write_instrument_metadata("IWM", {"con_id": 3, "currency": "USD"})
+    if with_rate:
+        idx = pd.bdate_range(end="2026-07-24", periods=2)
+        store.write_series("FX_GBPUSD", pd.Series([1.2, 1.25], index=idx))
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
+    client = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+    return client, spy_bars
+
+
+def test_hedge_two_currency_book_value_converts_to_base(tmp_path):
+    # Hand-computed gross: 10 sh SPY x last (USD) + 5 sh LSEQ x last x 1.25
+    # (GBP->USD at the cached GBPUSD close). Both legs share the same close
+    # series, so with rate r: book_value = last x (10 + 5 x 1.25).
+    client, spy_bars = _two_currency_client(tmp_path)
+    last = float(spy_bars["close"].iloc[-1])
+    r = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "SPY", "qty": 10}, {"symbol": "LSEQ", "qty": 5}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["IWM"],
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    expected = last * (10.0 + 5.0 * 1.25)
+    assert body["book_value"] == pytest.approx(expected, rel=1e-9)
+    assert any("GBPUSD" in n and "valued in USD" in n for n in body["notes"])
+
+
+def test_hedge_missing_fx_rate_for_book_leg_is_named_422(tmp_path):
+    client, _ = _two_currency_client(tmp_path, with_rate=False)
+    r = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "SPY", "qty": 10}, {"symbol": "LSEQ", "qty": 5}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["IWM"],
+        },
+    )
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert "GBP" in detail and "LSEQ" in detail and "sync" in detail

@@ -100,8 +100,12 @@ from quantmind.api.routers._shared import (
     _effective_multiplier,
     _validate_option_legs,
     clean,
+    fx_conversion_note,
+    fx_rates_for,
     iso,
+    load_fx_converter,
     read_close_series,
+    symbol_currencies,
     weighted_portfolio_returns,
 )
 from quantmind.api.routers.book import read_book_positions
@@ -256,15 +260,20 @@ class HedgeResponse(BaseModel):
 
 
 def _portfolio_returns(
-    series_map: dict[str, pd.Series], qtys: dict[str, float], symbols: list[str]
+    series_map: dict[str, pd.Series], qtys: dict[str, float], symbols: list[str],
+    fx_rates: dict[str, float] | None = None,
 ) -> tuple[pd.Series | None, dict[str, float], float, float, pd.DataFrame]:
     """Price-level inner join across `symbols`, then pct_change, weighted by
     |market value|-signed weight (mirrors routers/whatif.py's alignment).
-    Returns (portfolio_returns, weights, book_value, gross, prices); `gross`
-    is the denominator the caller must reuse for any per-book-dollar overlay
+    `fx_rates` (FX-aware valuation) maps each symbol's native close to the
+    base currency BEFORE the market values that drive weights/gross —
+    default identity preserves the single-currency behavior. Returns
+    (portfolio_returns, weights, book_value, gross, prices); `gross` is the
+    denominator the caller must reuse for any per-book-dollar overlay
     computation (see module docstring's normalization convention)."""
+    fx_rates = fx_rates or {}
     last_close = {s: float(series_map[s].iloc[-1]) for s in symbols}
-    market_values = {s: qtys[s] * last_close[s] for s in symbols}
+    market_values = {s: qtys[s] * last_close[s] * fx_rates.get(s, 1.0) for s in symbols}
     gross = sum(abs(v) for v in market_values.values())
     weights = {s: (market_values[s] / gross if gross else 0.0) for s in symbols}
     book_value = sum(market_values.values())
@@ -282,6 +291,8 @@ def _portfolio_returns(
 def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     store = request.app.state.store
     benchmark = request.app.state.benchmark
+    base_currency = request.app.state.base_currency
+    fx = load_fx_converter(store, base_currency)
     symbol_map = store.read_symbol_map()
 
     # book_ref resolves to the same PositionIn shape as an inline book
@@ -335,7 +346,14 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
             ),
         )
 
-    book_returns, _weights, book_value, book_gross, book_prices = _portfolio_returns(series_map, qtys, unique_book)
+    # FX-aware valuation: every book leg's close converts to the base
+    # currency before weights/gross/book_value; a known non-base currency
+    # with no cached rate is a named 422 inside fx_rates_for.
+    book_fx_rates = fx_rates_for(store, unique_book, fx)
+
+    book_returns, _weights, book_value, book_gross, book_prices = _portfolio_returns(
+        series_map, qtys, unique_book, fx_rates=book_fx_rates
+    )
     if book_gross <= 0:
         raise HTTPException(422, detail="portfolio has zero gross market value")
     if book_returns is None:
@@ -379,12 +397,26 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
             detail="no usable candidates: candidate universe is empty after excluding book symbols",
         )
 
+    candidate_currencies = symbol_currencies(store, candidate_pool)
+
     results: list[HedgeCandidateOut] = []
     for csym in candidate_pool:
         try:
             cand_prices = read_close_series(store, symbol_map[csym], csym, req.years)
         except HTTPException:
             continue  # mapped but no cached bars — a data gap, not a client error; skip it
+
+        # FX: a candidate's sizing price must be in the base currency too. A
+        # known non-base currency with no cached rate is the same kind of
+        # data gap as missing bars — skip, never a silently native notional.
+        cand_cur = candidate_currencies.get(csym)
+        if cand_cur is None or cand_cur == base_currency:
+            cand_rate = 1.0
+        else:
+            rate = fx.rates.get(cand_cur)
+            if rate is None:
+                continue
+            cand_rate = rate
 
         cand_returns = cand_prices.pct_change().dropna()
 
@@ -416,7 +448,9 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         cand_n_obs = None
 
         if not unusable and book_beta is not None:
-            price_cand_last = float(cand_prices.iloc[-1])
+            # Sizing runs entirely in the BASE currency: book_value is base,
+            # so the per-share price must be too (native close x fx rate).
+            price_cand_last = float(cand_prices.iloc[-1]) * cand_rate
             if math.isfinite(price_cand_last) and price_cand_last != 0:
                 raw_size = (book_beta - req.objective.value) * book_value / (beta_cand * price_cand_last)
                 hedge_qty = -raw_size
@@ -545,9 +579,12 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     results.sort(key=lambda r: _rank_key(r.protection_per_cost, r.protection))
 
     # Option hedge candidates on the dominant underlier (largest |mv| book
-    # leg) from the CACHED chain — structured note on any degrade.
+    # leg, compared in the BASE currency) from the CACHED chain — structured
+    # note on any degrade. mv_dominant stays NATIVE: structure sizing matches
+    # native per-share payoffs against the native sleeve value; the overlay's
+    # dollar P&L is converted to base via fx_rate before joining book_gross.
     last_close = {s: float(series_map[s].iloc[-1]) for s in unique_book}
-    dominant = max(unique_book, key=lambda s: abs(qtys[s] * last_close[s]))
+    dominant = max(unique_book, key=lambda s: abs(qtys[s] * last_close[s] * book_fx_rates[s]))
     option_hedges, option_note, option_chain_as_of = _build_option_hedges(
         store=store,
         dominant=dominant,
@@ -556,6 +593,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         book_returns=book_returns,
         bench_returns=bench_returns,
         book_gross=book_gross,
+        fx_rate=book_fx_rates[dominant],
     )
     option_hedges.sort(key=lambda o: _rank_key(o.protection_per_cost, o.protection))
 
@@ -596,11 +634,18 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
             f"days in the window, with vs without each hedge"
         ),
         as_of=iso(book_prices.index[-1]) if len(book_prices) else None,
-        notes=(
-            [DELTA_ONE_OPTION_NOTE]
-            if any(p.right is not None for p in book_positions)
-            else []
-        ),
+        notes=[
+            note
+            for note in (
+                DELTA_ONE_OPTION_NOTE
+                if any(p.right is not None for p in book_positions)
+                else None,
+                # FX label (FX-aware valuation): which legs were converted,
+                # at which cached pair, as of when.
+                fx_conversion_note(fx, list(symbol_currencies(store, unique_book).values())),
+            )
+            if note is not None
+        ],
     )
 
 
@@ -635,6 +680,7 @@ def _build_option_hedges(
     book_returns: pd.Series,
     bench_returns: pd.Series,
     book_gross: float,
+    fx_rate: float = 1.0,
 ) -> tuple[list[OptionHedgeOut], str | None, str | None]:
     """(option_hedges, option_note, chain_as_of): protective structures on
     the dominant underlier from the cached chain. Every degrade path returns
@@ -691,7 +737,7 @@ def _build_option_hedges(
 
     out: list[OptionHedgeOut] = []
     for st in structures:
-        entry = _price_structure(st, mv_dominant, spot, aligned, bench_returns, book_gross)
+        entry = _price_structure(st, mv_dominant, spot, aligned, bench_returns, book_gross, fx_rate)
         if entry is None:
             notes.append(f"{st.kind}: no payoff at the {_OPTION_SHOCK:+.0%} stress node — unsized")
             continue
@@ -714,18 +760,22 @@ def _price_structure(
     aligned: pd.DataFrame,
     bench_returns: pd.Series,
     book_gross: float,
+    fx_rate: float = 1.0,
 ) -> OptionHedgeOut | None:
     """None means exactly one thing: the sized structure has no payoff at the
     stress node (the caller's note says so). The empty-overlap case is
-    handled — and named — by the caller before this runs (fix round 1)."""
+    handled — and named — by the caller before this runs (fix round 1).
+    `fx_rate` (FX-aware valuation) converts the structure's NATIVE dollar
+    P&L/premium into the base currency `book_gross` is stated in; sizing
+    itself stays native (native payoff vs native sleeve value)."""
     contracts = size_contracts(st, mv_underlier=mv_dominant, spot=spot, shock=_OPTION_SHOCK)
     if contracts is None:
         return None
 
     pnl = structure_daily_pnl(st, contracts=contracts, spot=spot, underlier_returns=aligned["dom"])
-    # SAME overlay convention as the linear candidates: dollar P&L divided by
-    # the ORIGINAL book's gross, added to per-original-book-dollar returns.
-    hedged_returns = aligned["book"] + pnl / book_gross
+    # SAME overlay convention as the linear candidates: dollar P&L (converted
+    # to base) divided by the ORIGINAL book's base-currency gross.
+    hedged_returns = aligned["book"] + pnl * fx_rate / book_gross
 
     try:
         es_after = clean(historical_es(hedged_returns, confidence=0.975))
@@ -745,7 +795,9 @@ def _price_structure(
     )
 
     cost_annual = clean(
-        premium_annual_drag(st.net_premium_per_contract, contracts, book_gross, st.expiry_years)
+        premium_annual_drag(
+            st.net_premium_per_contract * fx_rate, contracts, book_gross, st.expiry_years
+        )
     )
     ppc = protection_per_cost(protection, cost_annual)
 

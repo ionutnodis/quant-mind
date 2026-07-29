@@ -25,6 +25,7 @@ def build():
         store=BarStore(settings.data_dir),
         benchmark=settings.benchmark,
         api_token=getattr(settings, "api_token", ""),
+        base_currency=settings.base_currency,
     )
 
     @asynccontextmanager

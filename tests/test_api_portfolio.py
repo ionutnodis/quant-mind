@@ -65,6 +65,11 @@ def store(tmp_path) -> BarStore:
     s.write_bars(con_id=2, bar_size="1d", bars=_flat_bars(5.0), meta=meta)
     s.write_bars(con_id=3, bar_size="1d", bars=_flat_bars(380.0), meta=meta)
     s.write_symbol_map({"SPY": 1, "OPT_XYZ": 2, "QQQ": 3})
+    # A real synced store always carries currency metadata (sync writes
+    # contract details) — FX-aware valuation keys off it.
+    s.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
+    s.write_instrument_metadata("OPT_XYZ", {"con_id": 2, "currency": "USD"})
+    s.write_instrument_metadata("QQQ", {"con_id": 3, "currency": "USD"})
     return s
 
 
@@ -79,11 +84,16 @@ def rich_store(tmp_path) -> BarStore:
     s.write_bars(con_id=1, bar_size="1d", bars=_random_bars(seed=1, start=450.0), meta=meta)
     s.write_bars(con_id=2, bar_size="1d", bars=_random_bars(seed=2, start=380.0), meta=meta)
     s.write_symbol_map({"SPY": 1, "QQQ": 2})
+    s.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
+    s.write_instrument_metadata("QQQ", {"con_id": 2, "currency": "USD"})
     return s
 
 
-def _client(store: BarStore, broker=None) -> TestClient:
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken", broker=broker)
+def _client(store: BarStore, broker=None, base_currency: str = "USD") -> TestClient:
+    app = create_app(
+        store=store, benchmark="SPY", api_token="testtoken", broker=broker,
+        base_currency=base_currency,
+    )
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 
@@ -101,13 +111,21 @@ def _expiry_str(days_out: int) -> str:
     return (date.today() + timedelta(days=days_out)).strftime("%Y%m%d")
 
 
-def test_totals_disclose_mixed_position_currencies(store):
-    # Live-account incident 2026-07-27: a GBP-based book holding LSE UCITS
-    # (GBP bars) alongside US names (USD bars) — totals silently summed
-    # unconverted native amounts. Until FX-aware valuation lands, mixed
-    # currencies MUST be disclosed on the response, never silent.
-    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
-    store.write_instrument_metadata("QQQ", {"con_id": 3, "currency": "GBP"})
+def _fx_series(values, end="2026-07-24"):
+    idx = pd.bdate_range(end=end, periods=len(values))
+    return pd.Series([float(v) for v in values], index=idx)
+
+
+def test_mixed_currency_book_converts_to_base_hand_computed(store):
+    # FX-aware valuation (was: test_totals_disclose_mixed_position_currencies
+    # — the disclosure stopgap; conversion replaces disclosure, 2026-07-27
+    # TODOS entry). Base GBP, GBPUSD cached at 1.25:
+    #   SPY  (USD): 10 sh x $100  = $1000 -> £800 exact (1000 x 1/1.25)
+    #   QQQ  (GBP):  5 sh x £380  = £1900 (native base, identity)
+    #   totals £2700; weights 800/2700 and 1900/2700
+    #   SPY unrealized (avg_cost $90): (100-90) x 10 = $100 -> £80 exact
+    store.write_instrument_metadata("QQQ", {"currency": "GBP"})
+    store.write_series("FX_GBPUSD", _fx_series([1.2, 1.25]))
     portfolio = Portfolio(
         positions=(
             Position(con_id=1, symbol="SPY", qty=10),
@@ -115,17 +133,63 @@ def test_totals_disclose_mixed_position_currencies(store):
         ),
         as_of="2026-07-27",
     )
-    r = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+    broker = FakeBroker(portfolio, avg_costs={1: 90.0})
+    r = _client(store, broker=broker, base_currency="GBP").get("/api/portfolio")
     assert r.status_code == 200
-    note = r.json()["totals_note"]
+    body = r.json()
+    assert body["base_currency"] == "GBP"
+
+    by_symbol = {p["symbol"]: p for p in body["positions"]}
+    spy, qqq = by_symbol["SPY"], by_symbol["QQQ"]
+    assert spy["currency"] == "USD"
+    assert qqq["currency"] == "GBP"
+    assert spy["last_close"] == pytest.approx(100.0)  # native quote price
+    assert spy["market_value"] == pytest.approx(800.0)  # converted to base
+    assert spy["unrealized_pnl"] == pytest.approx(80.0)
+    assert qqq["market_value"] == pytest.approx(1900.0)
+    assert body["totals"]["market_value"] == pytest.approx(2700.0)
+    assert spy["weight"] == pytest.approx(800.0 / 2700.0)
+    assert qqq["weight"] == pytest.approx(1900.0 / 2700.0)
+
+    note = body["totals_note"]
     assert note is not None
-    assert "GBP" in note and "USD" in note
-    assert "unconverted" in note
+    assert "valued in GBP" in note
+    assert "GBPUSD" in note
+    assert "2026-07-24" in note  # the cached rate's as_of
 
 
-def test_totals_note_is_null_for_a_single_currency_book(store):
-    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
-    store.write_instrument_metadata("QQQ", {"con_id": 3, "currency": "USD"})
+def test_missing_fx_rate_excludes_position_and_names_it(store):
+    # Base GBP but NO cached GBPUSD series: the USD leg cannot be stated in
+    # GBP — excluded from totals with a named note, never silently summed
+    # (the exact 2026-07-27 incident this pass closes).
+    store.write_instrument_metadata("QQQ", {"currency": "GBP"})
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=1, symbol="SPY", qty=10),
+            Position(con_id=3, symbol="QQQ", qty=5),
+        ),
+        as_of="2026-07-27",
+    )
+    r = _client(store, broker=FakeBroker(portfolio), base_currency="GBP").get("/api/portfolio")
+    assert r.status_code == 200
+    body = r.json()
+
+    by_symbol = {p["symbol"]: p for p in body["positions"]}
+    assert by_symbol["SPY"]["market_value"] is None  # no honest GBP value exists
+    assert by_symbol["SPY"]["weight"] is None
+    assert by_symbol["SPY"]["last_close"] == pytest.approx(100.0)  # native price kept
+    assert by_symbol["QQQ"]["market_value"] == pytest.approx(1900.0)
+    assert body["totals"]["market_value"] == pytest.approx(1900.0)
+
+    note = body["totals_note"]
+    assert note is not None
+    assert "no cached FX rate for USD" in note
+    assert "excluded from totals" in note
+    assert "run sync" in note
+
+
+def test_base_currency_book_has_no_totals_note(store):
+    # All-USD book valued in USD: identity conversion, nothing to disclose.
     portfolio = Portfolio(
         positions=(
             Position(con_id=1, symbol="SPY", qty=10),
@@ -135,7 +199,34 @@ def test_totals_note_is_null_for_a_single_currency_book(store):
     )
     r = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
     assert r.status_code == 200
-    assert r.json()["totals_note"] is None
+    body = r.json()
+    assert body["totals_note"] is None
+    assert body["base_currency"] == "USD"
+    assert body["totals"]["market_value"] == pytest.approx(10 * 100.0 + 5 * 380.0)
+
+
+def test_unknown_currency_position_is_excluded_and_named(store):
+    # A position with cached bars but NO currency metadata: its native value
+    # is computable but can't be stated in the base — same honesty as an
+    # unpriceable position (exclude + name), never assume it's base.
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=1, symbol="SPY", qty=10),
+            Position(con_id=2, symbol="MYSTERY", qty=5),  # con_id 2 has bars @5.0, no metadata
+        ),
+        as_of="2026-07-27",
+    )
+    r = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+    assert r.status_code == 200
+    body = r.json()
+    by_symbol = {p["symbol"]: p for p in body["positions"]}
+    assert by_symbol["MYSTERY"]["currency"] is None
+    assert by_symbol["MYSTERY"]["market_value"] is None
+    assert by_symbol["MYSTERY"]["weight"] is None
+    assert body["totals"]["market_value"] == pytest.approx(1000.0)  # SPY only
+    note = body["totals_note"]
+    assert note is not None
+    assert "MYSTERY" in note and "currency unknown" in note
 
 
 def test_portfolio_no_broker_is_structured_empty(store):

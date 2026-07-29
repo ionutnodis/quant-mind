@@ -3758,6 +3758,17 @@
             "title": "Con Id",
             "type": "integer"
           },
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
           "last_close": {
             "anyOf": [
               {

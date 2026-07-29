@@ -262,10 +262,18 @@ def _option_hash_extra(portfolio: Portfolio, legs: list[PositionIn] | None) -> s
 
 
 def _pin_and_respond(
-    store, portfolio: Portfolio, valuation_ts: str, legs: list[PositionIn] | None = None
+    store,
+    portfolio: Portfolio,
+    valuation_ts: str,
+    legs: list[PositionIn] | None = None,
+    base_currency: str = "USD",
 ) -> BookSnapshotOut:
     extra = _option_hash_extra(portfolio, legs)
-    snapshot = BookSnapshot.create(portfolio, valuation_ts=valuation_ts, base_currency="USD", extra=extra)
+    # The REAL configured base currency (FX-aware valuation) — a GBP-based
+    # account's snapshots pin GBP, never a hardcoded "USD".
+    snapshot = BookSnapshot.create(
+        portfolio, valuation_ts=valuation_ts, base_currency=base_currency, extra=extra
+    )
     write_book(store, snapshot, legs)
     return _snapshot_out(read_book(store, snapshot.snapshot_id))
 
@@ -273,6 +281,7 @@ def _pin_and_respond(
 @router.post("/book/pin", response_model=BookSnapshotOut)
 async def pin_book(request: Request, req: BookPinRequest) -> BookSnapshotOut:
     store = request.app.state.store
+    base_currency = request.app.state.base_currency
     valuation_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     if req.positions is not None:
@@ -283,18 +292,22 @@ async def pin_book(request: Request, req: BookPinRequest) -> BookSnapshotOut:
         # re-validating at consumption time.
         _validate_option_legs(req.positions, "pinned book")
         portfolio = _portfolio_from_positions(store, req.positions, valuation_ts)
-        return _pin_and_respond(store, portfolio, valuation_ts, legs=req.positions)
+        return _pin_and_respond(
+            store, portfolio, valuation_ts, legs=req.positions, base_currency=base_currency
+        )
 
     portfolio = await _live_portfolio(request, valuation_ts)
-    return _pin_and_respond(store, portfolio, valuation_ts)
+    return _pin_and_respond(store, portfolio, valuation_ts, base_currency=base_currency)
 
 
 @router.get("/book/current", response_model=BookSnapshotOut)
 async def get_current_book(request: Request) -> BookSnapshotOut:
     store = request.app.state.store
+    base_currency = request.app.state.base_currency
     valuation_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     portfolio = await _live_portfolio(request, valuation_ts)
-    return _pin_and_respond(store, portfolio, valuation_ts)  # auto-pin (wave-3 plan)
+    # auto-pin (wave-3 plan)
+    return _pin_and_respond(store, portfolio, valuation_ts, base_currency=base_currency)
 
 
 @router.get("/book/{snapshot_id}", response_model=BookSnapshotOut)

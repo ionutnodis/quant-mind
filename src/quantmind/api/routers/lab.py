@@ -47,8 +47,12 @@ from quantmind.api.routers._shared import (
     _validate_option_legs,
     clean,
     downsample,
+    fx_conversion_note,
+    fx_rates_for,
     iso,
+    load_fx_converter,
     read_close_series,
+    symbol_currencies,
     weighted_portfolio_returns,
 )
 from quantmind.api.routers.book import read_book_positions
@@ -266,9 +270,15 @@ def book_regression(request: Request, req: BookRegressionRequest) -> BookRegress
 
     # Same |MV|-signed-weight construction whatif/hedge use, then scaled by
     # the book's gross into DOLLAR P&L (constant-notional approximation) so
-    # the regression beta lands directly in usd_per_bp.
+    # the regression beta lands directly in usd_per_bp. FX-aware valuation:
+    # each leg's close converts to the base currency first, so the gross —
+    # and therefore the dollar betas — stop being FX-biased; a known
+    # non-base currency with no cached rate is a named 422.
+    base_currency = request.app.state.base_currency
+    fx = load_fx_converter(store, base_currency)
+    book_fx_rates = fx_rates_for(store, symbols, fx)
     last_close = {s: float(series_map[s].iloc[-1]) for s in symbols}
-    market_values = {s: qtys[s] * last_close[s] for s in symbols}
+    market_values = {s: qtys[s] * last_close[s] * book_fx_rates[s] for s in symbols}
     gross = sum(abs(v) for v in market_values.values())
     if gross <= 0:
         raise HTTPException(422, detail="portfolio has zero gross market value")
@@ -316,11 +326,16 @@ def book_regression(request: Request, req: BookRegressionRequest) -> BookRegress
         hac_lags=result.hac_lags,
         book_gross=clean(gross),
         as_of=iso(result.residuals.index[-1]) if len(result.residuals) else None,
-        notes=(
-            [DELTA_ONE_OPTION_NOTE]
-            if any(p.right is not None for p in positions)
-            else []
-        ),
+        notes=[
+            note
+            for note in (
+                DELTA_ONE_OPTION_NOTE
+                if any(p.right is not None for p in positions)
+                else None,
+                fx_conversion_note(fx, list(symbol_currencies(store, symbols).values())),
+            )
+            if note is not None
+        ],
     )
 
 

@@ -456,3 +456,57 @@ def test_apply_seeded_reproducible_across_calls(client):
     assert a["mean"] == b["mean"]
     assert a["es"] == b["es"]
     assert a["histogram"] == b["histogram"]
+
+
+# --- FX-aware valuation: book-regression gross in the base currency ---
+
+
+def test_book_regression_two_currency_gross_converts_to_base(tmp_path):
+    # SPY (USD) + LSEQ (GBP tick-for-tick clone); base USD, GBPUSD 1.25.
+    # Hand-computed gross: last x (10 + 5 x 1.25) = 16.25 x last.
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    spy = _bars(seed=1)
+    store.write_bars(con_id=1, bar_size="1d", bars=spy, meta=meta)
+    store.write_bars(con_id=2, bar_size="1d", bars=spy.copy(), meta=meta)
+    store.write_symbol_map({"SPY": 1, "LSEQ": 2})
+    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
+    store.write_instrument_metadata("LSEQ", {"con_id": 2, "currency": "GBP"})
+    store.write_series("FX_GBPUSD", pd.Series([1.25], index=pd.bdate_range(end="2026-07-24", periods=1)))
+    store.write_series("US10Y", _us10y_from(spy["close"]))
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
+    client = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+
+    r = client.post(
+        "/api/lab/book-regression",
+        json={
+            "book": [{"symbol": "SPY", "qty": 10}, {"symbol": "LSEQ", "qty": 5}],
+            "factor_series": "US10Y",
+            "years": 1,
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    last = float(spy["close"].iloc[-1])
+    assert body["book_gross"] == pytest.approx(last * 16.25, rel=1e-9)
+    assert any("GBPUSD" in n and "valued in USD" in n for n in body["notes"])
+
+
+def test_book_regression_missing_fx_rate_is_named_422(tmp_path):
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    spy = _bars(seed=1)
+    store.write_bars(con_id=1, bar_size="1d", bars=spy, meta=meta)
+    store.write_symbol_map({"LSEQ": 1})
+    store.write_instrument_metadata("LSEQ", {"con_id": 1, "currency": "GBP"})
+    store.write_series("US10Y", _us10y_from(spy["close"]))
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
+    client = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+
+    r = client.post(
+        "/api/lab/book-regression",
+        json={"book": [{"symbol": "LSEQ", "qty": 5}], "factor_series": "US10Y", "years": 1},
+    )
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert "GBP" in detail and "sync" in detail

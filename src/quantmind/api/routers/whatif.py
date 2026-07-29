@@ -48,8 +48,12 @@ from quantmind.api.routers._shared import (
     _effective_multiplier,
     _validate_option_legs,
     clean,
+    fx_conversion_note,
+    fx_rates_for,
     iso,
+    load_fx_converter,
     read_close_series,
+    symbol_currencies,
     weighted_portfolio_returns,
 )
 from quantmind.api.routers.book import read_book, read_book_positions
@@ -213,10 +217,21 @@ class WhatIfResponse(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
-def _book_exposures(positions: list[PositionIn], last_close: dict[str, float | None]) -> tuple[list[float], list[float]]:
+def _book_exposures(
+    positions: list[PositionIn],
+    last_close: dict[str, float | None],
+    fx_rates: dict[str, float] | None = None,
+) -> tuple[list[float], list[float]]:
     """(market_values, weights) for a book: delta-one exposure per leg
-    (qty x effective multiplier x underlier last close), gross-normalized."""
-    market_values = [p.qty * _effective_multiplier(p) * last_close[p.symbol] for p in positions]
+    (qty x effective multiplier x underlier last close x FX rate to the base
+    currency), gross-normalized. `fx_rates` defaults to identity — the
+    single-currency behavior; with it, weights stop being FX-biased
+    (FX-aware valuation, TODOS 2026-07-27)."""
+    fx_rates = fx_rates or {}
+    market_values = [
+        p.qty * _effective_multiplier(p) * last_close[p.symbol] * fx_rates.get(p.symbol, 1.0)
+        for p in positions
+    ]
     gross = sum(abs(mv) for mv in market_values)
     if gross <= 0:
         raise HTTPException(422, detail="portfolio has zero gross market value")
@@ -322,6 +337,8 @@ def _trade_ticket(
 def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
     store = request.app.state.store
     benchmark = request.app.state.benchmark
+    base_currency = request.app.state.base_currency
+    fx = load_fx_converter(store, base_currency)
     symbol_map = store.read_symbol_map()
 
     # book_ref resolves to the same PositionIn shape as an inline book
@@ -386,7 +403,11 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
             ),
         )
 
-    market_values, weight_values = _book_exposures(positions, last_close)
+    # FX-aware valuation: both books' market values/weights are stated in
+    # the base currency (per-share `price`/ticket prices stay native); a
+    # known non-base currency with no cached rate is a named 422.
+    book_fx_rates = fx_rates_for(store, unique_needed, fx)
+    market_values, weight_values = _book_exposures(positions, last_close, book_fx_rates)
 
     prices = pd.concat(series_map, axis=1).dropna()
     if len(prices) < _BETA_WINDOW + 2:
@@ -445,7 +466,7 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
     if base_positions is not None:
         ticket_out = _trade_ticket(base_positions, positions, last_close)
         if base_positions:
-            _, base_weight_values = _book_exposures(base_positions, last_close)
+            _, base_weight_values = _book_exposures(base_positions, last_close, book_fx_rates)
             base_beta, base_es, base_vol, base_terminal = _book_risk(
                 base_positions, np.array(base_weight_values), returns, bench_returns, req.mc, shared_seed
             )
@@ -495,6 +516,11 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
     notes: list[str] = []
     if any(p.right is not None for p in [*positions, *(base_positions or [])]):
         notes.append(_OPTION_NOTE)
+    conversion_note = fx_conversion_note(
+        fx, list(symbol_currencies(store, unique_needed).values())
+    )
+    if conversion_note:
+        notes.append(conversion_note)
 
     weights_out = [
         WeightOut(

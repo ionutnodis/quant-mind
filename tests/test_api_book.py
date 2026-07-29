@@ -443,3 +443,18 @@ def test_broker_sourced_option_leg_without_strike_is_422_on_book_ref_resolution(
         read_book_positions(store, snapshot_id)
     assert exc_info.value.status_code == 422
     assert "strike/expiry" in exc_info.value.detail
+
+
+# --- FX-aware valuation: snapshots pin the REAL base currency ---
+
+
+def test_pin_book_carries_configured_base_currency(store):
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="GBP")
+    client = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+    r = client.post("/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 10}]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["base_currency"] == "GBP"
+    # the persisted snapshot round-trips the same base currency
+    got = client.get(f"/api/book/{body['snapshot_id']}")
+    assert got.json()["base_currency"] == "GBP"

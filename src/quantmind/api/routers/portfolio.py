@@ -41,7 +41,15 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from quantmind.api.routers._shared import clean, downsample, iso, weighted_portfolio_returns
+from quantmind.api.routers._shared import (
+    clean,
+    downsample,
+    fx_conversion_note,
+    iso,
+    load_fx_converter,
+    symbol_currencies,
+    weighted_portfolio_returns,
+)
 from quantmind.api.routers.book import read_book_positions
 from quantmind.core.snapshot import BookSnapshot
 from quantmind.datastore.options_store import OptionsStore
@@ -76,6 +84,12 @@ class PositionOut(BaseModel):
     qty: float
     sec_type: str
     multiplier: float
+    # Native QUOTE currency from cached instrument metadata (FX-aware
+    # valuation, 2026-07-27): last_close/avg_cost stay native; market_value/
+    # unrealized_pnl are converted to the response's base_currency. Null =
+    # unknown (no metadata) — such a position is excluded from totals and
+    # named in totals_note, never assumed to be base.
+    currency: str | None = None
     last_close: float | None
     market_value: float | None
     weight: float | None
@@ -195,10 +209,10 @@ class PortfolioResponse(BaseModel):
     base_currency: str
     positions: list[PositionOut]
     totals: Totals
-    # Honest-disclosure note on totals (2026-07-27 live-account incident):
-    # a multi-currency book (LSE UCITS in GBP + US names in USD) sums
-    # UNCONVERTED native amounts until FX-aware valuation lands — that must
-    # be said on the wire, never silently rendered as one dollar figure.
+    # Honest FX label on totals (2026-07-27 live-account incident, closed by
+    # FX-aware valuation): names what was converted (cached pair + as-of) and
+    # what was excluded (missing rate / unknown currency) — a multi-currency
+    # book can never again silently sum native amounts into one figure.
     totals_note: str | None
     account: AccountOut | None
     # DESIGN.md convention: "NO MATERIAL LINK is stated honestly when
@@ -499,6 +513,8 @@ async def get_portfolio(
     store = request.app.state.store
     broker = request.app.state.broker
     benchmark = request.app.state.benchmark
+    base_currency = request.app.state.base_currency
+    fx = load_fx_converter(store, base_currency)
 
     valuation_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -522,7 +538,7 @@ async def get_portfolio(
         # book_ref path.
         option_legs = [None] * len(portfolio.positions)
 
-    snapshot = BookSnapshot.create(portfolio, valuation_ts=valuation_ts, base_currency="USD")
+    snapshot = BookSnapshot.create(portfolio, valuation_ts=valuation_ts, base_currency=base_currency)
 
     # --- ledger essentials: price, cost basis, unrealized P&L ---
     avg_costs: dict[int, float] = {}
@@ -538,9 +554,18 @@ async def get_portfolio(
     # both positions at the LAST leg's market value and weight 1.0 each.
     # `close_series` alone stays con_id-keyed: the price SERIES really is
     # per-conId (every leg on one underlier reads the same bars).
+    # FX-aware valuation (2026-07-27): bar closes are stored in each
+    # instrument's NATIVE quote currency; market_value/unrealized_pnl are
+    # converted to the base currency before totals/weights/attribution. A
+    # position whose currency is unknown (no metadata) or whose rate isn't
+    # cached has NO honest base-currency value — excluded from totals and
+    # named in totals_note, the same honesty as an unpriceable position.
+    position_currencies = symbol_currencies(store, [p.symbol for p in portfolio.positions])
     close_series: dict[int, pd.Series] = {}
     last_closes: list[float | None] = []
-    market_values: list[float | None] = []
+    market_values: list[float | None] = []  # BASE-currency values
+    missing_rate_currencies: set[str] = set()
+    unknown_currency_symbols: set[str] = set()
     for p in portfolio.positions:
         if p.con_id not in close_series:
             series = _close_series(store, p.con_id)
@@ -548,7 +573,19 @@ async def get_portfolio(
                 close_series[p.con_id] = series
         last_close = _last_close(close_series.get(p.con_id))
         last_closes.append(last_close)
-        market_values.append(clean(p.qty * p.multiplier * last_close) if last_close is not None else None)
+
+        currency = position_currencies.get(p.symbol)
+        mv_native = clean(p.qty * p.multiplier * last_close) if last_close is not None else None
+        if mv_native is None:
+            mv = None
+        elif currency is None:
+            mv = None
+            unknown_currency_symbols.add(p.symbol)
+        else:
+            mv = clean(fx.convert(mv_native, currency))
+            if mv is None:
+                missing_rate_currencies.add(currency)
+        market_values.append(mv)
 
     known_mvs = [mv for mv in market_values if mv is not None]
     total_mv = sum(known_mvs) if known_mvs else None
@@ -556,10 +593,19 @@ async def get_portfolio(
     positions_out: list[PositionOut] = []
     unrealized_values: list[float] = []
     for p, last_close, mv in zip(portfolio.positions, last_closes, market_values):
+        currency = position_currencies.get(p.symbol)
         avg_cost = clean(avg_costs.get(p.con_id))
-        unrealized = (
+        # Unrealized P&L converts like market value: native (close − cost) ×
+        # qty × multiplier, then currency→base; unknown currency or missing
+        # rate → honest null (never a native amount posing as base).
+        unrealized_native = (
             clean((last_close - avg_cost) * p.qty * p.multiplier)
             if last_close is not None and avg_cost is not None
+            else None
+        )
+        unrealized = (
+            clean(fx.convert(unrealized_native, currency))
+            if unrealized_native is not None and currency is not None
             else None
         )
         if unrealized is not None:
@@ -571,6 +617,7 @@ async def get_portfolio(
                 qty=p.qty,
                 sec_type=p.sec_type,
                 multiplier=p.multiplier,
+                currency=currency,
                 last_close=last_close,
                 market_value=mv,
                 weight=(mv / total_mv if mv is not None and total_mv else None),
@@ -585,25 +632,29 @@ async def get_portfolio(
         unrealized_pnl=(sum(unrealized_values) if unrealized_values else None),
     )
 
-    # Mixed-currency disclosure (2026-07-27): bar closes are stored in each
-    # instrument's native quote currency (metadata `currency` from contract
-    # details), so a book spanning currencies sums apples and oranges in
-    # `market_value`/`unrealized_pnl`. Disclose until FX-aware valuation
-    # lands (TODOS). Symbols without cached metadata can't vouch either way
-    # and are ignored here — absence of proof is not proof of one currency.
-    currencies = sorted(
-        {
-            cur
-            for p in portfolio.positions
-            if (md := store.read_instrument_metadata(p.symbol)) and (cur := md.get("currency"))
-        }
-    )
-    totals_note = (
-        f"positions span currencies ({', '.join(currencies)}) — totals sum "
-        "unconverted native amounts; FX-aware valuation is on the roadmap"
-        if len(currencies) > 1
-        else None
-    )
+    # Honest labeling of the FX treatment on totals: what was converted (and
+    # at which cached pair/as-of), what was excluded and why. Silent native
+    # summing — the 2026-07-27 incident — is no longer possible.
+    converted_currencies = [
+        position_currencies.get(p.symbol)
+        for p, mv in zip(portfolio.positions, market_values)
+        if mv is not None
+    ]
+    note_parts: list[str] = []
+    conversion_note = fx_conversion_note(fx, converted_currencies)
+    if conversion_note:
+        note_parts.append(conversion_note)
+    if missing_rate_currencies:
+        note_parts.append(
+            f"no cached FX rate for {', '.join(sorted(missing_rate_currencies))} — "
+            "positions excluded from totals; run sync"
+        )
+    if unknown_currency_symbols:
+        note_parts.append(
+            f"currency unknown for {', '.join(sorted(unknown_currency_symbols))} — "
+            "excluded from totals"
+        )
+    totals_note = "; ".join(note_parts) if note_parts else None
 
     if broker_failed:
         account, account_note = None, _BROKER_FAILED_NOTE
@@ -730,7 +781,7 @@ async def get_portfolio(
     return PortfolioResponse(
         snapshot_id=snapshot.snapshot_id,
         valuation_ts=valuation_ts,
-        base_currency="USD",
+        base_currency=base_currency,
         positions=positions_out,
         totals=totals,
         totals_note=totals_note,

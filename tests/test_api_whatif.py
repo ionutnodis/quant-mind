@@ -491,3 +491,66 @@ def test_whatif_option_leg_in_trade_ticket_keys_on_the_full_leg(client):
     assert line["qty_delta"] == -2
     assert line["action"] == "SELL"
     assert line["multiplier"] == 100
+
+
+# --- FX-aware valuation: market values/weights in the base currency ---
+
+
+def _two_currency_whatif_client(tmp_path, with_rate=True):
+    """SPY (USD) + LSEQ (GBP-quoted, tick-for-tick SPY clone); base USD,
+    GBPUSD cached at 1.25 — the FX bias in weights is the thing under test."""
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    spy_bars = _bars(seed=1)
+    store.write_bars(con_id=1, bar_size="1d", bars=spy_bars, meta=meta)
+    store.write_bars(con_id=2, bar_size="1d", bars=spy_bars.copy(), meta=meta)
+    store.write_symbol_map({"SPY": 1, "LSEQ": 2})
+    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
+    store.write_instrument_metadata("LSEQ", {"con_id": 2, "currency": "GBP"})
+    if with_rate:
+        idx = pd.bdate_range(end="2026-07-24", periods=2)
+        store.write_series("FX_GBPUSD", pd.Series([1.2, 1.25], index=idx))
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
+    client = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+    return client, spy_bars
+
+
+def test_whatif_two_currency_weights_convert_market_values(tmp_path):
+    # Hand-computed: last close L for both legs. SPY mv = 10L (USD);
+    # LSEQ mv = 5L x 1.25 = 6.25L (GBP->USD). Gross 16.25L; weights
+    # 10/16.25 and 6.25/16.25. Prices stay NATIVE per-share (L for both).
+    client, spy_bars = _two_currency_whatif_client(tmp_path)
+    last = float(spy_bars["close"].iloc[-1])
+    r = client.post(
+        "/api/whatif",
+        json={
+            "positions": [{"symbol": "SPY", "qty": 10}, {"symbol": "LSEQ", "qty": 5}],
+            "years": 1,
+            "mc": {"horizon": 21, "n_paths": 500, "seed": 7},
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    w = {row["symbol"]: row for row in body["weights"]}
+    assert w["SPY"]["price"] == pytest.approx(last, rel=1e-9)
+    assert w["LSEQ"]["price"] == pytest.approx(last, rel=1e-9)  # native quote
+    assert w["SPY"]["market_value"] == pytest.approx(10 * last, rel=1e-9)
+    assert w["LSEQ"]["market_value"] == pytest.approx(5 * last * 1.25, rel=1e-9)
+    assert w["SPY"]["weight"] == pytest.approx(10.0 / 16.25, rel=1e-9)
+    assert w["LSEQ"]["weight"] == pytest.approx(6.25 / 16.25, rel=1e-9)
+    assert any("GBPUSD" in n and "valued in USD" in n for n in body["notes"])
+
+
+def test_whatif_missing_fx_rate_is_named_422(tmp_path):
+    client, _ = _two_currency_whatif_client(tmp_path, with_rate=False)
+    r = client.post(
+        "/api/whatif",
+        json={
+            "positions": [{"symbol": "SPY", "qty": 10}, {"symbol": "LSEQ", "qty": 5}],
+            "years": 1,
+            "mc": {"horizon": 21, "n_paths": 500, "seed": 7},
+        },
+    )
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert "GBP" in detail and "LSEQ" in detail and "sync" in detail

@@ -472,3 +472,48 @@ def test_macro_sensitivity_degenerate_book_never_500_and_never_ci_free(full_stor
     # the VIX row's HAC covariance is NaN on this degenerate book -> refused
     vix = next(r for r in sens["rows"] if r["driver"] == "VIX")
     assert vix["dollar_response"] is None and vix["note"]
+
+
+# --- FX-aware valuation: sensitivity gross/weights in the base currency ---
+
+
+def test_macro_sensitivity_converts_book_gross_to_base(noisy_store):
+    # XLK quoted in GBP, base USD, GBPUSD cached at 1.25: gross = 10 x last
+    # x 1.25 hand-exact; a 100% XLK book regressed on XLK itself still has
+    # beta 1, so the +1% response is exactly 1% of the CONVERTED gross.
+    noisy_store.write_instrument_metadata("XLK", {"currency": "GBP"})
+    noisy_store.write_series(
+        "FX_GBPUSD", pd.Series([1.25], index=pd.bdate_range(end="2026-07-24", periods=1))
+    )
+    client = _client(noisy_store)
+    pin = client.post("/api/book/pin", json={"positions": [{"symbol": "XLK", "qty": 10}]})
+    assert pin.status_code == 200
+    ref = pin.json()["snapshot_id"]
+
+    r = client.get("/api/macro", params={"book_ref": ref})
+    assert r.status_code == 200
+    sens = r.json()["sensitivity"]
+    con_id = noisy_store.read_symbol_map()["XLK"]
+    bars, _ = noisy_store.read_bars(con_id=con_id, bar_size="1d")
+    gross = 10.0 * float(bars["close"].iloc[-1]) * 1.25
+    assert sens["book_gross"] == pytest.approx(gross, rel=1e-9)
+    rows = {(row["group"], row["driver"]): row for row in sens["rows"]}
+    xlk = rows[("sectors", "XLK")]
+    assert xlk["dollar_response"] == pytest.approx(0.01 * gross, rel=1e-6)
+
+
+def test_macro_sensitivity_missing_fx_rate_excludes_leg_honestly(noisy_store):
+    # GBP-quoted leg with NO cached GBPUSD: the leg can't be valued in the
+    # base — excluded with a named reason (macro's excluded-leg pattern),
+    # never silently summed native.
+    noisy_store.write_instrument_metadata("XLK", {"currency": "GBP"})
+    client = _client(noisy_store)
+    pin = client.post("/api/book/pin", json={"positions": [{"symbol": "XLK", "qty": 10}]})
+    ref = pin.json()["snapshot_id"]
+
+    r = client.get("/api/macro", params={"book_ref": ref})
+    assert r.status_code == 200
+    sens = r.json()["sensitivity"]
+    assert sens["book_gross"] is None
+    assert any("XLK" in e and "FX" in e for e in sens["excluded"])
+    assert sens["note"]  # one-leg book degrades to the honest empty block

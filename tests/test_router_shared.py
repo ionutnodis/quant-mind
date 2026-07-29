@@ -23,9 +23,11 @@ from quantmind.api.routers._shared import (
     clean,
     downsample,
     iso,
+    load_fx_converter,
     read_close_series,
     weighted_portfolio_returns,
 )
+from quantmind.datastore.store import BarStore
 
 
 def test_clean_passes_through_finite_numbers():
@@ -126,6 +128,79 @@ def test_read_close_series_clips_to_years():
     series = read_close_series(_Store(), con_id=1, symbol="X", years=1)
     assert len(series) == 252
     assert series.iloc[-1] == 999.0
+
+
+def _fx_series(values, end="2026-07-24"):
+    idx = pd.bdate_range(end=end, periods=len(values))
+    return pd.Series([float(v) for v in values], index=idx)
+
+
+def test_load_fx_converter_inverts_gbpusd_for_a_gbp_base(tmp_path):
+    # Golden: GBPUSD close 1.25 (USD per GBP); base GBP -> rate(USD->GBP)
+    # = 1/1.25 = 0.8 exactly.
+    store = BarStore(tmp_path)
+    store.write_instrument_metadata("O", {"currency": "USD"})
+    store.write_instrument_metadata("VWRP", {"currency": "GBP"})
+    store.write_series("FX_GBPUSD", _fx_series([1.2, 1.25]))
+    conv = load_fx_converter(store, base="GBP")
+    assert conv.base == "GBP"
+    assert set(conv.rates) == {"USD"}  # GBP is the base — never needs a rate
+    assert conv.rates["USD"] == pytest.approx(0.8)
+    assert conv.as_of == "2026-07-24"
+
+
+def test_load_fx_converter_direct_rate_for_a_usd_base(tmp_path):
+    # Same series, other direction: base USD -> rate(GBP->USD) = 1.25 direct.
+    store = BarStore(tmp_path)
+    store.write_instrument_metadata("VWRP", {"currency": "GBP"})
+    store.write_series("FX_GBPUSD", _fx_series([1.2, 1.25]))
+    conv = load_fx_converter(store, base="USD")
+    assert conv.rates["GBP"] == pytest.approx(1.25)
+
+
+def test_load_fx_converter_missing_series_leaves_currency_absent(tmp_path):
+    # No FX_EURUSD cached -> EUR simply absent; convert() then returns the
+    # honest None so callers degrade by exclusion, never silently.
+    store = BarStore(tmp_path)
+    store.write_instrument_metadata("VWRP", {"currency": "GBP"})
+    store.write_instrument_metadata("EZU", {"currency": "EUR"})
+    store.write_series("FX_GBPUSD", _fx_series([1.25]))
+    conv = load_fx_converter(store, base="USD")
+    assert set(conv.rates) == {"GBP"}
+    assert conv.convert(100.0, "EUR") is None
+    assert conv.missing(["EUR", "GBP", "USD"]) == {"EUR"}
+
+
+def test_load_fx_converter_as_of_is_oldest_used_rate_date(tmp_path):
+    # Conservative staleness: the disclosed as_of is the OLDEST last date
+    # among the loaded rates.
+    store = BarStore(tmp_path)
+    store.write_instrument_metadata("VWRP", {"currency": "GBP"})
+    store.write_instrument_metadata("O", {"currency": "USD"})
+    store.write_series("FX_EURGBP", _fx_series([0.85], end="2026-07-24"))
+    store.write_series("FX_EURUSD", _fx_series([1.1], end="2026-07-20"))
+    conv = load_fx_converter(store, base="EUR")
+    assert set(conv.rates) == {"GBP", "USD"}
+    assert conv.as_of == "2026-07-20"
+
+
+def test_load_fx_converter_skips_nonpositive_or_nan_closes(tmp_path):
+    # A NaN tail falls back to the last finite close; an all-garbage series
+    # loads no rate at all (honest absence, not a poisoned rate).
+    store = BarStore(tmp_path)
+    store.write_instrument_metadata("VWRP", {"currency": "GBP"})
+    store.write_instrument_metadata("EZU", {"currency": "EUR"})
+    store.write_series("FX_GBPUSD", _fx_series([1.25, float("nan")]))
+    store.write_series("FX_EURUSD", _fx_series([0.0, float("nan")]))
+    conv = load_fx_converter(store, base="USD")
+    assert conv.rates.get("GBP") == pytest.approx(1.25)
+    assert "EUR" not in conv.rates
+
+
+def test_load_fx_converter_empty_store_has_no_rates(tmp_path):
+    conv = load_fx_converter(BarStore(tmp_path), base="GBP")
+    assert conv.rates == {}
+    assert conv.as_of is None
 
 
 def test_weighted_portfolio_returns_hand_computed():

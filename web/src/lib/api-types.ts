@@ -1422,6 +1422,8 @@ export interface components {
             avg_cost?: number | null;
             /** Con Id */
             con_id: number;
+            /** Currency */
+            currency?: string | null;
             /** Last Close */
             last_close: number | null;
             /** Market Value */

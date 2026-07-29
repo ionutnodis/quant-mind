@@ -80,12 +80,19 @@ class SimulateResponse(BaseModel):
     n_paths: int
 
 
-def create_app(store: BarStore, benchmark: str, api_token: str = "", broker=None) -> FastAPI:
+def create_app(
+    store: BarStore, benchmark: str, api_token: str = "", broker=None,
+    base_currency: str = "USD",
+) -> FastAPI:
     app = FastAPI(title="QuantMind API", version="0.1.0")
     # Shared state for domain routers (routers/*.py): read via request.app.state
     app.state.store = store
     app.state.benchmark = benchmark
     app.state.broker = broker
+    # FX-aware valuation (TODOS 2026-07-27): the ONE labeled base currency
+    # every router values in — threaded from Settings.base_currency the same
+    # way benchmark is, never hardcoded in a router.
+    app.state.base_currency = base_currency
 
     async def auth(request: Request):
         # Security review: strict host allowlist (no test backdoors) and

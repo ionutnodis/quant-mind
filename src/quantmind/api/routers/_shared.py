@@ -45,6 +45,8 @@ import pandas as pd
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, field_validator
 
+from quantmind.fx import FxConverter, fx_pair
+
 T = TypeVar("T", bound=Sequence)
 
 
@@ -104,6 +106,96 @@ def read_close_series(store, con_id: int, symbol: str, years: int) -> pd.Series:
     if series.empty:
         raise HTTPException(422, detail=f"symbol {symbol!r} has no cached history")
     return series
+
+
+def load_fx_converter(store, base: str) -> FxConverter:
+    """FX-aware valuation (TODOS 2026-07-27): build the currency→`base`
+    converter every router prices with. For each distinct currency in the
+    stored instrument metadata (≠ base), read the cached FX_{pair} series
+    (written by sources/sync.sync_fx_bars) and orient its latest close via
+    fx_pair's invert flag. A missing/empty/garbage series simply leaves the
+    currency ABSENT from `rates` — FxConverter.convert then returns None and
+    callers degrade honestly (exclusion + note, or a named 422), never a
+    silently unconverted native amount. `as_of` is the OLDEST of the loaded
+    rates' last dates (conservative staleness label)."""
+    currencies = {
+        cur
+        for md in store.read_all_instrument_metadata().values()
+        if (cur := md.get("currency")) and cur != base
+    }
+    rates: dict[str, float] = {}
+    last_dates: list[pd.Timestamp] = []
+    for cur in sorted(currencies):
+        pair, invert = fx_pair(cur, base)
+        try:
+            series = store.read_series(f"FX_{pair}")
+        except FileNotFoundError:
+            continue
+        series = series.dropna()
+        series = series[np.isfinite(series) & (series > 0)]
+        if series.empty:
+            continue
+        close = float(series.iloc[-1])
+        rates[cur] = 1.0 / close if invert else close
+        last_dates.append(pd.Timestamp(series.index[-1]))
+    as_of = str(min(last_dates).date()) if last_dates else None
+    return FxConverter(base=base, rates=rates, as_of=as_of)
+
+
+def symbol_currencies(store, symbols: Sequence[str]) -> dict[str, str | None]:
+    """Native quote currency per symbol from cached instrument metadata;
+    None when the metadata doesn't exist or carries no currency (absence of
+    proof is not proof of one currency)."""
+    all_md = store.read_all_instrument_metadata()
+    return {s: (all_md.get(s) or {}).get("currency") for s in symbols}
+
+
+def fx_rates_for(store, symbols: Sequence[str], converter: FxConverter) -> dict[str, float]:
+    """Per-symbol multiplier to `converter.base` for the compute routers
+    (whatif/hedge/lab): 1.0 for the base itself AND for symbols with no
+    cached currency metadata (the pre-FX behavior — a hypothetical book of
+    unsynced symbols keeps valuing natively rather than refusing). A KNOWN
+    non-base currency with no cached rate is a named 422 — computing a
+    book's gross/weights off mixed currencies is exactly the silent bias
+    this pass removes."""
+    currencies = symbol_currencies(store, symbols)
+    rates: dict[str, float] = {}
+    missing: dict[str, list[str]] = {}
+    for sym, cur in currencies.items():
+        if cur is None or cur == converter.base:
+            rates[sym] = 1.0
+            continue
+        rate = converter.rates.get(cur)
+        if rate is None:
+            missing.setdefault(cur, []).append(sym)
+        else:
+            rates[sym] = rate
+    if missing:
+        curs = ", ".join(sorted(missing))
+        syms = sorted({s for group in missing.values() for s in group})
+        raise HTTPException(
+            422,
+            detail=(
+                f"no cached FX rate for {curs} (needed to value {syms} in "
+                f"{converter.base}) — run sync to cache the pair"
+            ),
+        )
+    return rates
+
+
+def fx_conversion_note(converter: FxConverter, currencies: Sequence[str | None]) -> str | None:
+    """The honest-disclosure line for a converted book: names the base,
+    each converted currency's pair, and the conservative rate as_of. None
+    when nothing was converted (single-currency book in its own base)."""
+    converted = sorted(
+        {c for c in currencies if c and c != converter.base and c in converter.rates}
+    )
+    if not converted:
+        return None
+    legs = ", ".join(
+        f"{cur} legs converted at cached {fx_pair(cur, converter.base)[0]}" for cur in converted
+    )
+    return f"valued in {converter.base}; {legs} ({converter.as_of})"
 
 
 class PositionIn(BaseModel):
