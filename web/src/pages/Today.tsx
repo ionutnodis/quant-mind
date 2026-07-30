@@ -11,6 +11,7 @@ import { InstrumentHover } from "../components/InstrumentHover";
 import { NewsTicker } from "../components/NewsTicker";
 import { Panel, Skeleton } from "../components/Panel";
 import { RotationHeatmap } from "../components/RotationHeatmap";
+import { currencySymbol } from "../lib/currency";
 
 // Local, page-scoped types + calls for the sync job — api.ts is shared and not
 // owned here, so these stay in Today.tsx per the wave-2 ownership rule.
@@ -125,6 +126,9 @@ function regimeLine(tiles: { symbol: string; change_1d: number }[]): string {
 // Page-scoped types per the ownership rule; only the fields the vitals read.
 interface VitalsResponse {
   valuation_ts: string | null;
+  // FX-aware valuation: totals are stated in THIS currency; drives the
+  // money symbol below (optional so an older cached response degrades to $).
+  base_currency?: string;
   totals: { market_value: number | null; n_positions: number; unrealized_pnl: number | null } | null;
   totals_note: string | null;
   attribution: { available: boolean; beta: number | null; window_days: number | null } | null;
@@ -134,9 +138,9 @@ function getPortfolioVitals(): Promise<VitalsResponse> {
   return request<VitalsResponse>("/api/portfolio");
 }
 
-function money(x: number): string {
+function money(x: number, sym: string): string {
   const sign = x >= 0 ? "+" : "−";
-  return `${sign}$${Math.abs(x).toFixed(2)}`;
+  return `${sign}${sym}${Math.abs(x).toFixed(2)}`;
 }
 
 function BookVitals() {
@@ -152,6 +156,7 @@ function BookVitals() {
   const pnl = hasBook ? totals?.unrealized_pnl ?? null : null;
   const beta = hasBook && attr?.available ? attr.beta : null;
   const asOf = book.data?.valuation_ts?.slice(0, 10);
+  const sym = currencySymbol(book.data?.base_currency ?? "USD");
 
   return (
     <Panel title="Your book" note={hasBook ? `live · as of ${asOf}` : "awaiting book"}>
@@ -162,7 +167,7 @@ function BookVitals() {
             data-testid="vital-pnl"
             className={`num text-lg ${pnl !== null ? "text-you" : "text-muted"}`}
           >
-            {pnl !== null ? money(pnl) : "—"}
+            {pnl !== null ? money(pnl, sym) : "—"}
           </div>
         </div>
         <div>
@@ -195,7 +200,7 @@ function BookVitals() {
             {totals!.n_positions} positions
             {totals!.market_value != null && (
               <>
-                {" · $"}
+                {` · ${sym}`}
                 {totals!.market_value.toLocaleString("en-US", { maximumFractionDigits: 0 })}
                 {" market value"}
               </>

@@ -135,6 +135,29 @@ test("book vitals light up amber from the live portfolio", async () => {
   expect(screen.getByText(/unconverted native amounts/)).toBeInTheDocument();
 });
 
+test("book vitals money uses the response's base currency symbol (£ for GBP)", async () => {
+  // FX-aware valuation: the API now labels every total with base_currency —
+  // a GBP-based account's vitals must read £, never a hardcoded $.
+  server.use(
+    http.get("/api/brief", () => HttpResponse.json(BRIEF)),
+    http.get("/api/models", () => HttpResponse.json(MODELS)),
+    http.get("/api/portfolio", () =>
+      HttpResponse.json({
+        valuation_ts: "2026-07-28T11:24:06Z",
+        base_currency: "GBP",
+        totals: { market_value: 48721.48, n_positions: 9, unrealized_pnl: 195.2938 },
+        totals_note: "valued in GBP; USD legs converted at cached GBPUSD (2026-07-27)",
+        attribution: { available: true, beta: 0.48, window_days: 90 },
+        options_sleeve: { available: false, reason: null },
+      })
+    )
+  );
+  renderToday();
+  const pnl = await screen.findByTestId("vital-pnl");
+  expect(pnl).toHaveTextContent("+£195.29");
+  expect(screen.getByText(/£48,721/)).toBeInTheDocument(); // market value line
+});
+
 test("book vitals keep the honest empty state when no positions exist", async () => {
   server.use(
     http.get("/api/brief", () => HttpResponse.json(BRIEF)),

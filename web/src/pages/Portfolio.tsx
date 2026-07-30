@@ -17,6 +17,7 @@ import { PortfolioAttributionChart, type AttributionPoint } from "../components/
 import { PortfolioStressGrid, type StressGrid } from "../components/PortfolioStressGrid";
 import { readActiveBookRef } from "../lib/book";
 import { request } from "../lib/api";
+import { currencySymbol } from "../lib/currency";
 
 interface Position {
   con_id: number;
@@ -122,6 +123,14 @@ function fmtNum(v: number | null, digits = 2): string {
   return v === null || !Number.isFinite(v) ? "—" : v.toFixed(digits);
 }
 
+// Base-currency money (FX-aware valuation): market values / unrealized P&L
+// are converted figures now, so they carry the base_currency's symbol;
+// native per-share prices (last close, avg cost) stay bare fmtNum.
+function fmtMoney(v: number | null, sym: string, digits = 2): string {
+  if (v === null || !Number.isFinite(v)) return "—";
+  return v < 0 ? `-${sym}${Math.abs(v).toFixed(digits)}` : `${sym}${v.toFixed(digits)}`;
+}
+
 function fmtWeight(v: number | null): string {
   return v === null ? "—" : `${(v * 100).toFixed(1)}%`;
 }
@@ -158,6 +167,7 @@ export function Portfolio() {
   // Ledger as-of, carried into every data panel's note (DESIGN.md: every
   // data panel carries an as-of stamp — F7).
   const asOfNote = `as of ${data.valuation_ts.slice(0, 10)}`;
+  const sym = currencySymbol(data.base_currency);
   const note = `snapshot ${data.snapshot_id} · ${asOfNote}${bookRef ? ` · book_ref ${bookRef}` : ""}`;
 
   return (
@@ -216,8 +226,8 @@ export function Portfolio() {
                   <td className="num py-1.5 text-right">{fmtNum(p.qty, 0)}</td>
                   <td className="num py-1.5 text-right">{fmtNum(p.last_close)}</td>
                   <td className="num py-1.5 text-right">{fmtNum(p.avg_cost)}</td>
-                  <td className="num py-1.5 text-right text-you">{fmtNum(p.unrealized_pnl)}</td>
-                  <td className="num py-1.5 text-right text-you">{fmtNum(p.market_value)}</td>
+                  <td className="num py-1.5 text-right text-you">{fmtMoney(p.unrealized_pnl, sym)}</td>
+                  <td className="num py-1.5 text-right text-you">{fmtMoney(p.market_value, sym)}</td>
                   <td className="num py-1.5 text-right text-you">{fmtWeight(p.weight)}</td>
                 </tr>
               ))}
@@ -231,9 +241,9 @@ export function Portfolio() {
                 <td />
                 <td />
                 <td className="num py-1.5 text-right text-you" data-testid="totals-unrealized-pnl">
-                  {fmtNum(data.totals.unrealized_pnl)}
+                  {fmtMoney(data.totals.unrealized_pnl, sym)}
                 </td>
-                <td className="num py-1.5 text-right text-you">{fmtNum(data.totals.market_value)}</td>
+                <td className="num py-1.5 text-right text-you">{fmtMoney(data.totals.market_value, sym)}</td>
                 <td />
               </tr>
             </tfoot>

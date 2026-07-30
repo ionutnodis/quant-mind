@@ -123,13 +123,17 @@ test("renders positions table with cost basis, unrealized P&L, and totals from t
   const table = within(await screen.findByTestId("positions-table"));
   expect(table.getByText("SPY")).toBeInTheDocument();
   expect(table.getByText("OPT_XYZ")).toBeInTheDocument();
-  expect(table.getAllByText("100.00").length).toBeGreaterThan(0); // last_close and unrealized_pnl both 100.00
-  expect(table.getByText("1000.00")).toBeInTheDocument();
-  expect(table.getByText("2500.00")).toBeInTheDocument();
+  expect(table.getAllByText("100.00").length).toBeGreaterThan(0); // last_close stays native/unprefixed
+  // Money columns carry the base-currency symbol (FX-aware valuation):
+  // market values and unrealized P&L are base-currency figures now.
+  expect(table.getByText("$1000.00")).toBeInTheDocument();
+  expect(table.getByText("$2500.00")).toBeInTheDocument();
   // cost basis / unrealized P&L — book P&L renders AMBER regardless of sign
   // (DESIGN.md amber law + Lab Apply-to-Book / WhatIf precedent); green/red
   // stays reserved for market up/down data.
   expect(table.getByText("90.00")).toBeInTheDocument();
+  // SPY unrealized $100.00 appears twice legitimately: position row + totals
+  expect(table.getAllByText("$100.00").length).toBe(2);
   const totalsUnrealized = table.getByTestId("totals-unrealized-pnl");
   expect(totalsUnrealized).toHaveClass("text-you");
   expect(totalsUnrealized).not.toHaveClass("text-up");
@@ -139,9 +143,27 @@ test("renders positions table with cost basis, unrealized P&L, and totals from t
   expect(table.getByText("71.4%")).toBeInTheDocument();
   // totals row
   expect(table.getByText(/Total \(2\)/)).toBeInTheDocument();
-  expect(table.getByText("3500.00")).toBeInTheDocument();
+  expect(table.getByText("$3500.00")).toBeInTheDocument();
   // snapshot/valuation-ts note (Panel-level, outside the table)
   expect(screen.getByText(/abc123def456/)).toBeInTheDocument();
+});
+
+test("money columns use the response's base currency symbol (£ for GBP)", async () => {
+  // FX-aware valuation: a GBP-based account's totals/market values read £
+  // driven by base_currency — never a hardcoded $.
+  server.use(
+    http.get("/api/portfolio", () =>
+      HttpResponse.json({ ...TWO_POSITIONS, base_currency: "GBP" })
+    )
+  );
+  renderPortfolio();
+  const table = within(await screen.findByTestId("positions-table"));
+  expect(table.getByText("£1000.00")).toBeInTheDocument();
+  expect(table.getByText("£2500.00")).toBeInTheDocument();
+  expect(table.getByText("£3500.00")).toBeInTheDocument(); // totals row
+  expect(table.getAllByText("£100.00").length).toBe(2); // unrealized: position row + totals
+  // native per-share prices stay unprefixed (they're quote-currency figures)
+  expect(table.getAllByText("100.00").length).toBeGreaterThan(0);
 });
 
 test("mixed-currency totals note renders as a warning on the positions panel", async () => {
