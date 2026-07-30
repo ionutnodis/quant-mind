@@ -28,7 +28,7 @@ def _bars_from_returns(daily_returns: np.ndarray, price0: float = 100.0) -> pd.D
 
 
 def _client(store: BarStore) -> TestClient:
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 

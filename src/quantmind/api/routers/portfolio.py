@@ -221,6 +221,9 @@ class PortfolioResponse(BaseModel):
     # doesn't report account summary) rather than leaving it unexplained.
     account_note: str | None
     exposure: list[UnderlyingExposureOut]
+    # M2 fix round: names underliers excluded from the base-currency
+    # delta/stress aggregation (unknown currency or missing cached rate).
+    exposure_note: str | None = None
     options_sleeve: OptionsSleeveOut
     expiry_buckets: ExpiryBucketsOut
     attribution: AttributionOut
@@ -680,6 +683,12 @@ async def get_portfolio(
     unpriceable_option_underliers: set[str] = set()
     expiry_rows: list[ExpiryLegOut] = []
     underlier_betas: dict[str, float | None] = {}
+    # M2 fix round: dollar-delta/SPY-equiv and the aggregated stress grid are
+    # BASE-currency figures — each underlier converts at its own rate BEFORE
+    # aggregation (book_greeks stays pure; conversion lives here). None =
+    # cannot convert -> excluded from those aggregates + named below.
+    underlier_fx_rates: dict[str, float | None] = {}
+    fx_excluded_underliers: dict[str, str] = {}
 
     for underlier, group in groups.items():
         group_has_options = any(p.sec_type == "OPT" for p, _ in group)
@@ -693,6 +702,18 @@ async def get_portfolio(
             if group_has_options:
                 unpriceable_option_underliers.add(underlier)
             continue
+
+        currency = position_currencies.get(underlier)
+        if currency is None:
+            underlier_fx_rates[underlier] = None
+            fx_excluded_underliers[underlier] = "currency unknown"
+        elif currency == base_currency:
+            underlier_fx_rates[underlier] = 1.0
+        else:
+            rate = fx.rates.get(currency)
+            underlier_fx_rates[underlier] = rate
+            if rate is None:
+                fx_excluded_underliers[underlier] = f"no cached FX rate for {currency}"
 
         if underlier == benchmark:
             beta: float | None = 1.0
@@ -716,22 +737,34 @@ async def get_portfolio(
     betas_clean = {k: v for k, v in underlier_betas.items() if v is not None}
     underlyings = compute_book_greeks(book_legs, betas=betas_clean) if book_legs else []
 
-    exposure_out = [
-        UnderlyingExposureOut(
-            underlier=u.underlier,
-            spot=clean(u.spot),
-            net_delta=clean(u.delta),
-            dollar_delta=clean(u.dollar_delta),
-            beta=clean(underlier_betas.get(u.underlier)),
-            spy_equivalent_notional=clean(u.spy_equivalent_notional),
-            beta_note=(
-                None
-                if underlier_betas.get(u.underlier) is not None
-                else f"insufficient history for beta vs {benchmark} ({_BETA_WINDOW}d window)"
-            ),
+    exposure_out = []
+    for u in underlyings:
+        u_rate = underlier_fx_rates.get(u.underlier)
+        exposure_out.append(
+            UnderlyingExposureOut(
+                underlier=u.underlier,
+                spot=clean(u.spot),  # native quote price — stays unconverted
+                net_delta=clean(u.delta),  # shares are currency-free
+                # Base-currency figures (M2): honest null when the underlier
+                # can't convert — never a native number under a base header.
+                dollar_delta=(
+                    clean(u.dollar_delta * u_rate)
+                    if u_rate is not None and u.dollar_delta is not None
+                    else None
+                ),
+                beta=clean(underlier_betas.get(u.underlier)),
+                spy_equivalent_notional=(
+                    clean(u.spy_equivalent_notional * u_rate)
+                    if u_rate is not None and u.spy_equivalent_notional is not None
+                    else None
+                ),
+                beta_note=(
+                    None
+                    if underlier_betas.get(u.underlier) is not None
+                    else f"insufficient history for beta vs {benchmark} ({_BETA_WINDOW}d window)"
+                ),
+            )
         )
-        for u in underlyings
-    ]
 
     if not has_option_positions:
         options_sleeve = OptionsSleeveOut(available=False, reason="no option positions", underlyings=[], stress_grid=None)
@@ -745,8 +778,19 @@ async def get_portfolio(
             reason = "chain not ingested — run options_sync"
         options_sleeve = OptionsSleeveOut(available=False, reason=reason, underlyings=[], stress_grid=None)
     else:
-        sleeve_legs = [leg for leg in book_legs if leg.underlier in priced_option_underliers]
-        grid = aggregate_book_stress_grid(sleeve_legs)
+        # M2 fix round: the grid SUMS P&L across underliers, so each
+        # underlier's cells convert at its own FX rate BEFORE aggregation —
+        # GBP and USD may never share a cell unconverted (the incident
+        # class). An unconvertible underlier is dropped from the grid and
+        # named in exposure_note; all dropped -> honest null grid.
+        grid = None
+        for sleeve_underlier in sorted(priced_option_underliers):
+            u_rate = underlier_fx_rates.get(sleeve_underlier)
+            if u_rate is None:
+                continue
+            legs_u = [leg for leg in book_legs if leg.underlier == sleeve_underlier]
+            grid_u = aggregate_book_stress_grid(legs_u) * u_rate
+            grid = grid_u if grid is None else grid + grid_u
         options_sleeve = OptionsSleeveOut(
             available=True,
             reason=None,
@@ -755,10 +799,14 @@ async def get_portfolio(
                 for u in underlyings
                 if u.underlier in priced_option_underliers
             ],
-            stress_grid=StressGridOut(
-                vol_shocks=[float(v) for v in grid.index],
-                spot_shocks=[float(c) for c in grid.columns],
-                pnl=[[clean(v) for v in row] for row in grid.to_numpy().tolist()],
+            stress_grid=(
+                StressGridOut(
+                    vol_shocks=[float(v) for v in grid.index],
+                    spot_shocks=[float(c) for c in grid.columns],
+                    pnl=[[clean(v) for v in row] for row in grid.to_numpy().tolist()],
+                )
+                if grid is not None
+                else None
             ),
         )
 
@@ -778,6 +826,13 @@ async def get_portfolio(
         store, close_series, mv_by_conid, benchmark, symbol_map, attribution_days
     )
 
+    exposure_note = None
+    if fx_excluded_underliers:
+        frags = "; ".join(f"{u} ({reason})" for u, reason in sorted(fx_excluded_underliers.items()))
+        exposure_note = (
+            f"excluded from base-currency delta/stress aggregation: {frags} — run sync"
+        )
+
     return PortfolioResponse(
         snapshot_id=snapshot.snapshot_id,
         valuation_ts=valuation_ts,
@@ -788,6 +843,7 @@ async def get_portfolio(
         account=account,
         account_note=account_note,
         exposure=exposure_out,
+        exposure_note=exposure_note,
         options_sleeve=options_sleeve,
         expiry_buckets=expiry_buckets,
         attribution=attribution,

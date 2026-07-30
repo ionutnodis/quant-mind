@@ -701,3 +701,110 @@ def test_account_summary_missing_key_degrades_to_null_account_not_500(store):
     body = r.json()
     assert body["account"] is None
     assert body["account_note"]
+
+
+# --- M2 fix round: exposure + stress grid convert to base (were native/unlabeled) ---
+
+
+def test_exposure_dollar_delta_converts_to_base_hand_computed(store):
+    # Hand-computed, base GBP with GBPUSD 1.25 (rate USD->GBP = 0.8):
+    #   SPY (USD): 230 sh x $100 spot = $23,000 dollar-delta -> £18,400
+    #   QQQ (GBP):  20 sh x £380 spot = £7,600 (identity)
+    # SPY == benchmark -> beta 1.0, so SPY-equiv notional converts to the
+    # same £18,400. Native spot stays native (100.0).
+    store.write_instrument_metadata("QQQ", {"currency": "GBP"})
+    store.write_series("FX_GBPUSD", _fx_series([1.25]))
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=1, symbol="SPY", qty=230),
+            Position(con_id=3, symbol="QQQ", qty=20),
+        ),
+        as_of="2026-07-28",
+    )
+    body = _client(store, broker=FakeBroker(portfolio), base_currency="GBP").get("/api/portfolio").json()
+    exp = {e["underlier"]: e for e in body["exposure"]}
+    assert exp["SPY"]["spot"] == pytest.approx(100.0)  # native quote
+    assert exp["SPY"]["net_delta"] == pytest.approx(230.0)
+    assert exp["SPY"]["dollar_delta"] == pytest.approx(18400.0)
+    assert exp["SPY"]["spy_equivalent_notional"] == pytest.approx(18400.0)
+    assert exp["QQQ"]["dollar_delta"] == pytest.approx(7600.0)
+    assert body["exposure_note"] is None
+
+
+def test_exposure_missing_rate_nulls_delta_and_names_underlier(store):
+    # Base GBP, NO cached GBPUSD: SPY's dollar-delta cannot be stated in GBP
+    # -> honest null + named in exposure_note (never a native number under a
+    # base-currency header).
+    portfolio = Portfolio(
+        positions=(Position(con_id=1, symbol="SPY", qty=230),),
+        as_of="2026-07-28",
+    )
+    body = _client(store, broker=FakeBroker(portfolio), base_currency="GBP").get("/api/portfolio").json()
+    exp = body["exposure"][0]
+    assert exp["underlier"] == "SPY"
+    assert exp["net_delta"] == pytest.approx(230.0)  # shares are currency-free
+    assert exp["dollar_delta"] is None
+    assert exp["spy_equivalent_notional"] is None
+    note = body["exposure_note"]
+    assert note is not None
+    assert "SPY" in note and "USD" in note and "sync" in note
+
+
+def _pin_spy_call(client, store):
+    expiry = _expiry_str(45)
+    _write_chain(
+        store,
+        "SPY",
+        [
+            {
+                "expiry": expiry, "strike": 105.0, "right": "C", "con_id": 1001,
+                "bid": 3.0, "ask": 3.2, "iv": 0.3, "delta": 0.5, "multiplier": 100.0,
+            }
+        ],
+        spot=100.0,
+    )
+    pin = client.post(
+        "/api/book/pin",
+        json={"positions": [{"symbol": "SPY", "qty": 2, "strike": 105.0, "expiry": expiry, "right": "C"}]},
+    )
+    assert pin.status_code == 200
+    return pin.json()["snapshot_id"]
+
+
+def test_stress_grid_scales_by_fx_rate_before_aggregation(store):
+    # The SAME option book valued in USD (identity) vs GBP (rate 0.8): every
+    # grid cell of the GBP run must be exactly 0.8x the USD run — conversion
+    # happens per underlier BEFORE aggregation, at the router.
+    client_usd = _client(store, broker=None)
+    ref = _pin_spy_call(client_usd, store)
+    grid_usd = client_usd.get("/api/portfolio", params={"book_ref": ref}).json()["options_sleeve"]["stress_grid"]
+    assert grid_usd is not None
+
+    store.write_series("FX_GBPUSD", _fx_series([1.25]))
+    client_gbp = _client(store, broker=None, base_currency="GBP")
+    ref_gbp = _pin_spy_call(client_gbp, store)
+    grid_gbp = client_gbp.get("/api/portfolio", params={"book_ref": ref_gbp}).json()["options_sleeve"]["stress_grid"]
+    assert grid_gbp is not None
+
+    nonzero = 0
+    for row_usd, row_gbp in zip(grid_usd["pnl"], grid_gbp["pnl"]):
+        for cell_usd, cell_gbp in zip(row_usd, row_gbp):
+            assert cell_gbp == pytest.approx(0.8 * cell_usd, rel=1e-9, abs=1e-9)
+            if abs(cell_usd) > 1e-9:
+                nonzero += 1
+    assert nonzero > 0  # the comparison actually exercised real P&L cells
+
+
+def test_stress_grid_missing_rate_excludes_underlier_with_note(store):
+    # Base GBP, no cached GBPUSD: the USD underlier's P&L cannot join a
+    # GBP-denominated grid — grid degrades to null + exposure_note names it
+    # (the incident class: GBP and USD summed into one cell).
+    client = _client(store, broker=None, base_currency="GBP")
+    ref = _pin_spy_call(client, store)
+    body = client.get("/api/portfolio", params={"book_ref": ref}).json()
+    sleeve = body["options_sleeve"]
+    assert sleeve["available"] is True  # legs still price; the GRID is what degrades
+    assert sleeve["stress_grid"] is None
+    note = body["exposure_note"]
+    assert note is not None
+    assert "SPY" in note and "USD" in note

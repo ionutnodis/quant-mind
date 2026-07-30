@@ -49,6 +49,7 @@ from quantmind.api.routers._shared import (
     _validate_option_legs,
     clean,
     fx_conversion_note,
+    fx_defaulted_note,
     fx_rates_for,
     iso,
     load_fx_converter,
@@ -405,8 +406,9 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
 
     # FX-aware valuation: both books' market values/weights are stated in
     # the base currency (per-share `price`/ticket prices stay native); a
-    # known non-base currency with no cached rate is a named 422.
-    book_fx_rates = fx_rates_for(store, unique_needed, fx)
+    # known non-base currency with no cached rate is a named 422;
+    # currency-less metadata values as base with a disclosure note (D1).
+    book_fx_rates, fx_defaulted = fx_rates_for(store, unique_needed, fx)
     market_values, weight_values = _book_exposures(positions, last_close, book_fx_rates)
 
     prices = pd.concat(series_map, axis=1).dropna()
@@ -521,6 +523,9 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
     )
     if conversion_note:
         notes.append(conversion_note)
+    defaulted_note = fx_defaulted_note(base_currency, fx_defaulted)
+    if defaulted_note:
+        notes.append(defaulted_note)
 
     weights_out = [
         WeightOut(

@@ -266,7 +266,8 @@ def _pin_and_respond(
     portfolio: Portfolio,
     valuation_ts: str,
     legs: list[PositionIn] | None = None,
-    base_currency: str = "USD",
+    *,
+    base_currency: str,
 ) -> BookSnapshotOut:
     extra = _option_hash_extra(portfolio, legs)
     # The REAL configured base currency (FX-aware valuation) — a GBP-based

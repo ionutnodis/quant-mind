@@ -67,7 +67,7 @@ def client(tmp_path):
     store.write_bars(con_id=4, bar_size="1d", bars=_bars_from_close(ccc, idx), meta=meta)
     store.write_symbol_map({"SPY": 1, "AAA": 2, "BBB": 3, "CCC": 4})
     store.write_series("US10Y", _us10y_from(spy["close"]))
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 
@@ -364,7 +364,10 @@ def test_book_regression_full_opt_book_scales_gross_by_multiplier_with_note(clie
         100.0 * body_stk["beta_usd_per_bp"], rel=1e-6
     )
     assert any("delta-one" in n for n in body_opt["notes"])
-    assert body_stk["notes"] == []
+    # D1 fix round: this fixture's symbols have no currency metadata, so the
+    # response now carries the valued-as-base-unverified note — assert the
+    # delta-one note specifically is absent, not an empty list.
+    assert not any("delta-one" in n for n in body_stk["notes"])
 
 
 def test_book_regression_option_book_ref_matches_inline(client):
@@ -490,6 +493,10 @@ def test_book_regression_two_currency_gross_converts_to_base(tmp_path):
     last = float(spy["close"].iloc[-1])
     assert body["book_gross"] == pytest.approx(last * 16.25, rel=1e-9)
     assert any("GBPUSD" in n and "valued in USD" in n for n in body["notes"])
+    # M1 fix round: the response labels its OWN currency — beta_usd_per_bp
+    # is a historical field name; the unit is base-currency-per-bp and the
+    # UI must be able to label it honestly (£/bp for a GBP base).
+    assert body["base_currency"] == "USD"
 
 
 def test_book_regression_missing_fx_rate_is_named_422(tmp_path):

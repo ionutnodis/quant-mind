@@ -279,6 +279,25 @@ test("book exposure regression renders the amber sensitivity with SE/CI and dail
   expect(within(results).getByText(/daily horizon/i)).toBeInTheDocument(); // horizon label
 });
 
+test("book exposure labels the beta unit with the response's base currency (£/bp for GBP)", async () => {
+  // M1 fix round: lab.py computes book P&L with the BASE-currency gross —
+  // for a GBP base the beta is £/bp and must never render as $/bp
+  // (beta_usd_per_bp is a historical wire name, not a unit label).
+  server.use(
+    http.get("/api/models", () => HttpResponse.json([MODEL_SCHEMA])),
+    http.get("/api/book/current", () => HttpResponse.json(BOOK_SNAPSHOT)),
+    http.post("/api/lab/book-regression", () =>
+      HttpResponse.json({ ...BOOK_REG_RESPONSE, base_currency: "GBP" })
+    )
+  );
+  renderLab();
+  fireEvent.click(await screen.findByRole("button", { name: /regress/i }));
+  const results = await screen.findByTestId("book-regression-results");
+  expect(within(results).getByText(/£\/bp/)).toBeInTheDocument();
+  expect(within(results).queryByText(/\$\/bp/)).not.toBeInTheDocument();
+  expect(within(results).getByText(/α £\/day/)).toBeInTheDocument();
+});
+
 test("one-click Use in Apply feeds the regression beta into apply-to-book", async () => {
   // Holder object (not a `X | null` let): TS control-flow analysis doesn't
   // track assignments inside the msw handler closure and would narrow a

@@ -27,7 +27,9 @@ OUTPUT_PATH = REPO_ROOT / "openapi.json"
 
 def build_spec() -> dict:
     with tempfile.TemporaryDirectory() as tmp:
-        app = create_app(store=BarStore(Path(tmp)), benchmark="SPY")
+        # base_currency is REQUIRED at the app seam (D4 fix round); the spec
+        # shape doesn't depend on its value — USD keeps the dump deterministic.
+        app = create_app(store=BarStore(Path(tmp)), benchmark="SPY", base_currency="USD")
         return app.openapi()
 
 

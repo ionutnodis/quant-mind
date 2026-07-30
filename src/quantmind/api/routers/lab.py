@@ -48,6 +48,7 @@ from quantmind.api.routers._shared import (
     clean,
     downsample,
     fx_conversion_note,
+    fx_defaulted_note,
     fx_rates_for,
     iso,
     load_fx_converter,
@@ -212,8 +213,14 @@ class BookRegressionResponse(BaseModel):
     # Every risk number is horizon-labeled (wave-3 Global Constraint): the
     # regression runs on DAILY differences; the beta is a daily sensitivity.
     horizon: Literal["daily"] = "daily"
-    # The estimated beta IS an Apply-to-Book exposure: $ P&L per 1bp move.
+    # HISTORICAL FIELD NAMES (M1 fix round): `exposure_units`/`beta_usd_per_bp`
+    # predate FX-aware valuation. The unit is BASE-CURRENCY-per-bp — book P&L
+    # is computed off the base-currency gross, so for a GBP base the beta is
+    # £/bp. `base_currency` below labels it; the wire names are kept to avoid
+    # API churn (rename tracked in TODOS.md).
     exposure_units: Literal["usd_per_bp"] = "usd_per_bp"
+    # The valuation currency of beta/alpha/gross — drives the UI unit label.
+    base_currency: str
     beta_usd_per_bp: float | None
     beta_se: float | None
     beta_ci: tuple[float, float] | None
@@ -276,7 +283,7 @@ def book_regression(request: Request, req: BookRegressionRequest) -> BookRegress
     # non-base currency with no cached rate is a named 422.
     base_currency = request.app.state.base_currency
     fx = load_fx_converter(store, base_currency)
-    book_fx_rates = fx_rates_for(store, symbols, fx)
+    book_fx_rates, fx_defaulted = fx_rates_for(store, symbols, fx)
     last_close = {s: float(series_map[s].iloc[-1]) for s in symbols}
     market_values = {s: qtys[s] * last_close[s] * book_fx_rates[s] for s in symbols}
     gross = sum(abs(v) for v in market_values.values())
@@ -316,6 +323,7 @@ def book_regression(request: Request, req: BookRegressionRequest) -> BookRegress
 
     return BookRegressionResponse(
         factor_series=req.factor_series,
+        base_currency=base_currency,
         beta_usd_per_bp=clean(result.betas[factor_name]),
         beta_se=clean(result.beta_se[factor_name]),
         beta_ci=beta_ci,
@@ -333,6 +341,7 @@ def book_regression(request: Request, req: BookRegressionRequest) -> BookRegress
                 if any(p.right is not None for p in positions)
                 else None,
                 fx_conversion_note(fx, list(symbol_currencies(store, symbols).values())),
+                fx_defaulted_note(base_currency, fx_defaulted),
             )
             if note is not None
         ],

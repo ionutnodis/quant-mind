@@ -150,19 +150,28 @@ def symbol_currencies(store, symbols: Sequence[str]) -> dict[str, str | None]:
     return {s: (all_md.get(s) or {}).get("currency") for s in symbols}
 
 
-def fx_rates_for(store, symbols: Sequence[str], converter: FxConverter) -> dict[str, float]:
-    """Per-symbol multiplier to `converter.base` for the compute routers
-    (whatif/hedge/lab): 1.0 for the base itself AND for symbols with no
-    cached currency metadata (the pre-FX behavior — a hypothetical book of
-    unsynced symbols keeps valuing natively rather than refusing). A KNOWN
-    non-base currency with no cached rate is a named 422 — computing a
-    book's gross/weights off mixed currencies is exactly the silent bias
-    this pass removes."""
+def fx_rates_for(
+    store, symbols: Sequence[str], converter: FxConverter
+) -> tuple[dict[str, float], list[str]]:
+    """(per-symbol multiplier to `converter.base`, symbols DEFAULTED to 1.0
+    because their metadata carries no currency) for the compute routers
+    (whatif/hedge/lab). No-currency-metadata symbols (reachable via the
+    yfinance fallback, whose metadata has no currency key) value as the base
+    by necessity — the pre-FX behavior — but the caller must DISCLOSE the
+    default via `fx_defaulted_note` (D1 fix round: a silent 1.0 is the same
+    class of omission as a silent native sum). A KNOWN non-base currency
+    with no cached rate is a named 422 — computing a book's gross/weights
+    off mixed currencies is exactly the silent bias this pass removes."""
     currencies = symbol_currencies(store, symbols)
     rates: dict[str, float] = {}
+    defaulted: list[str] = []
     missing: dict[str, list[str]] = {}
     for sym, cur in currencies.items():
-        if cur is None or cur == converter.base:
+        if cur is None:
+            rates[sym] = 1.0
+            defaulted.append(sym)
+            continue
+        if cur == converter.base:
             rates[sym] = 1.0
             continue
         rate = converter.rates.get(cur)
@@ -180,7 +189,18 @@ def fx_rates_for(store, symbols: Sequence[str], converter: FxConverter) -> dict[
                 f"{converter.base}) — run sync to cache the pair"
             ),
         )
-    return rates
+    return rates, sorted(defaulted)
+
+
+def fx_defaulted_note(base: str, defaulted: Sequence[str]) -> str | None:
+    """The disclosure line for symbols whose currency metadata is absent and
+    were therefore valued as the base unverified (D1 fix round)."""
+    if not defaulted:
+        return None
+    return (
+        f"no currency metadata for {', '.join(defaulted)} — valued as {base} "
+        "(unverified); sync metadata to confirm"
+    )
 
 
 def fx_conversion_note(converter: FxConverter, currencies: Sequence[str | None]) -> str | None:

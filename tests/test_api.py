@@ -26,13 +26,13 @@ def client(tmp_path):
     store.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)
     store.write_bars(con_id=2, bar_size="1d", bars=_bars(seed=2), meta=meta)
     store.write_symbol_map({"SPY": 1, "QQQ": 2})
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 
 @pytest.fixture
 def empty_client(tmp_path):
-    app = create_app(store=BarStore(tmp_path / "empty"), benchmark="SPY", api_token="testtoken")
+    app = create_app(store=BarStore(tmp_path / "empty"), benchmark="SPY", api_token="testtoken", base_currency="USD")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 

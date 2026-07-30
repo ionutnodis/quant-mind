@@ -101,6 +101,7 @@ from quantmind.api.routers._shared import (
     _validate_option_legs,
     clean,
     fx_conversion_note,
+    fx_defaulted_note,
     fx_rates_for,
     iso,
     load_fx_converter,
@@ -349,7 +350,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     # FX-aware valuation: every book leg's close converts to the base
     # currency before weights/gross/book_value; a known non-base currency
     # with no cached rate is a named 422 inside fx_rates_for.
-    book_fx_rates = fx_rates_for(store, unique_book, fx)
+    book_fx_rates, fx_defaulted = fx_rates_for(store, unique_book, fx)
 
     book_returns, _weights, book_value, book_gross, book_prices = _portfolio_returns(
         series_map, qtys, unique_book, fx_rates=book_fx_rates
@@ -398,6 +399,9 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         )
 
     candidate_currencies = symbol_currencies(store, candidate_pool)
+    # D2 fix round: candidates skipped for a missing FX rate are NAMED in a
+    # response note, never silently absent from the ranking.
+    fx_skipped_candidates: list[str] = []
 
     results: list[HedgeCandidateOut] = []
     for csym in candidate_pool:
@@ -415,6 +419,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         else:
             rate = fx.rates.get(cand_cur)
             if rate is None:
+                fx_skipped_candidates.append(csym)
                 continue
             cand_rate = rate
 
@@ -643,6 +648,13 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                 # FX label (FX-aware valuation): which legs were converted,
                 # at which cached pair, as of when.
                 fx_conversion_note(fx, list(symbol_currencies(store, unique_book).values())),
+                fx_defaulted_note(base_currency, fx_defaulted),
+                (
+                    "candidates skipped — no cached FX rate to value in "
+                    f"{base_currency}: {', '.join(sorted(fx_skipped_candidates))}; run sync"
+                )
+                if fx_skipped_candidates
+                else None,
             )
             if note is not None
         ],

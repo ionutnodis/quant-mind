@@ -39,7 +39,7 @@ def _fast_fail() -> str:
 
 @pytest.fixture
 def client(tmp_path):
-    app = create_app(store=BarStore(tmp_path), benchmark="SPY", api_token="testtoken")
+    app = create_app(store=BarStore(tmp_path), benchmark="SPY", api_token="testtoken", base_currency="USD")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 

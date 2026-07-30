@@ -638,6 +638,8 @@ export interface components {
             alpha_usd: number | null;
             /** As Of */
             as_of: string | null;
+            /** Base Currency */
+            base_currency: string;
             /** Beta Ci */
             beta_ci: [
                 number,
@@ -1386,6 +1388,8 @@ export interface components {
             expiry_buckets: components["schemas"]["ExpiryBucketsOut"];
             /** Exposure */
             exposure: components["schemas"]["UnderlyingExposureOut"][];
+            /** Exposure Note */
+            exposure_note?: string | null;
             options_sleeve: components["schemas"]["OptionsSleeveOut"];
             /** Positions */
             positions: components["schemas"]["PositionOut"][];

@@ -68,7 +68,7 @@ def client(tmp_path):
     )  # IWM
     store.write_bars(con_id=4, bar_size="1d", bars=_flat_bars(), meta=meta)  # FLAT (~zero beta)
     store.write_symbol_map({"SPY": 1, "QQQ": 2, "IWM": 3, "FLAT": 4})
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 
@@ -302,7 +302,7 @@ def test_hedge_protection_not_inflated_by_large_hedge_notional(tmp_path):
         meta=meta,
     )  # WEAK
     store.write_symbol_map({"SPY": 1, "GOOD": 2, "WEAK": 3})
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     client = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
     r = client.post(
@@ -374,7 +374,7 @@ def test_hedge_nonfinite_book_last_close_is_422_naming_the_symbol(tmp_path):
     bad_bars.loc[bad_bars.index[-1], "close"] = np.nan
     store.write_bars(con_id=2, bar_size="1d", bars=bad_bars, meta=meta)
     store.write_symbol_map({"SPY": 1, "QQQ": 2})
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     c = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
     r = c.post(
@@ -618,7 +618,7 @@ def _option_client(tmp_path, qty=1000, poison_nan_strike=False):
     OptionsStore(store.root).write_chain(
         "SPY", pd.DataFrame(rows), OptionsSnapshotMeta(as_of="2026-07-24", spot=spot)
     )
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     client = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
     return client, spot
 
@@ -750,7 +750,9 @@ def test_hedge_full_opt_book_prices_at_multiplier_scaled_notional_with_note(clie
     body_stk = _run_book(client, book=_STK_BOOK)
     assert body_opt["book_value"] == pytest.approx(100.0 * body_stk["book_value"], rel=1e-9)
     assert any("delta-one" in n for n in body_opt["notes"])
-    assert body_stk["notes"] == []
+    # D1 fix round: no currency metadata in this fixture -> the valued-as-
+    # base-unverified note is present; assert delta-one specifically absent.
+    assert not any("delta-one" in n for n in body_stk["notes"])
 
 
 def test_hedge_option_book_ref_matches_inline(client):
@@ -818,7 +820,7 @@ def test_hedge_displayed_protection_shares_one_window_with_its_ci(tmp_path):
     store.write_bars(con_id=1, bar_size="1d", bars=spy_bars, meta=meta)
     store.write_bars(con_id=2, bar_size="1d", bars=cand_bars, meta=meta)
     store.write_symbol_map({"SPY": 1, "NEWER": 2})
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     client = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
     r = client.post(
@@ -892,7 +894,7 @@ def test_hedge_short_history_candidate_reports_aligned_n_obs_and_note_says_so(tm
     store.write_bars(con_id=1, bar_size="1d", bars=spy_bars, meta=meta)
     store.write_bars(con_id=2, bar_size="1d", bars=cand_bars, meta=meta)
     store.write_symbol_map({"SPY": 1, "NEWER": 2})
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     client = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
     r = client.post(
@@ -1087,3 +1089,33 @@ def test_hedge_missing_fx_rate_for_book_leg_is_named_422(tmp_path):
     assert r.status_code == 422
     detail = r.json()["detail"]
     assert "GBP" in detail and "LSEQ" in detail and "sync" in detail
+
+
+def test_hedge_notes_flag_symbols_without_currency_metadata(client):
+    # D1 fix round: fixture symbols carry no currency metadata — valued as
+    # base by necessity, and the response says so.
+    r = client.post(
+        "/api/hedge",
+        json={"book": [{"symbol": "SPY", "qty": 10}], "objective": {"kind": "beta_target", "value": 0.0}},
+    )
+    assert r.status_code == 200
+    assert any("no currency metadata" in n and "SPY" in n for n in r.json()["notes"])
+
+
+def test_hedge_names_candidates_skipped_for_missing_fx_rate(tmp_path):
+    # D2 fix round: a candidate with a KNOWN non-base currency but no cached
+    # rate is skipped — the skip must be NAMED in a note, never silent.
+    client, _ = _two_currency_client(tmp_path, with_rate=False)
+    r = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "SPY", "qty": 10}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["LSEQ", "IWM"],
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert all(c["symbol"] != "LSEQ" for c in body["candidates"])
+    assert any(c["symbol"] == "IWM" for c in body["candidates"])
+    assert any("LSEQ" in n and "no cached FX rate" in n for n in body["notes"])

@@ -27,7 +27,7 @@ def client(tmp_path):
     store.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)
     store.write_bars(con_id=2, bar_size="1d", bars=_bars(seed=2), meta=meta)
     store.write_symbol_map({"SPY": 1, "QQQ": 2})
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 
@@ -76,7 +76,7 @@ def client_with_mapped_but_barless_symbol(tmp_path):
     store.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)
     # GHOST is in the symbol map but has no cached bars at any bar size.
     store.write_symbol_map({"SPY": 1, "GHOST": 99})
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 
@@ -180,7 +180,7 @@ def client_with_zero_close(tmp_path):
     meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
     store.write_bars(con_id=1, bar_size="1d", bars=_bars_with_zero_close(seed=1), meta=meta)
     store.write_symbol_map({"SPY": 1, "ZERO": 1})
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 
@@ -199,7 +199,7 @@ def client_with_named_series(tmp_path):
     store.write_bars(con_id=2, bar_size="1d", bars=_bars(seed=2), meta=meta)
     store.write_symbol_map({"SPY": 1, "MTUM": 2})
     store.write_series("US10Y", _named_series(seed=3))
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 
@@ -323,7 +323,7 @@ def client_with_zero_close_regression(tmp_path):
     store.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)
     store.write_bars(con_id=2, bar_size="1d", bars=_bars_with_zero_close(seed=2), meta=meta)
     store.write_symbol_map({"SPY": 1, "ZERO": 2})
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 

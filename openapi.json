@@ -740,6 +740,10 @@
             ],
             "title": "As Of"
           },
+          "base_currency": {
+            "title": "Base Currency",
+            "type": "string"
+          },
           "beta_ci": {
             "anyOf": [
               {
@@ -839,6 +843,7 @@
         },
         "required": [
           "factor_series",
+          "base_currency",
           "beta_usd_per_bp",
           "beta_se",
           "beta_ci",
@@ -3622,6 +3627,17 @@
             },
             "title": "Exposure",
             "type": "array"
+          },
+          "exposure_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exposure Note"
           },
           "options_sleeve": {
             "$ref": "#/components/schemas/OptionsSleeveOut"

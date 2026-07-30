@@ -164,6 +164,31 @@ test("money columns use the response's base currency symbol (£ for GBP)", async
   expect(table.getAllByText("£100.00").length).toBe(2); // unrealized: position row + totals
   // native per-share prices stay unprefixed (they're quote-currency figures)
   expect(table.getAllByText("100.00").length).toBeGreaterThan(0);
+  // M2 fix round: exposure columns are converted figures now — headers
+  // carry the base symbol instead of the "Dollar delta" misnomer.
+  expect(screen.getByText("Delta (£)")).toBeInTheDocument();
+  expect(screen.getByText("SPY-equiv (£)")).toBeInTheDocument();
+  expect(screen.queryByText(/Dollar delta/)).not.toBeInTheDocument();
+});
+
+test("exposure note renders as a warning when underliers are excluded from conversion", async () => {
+  // M2 fix round: an underlier with no cached FX rate is excluded from the
+  // base-currency delta/stress aggregation — the exclusion must reach the
+  // user, not just the wire.
+  server.use(
+    http.get("/api/portfolio", () =>
+      HttpResponse.json({
+        ...TWO_POSITIONS,
+        base_currency: "GBP",
+        exposure_note:
+          "no cached FX rate for USD — SPY excluded from base-currency delta/stress aggregation; run sync",
+      })
+    )
+  );
+  renderPortfolio();
+  const note = await screen.findByTestId("exposure-note");
+  expect(note).toHaveTextContent(/no cached FX rate for USD/);
+  expect(note).toHaveTextContent(/SPY/);
 });
 
 test("mixed-currency totals note renders as a warning on the positions panel", async () => {

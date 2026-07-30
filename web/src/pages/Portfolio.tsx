@@ -109,6 +109,9 @@ interface PortfolioResponse {
   account: Account | null;
   account_note: string | null;
   exposure: UnderlyingExposure[];
+  // M2 fix round: names underliers excluded from the base-currency
+  // delta/stress aggregation (unknown currency or missing cached rate).
+  exposure_note: string | null;
   options_sleeve: OptionsSleeve;
   expiry_buckets: ExpiryBuckets;
   attribution: Attribution;
@@ -267,10 +270,12 @@ export function Portfolio() {
                 <th className="text-left py-1.5 font-normal">Underlier</th>
                 <th className="text-right py-1.5 font-normal">Spot</th>
                 <th className="text-right py-1.5 font-normal">Net delta</th>
-                <th className="text-right py-1.5 font-normal">Dollar delta</th>
+                {/* M2 fix round: these are CONVERTED base-currency figures —
+                    the header carries the symbol, not a "Dollar" misnomer. */}
+                <th className="text-right py-1.5 font-normal">{`Delta (${sym})`}</th>
                 {/* window labeled to match Today's "Beta (60d)" convention (F8) */}
                 <th className="text-right py-1.5 font-normal">Beta (60d)</th>
-                <th className="text-right py-1.5 font-normal">SPY-equiv notional</th>
+                <th className="text-right py-1.5 font-normal">{`SPY-equiv (${sym})`}</th>
               </tr>
             </thead>
             <tbody>
@@ -288,6 +293,11 @@ export function Portfolio() {
               ))}
             </tbody>
           </table>
+        )}
+        {data.exposure_note && (
+          <p data-testid="exposure-note" className="text-warning text-[11px] mt-2 border-t border-hairline pt-2">
+            {data.exposure_note}
+          </p>
         )}
       </Panel>
 

@@ -82,7 +82,7 @@ class SimulateResponse(BaseModel):
 
 def create_app(
     store: BarStore, benchmark: str, api_token: str = "", broker=None,
-    base_currency: str = "USD",
+    *, base_currency: str,
 ) -> FastAPI:
     app = FastAPI(title="QuantMind API", version="0.1.0")
     # Shared state for domain routers (routers/*.py): read via request.app.state
@@ -91,7 +91,9 @@ def create_app(
     app.state.broker = broker
     # FX-aware valuation (TODOS 2026-07-27): the ONE labeled base currency
     # every router values in — threaded from Settings.base_currency the same
-    # way benchmark is, never hardcoded in a router.
+    # way benchmark is, never hardcoded in a router. REQUIRED (D4 fix round):
+    # a silent USD default at the app seam is how a GBP account ends up
+    # valued in the wrong currency without anyone choosing it.
     app.state.base_currency = base_currency
 
     async def auth(request: Request):

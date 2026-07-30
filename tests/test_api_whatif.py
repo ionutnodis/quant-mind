@@ -39,7 +39,7 @@ def client(tmp_path):
     # regardless of the 60/40 qty split between the two legs.
     store.write_bars(con_id=2, bar_size="1d", bars=spy_bars.copy(), meta=meta)
     store.write_symbol_map({"SPY": 1, "QQQ": 2})
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 
@@ -137,7 +137,7 @@ def test_whatif_insufficient_overlap_is_422(tmp_path):
     short_bars = _bars(n=10, seed=3)
     store.write_bars(con_id=1, bar_size="1d", bars=short_bars, meta=meta)
     store.write_symbol_map({"SPY": 1})
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     short_client = TestClient(
         app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"}
     )
@@ -167,7 +167,7 @@ def test_whatif_nonfinite_last_close_is_422_naming_the_symbol(tmp_path):
     bad_bars.loc[bad_bars.index[-1], "close"] = np.nan
     store.write_bars(con_id=2, bar_size="1d", bars=bad_bars, meta=meta)
     store.write_symbol_map({"SPY": 1, "QQQ": 2})
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="USD")
     c = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
     r = c.post("/api/whatif", json=_payload())
@@ -554,3 +554,15 @@ def test_whatif_missing_fx_rate_is_named_422(tmp_path):
     assert r.status_code == 422
     detail = r.json()["detail"]
     assert "GBP" in detail and "LSEQ" in detail and "sync" in detail
+
+
+def test_whatif_notes_flag_symbols_without_currency_metadata(client):
+    # D1 fix round: the fixture's SPY/QQQ have NO currency metadata — they
+    # are valued as the base by necessity, and the response must say so
+    # rather than silently rating them 1.0.
+    r = client.post("/api/whatif", json=_payload())
+    assert r.status_code == 200
+    notes = r.json()["notes"]
+    assert any(
+        "no currency metadata" in n and "SPY" in n and "QQQ" in n for n in notes
+    )

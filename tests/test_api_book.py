@@ -48,7 +48,7 @@ def store(tmp_path) -> BarStore:
 
 
 def _client(store: BarStore, broker=None) -> TestClient:
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken", broker=broker)
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", broker=broker, base_currency="USD")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
 

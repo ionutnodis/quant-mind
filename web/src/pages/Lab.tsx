@@ -21,6 +21,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { Panel, Skeleton } from "../components/Panel";
 import { LabFanChart, PairBandsChart } from "../components/LabFanChart";
 import { request } from "../lib/api";
+import { currencySymbol } from "../lib/currency";
 import { getCurrentBook, readActiveBookRef } from "../lib/book";
 
 interface ParamMeta {
@@ -102,7 +103,11 @@ function applyToBook(body: {
 interface BookRegressionResponse {
   factor_series: string;
   horizon: string; // "daily" — every risk number is horizon-labeled
-  exposure_units: string; // "usd_per_bp"
+  // Valuation currency of beta/alpha/gross (M1 fix round): exposure_units/
+  // beta_usd_per_bp are HISTORICAL wire names — the unit is base-currency-
+  // per-bp (£/bp for a GBP base). Optional so pre-regen fixtures stay valid.
+  base_currency?: string;
+  exposure_units: string; // historical name — see base_currency above
   beta_usd_per_bp: number | null;
   beta_se: number | null;
   beta_ci: [number, number] | null;
@@ -669,7 +674,7 @@ export function Lab() {
       >
         <div className="space-y-3">
           <p className="text-muted text-[11px]">
-            Regresses your book&apos;s daily $P&amp;L on the daily bp change of US10Y
+            Regresses your book&apos;s daily base-currency P&amp;L on the daily bp change of US10Y
             (Newey-West HAC SEs). Uses ?book_ref= if pinned
             {pinnedBookRef ? (
               <>
@@ -707,9 +712,12 @@ export function Lab() {
               data-testid="book-regression-results"
               className="text-you border-t border-hairline pt-2 space-y-2"
             >
-              {/* Book sensitivity — THE amber quantity on this panel. */}
+              {/* Book sensitivity — THE amber quantity on this panel. Unit
+                  label comes from the response's base_currency (M1): a GBP
+                  base reads £/bp, never a hardcoded $. */}
               <div className="num text-[14px]">
-                β {num(bookReg.data.beta_usd_per_bp, 0)} $/bp
+                β {num(bookReg.data.beta_usd_per_bp, 0)}{" "}
+                {currencySymbol(bookReg.data.base_currency ?? "USD")}/bp
                 <span className="text-you/70 text-[12px]"> ± {num(bookReg.data.beta_se, 0)}</span>
               </div>
               {bookReg.data.beta_ci && (
@@ -720,7 +728,9 @@ export function Lab() {
               )}
               <div className="grid grid-cols-2 gap-x-2 gap-y-1 num text-[11px]">
                 <div>
-                  <span className="text-you/70">α $/day</span>
+                  <span className="text-you/70">
+                    α {currencySymbol(bookReg.data.base_currency ?? "USD")}/day
+                  </span>
                   <span className="ml-1">{num(bookReg.data.alpha_usd, 1)}</span>
                 </div>
                 <div>
