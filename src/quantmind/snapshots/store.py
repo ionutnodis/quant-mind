@@ -202,6 +202,15 @@ class SnapshotStore:
             return False
         return True
 
+    def _complete_directory_barrier(self, target: Path) -> None:
+        self._inject("before_directory_fsync", target)
+        try:
+            self._fsync_directory(target.parent)
+        except OSError as error:
+            raise SnapshotDurabilityError(
+                f"directory fsync failed after immutable publication: {target.parent}"
+            ) from error
+
     def _publish_immutable(
         self,
         target: Path,
@@ -216,6 +225,7 @@ class SnapshotStore:
             expected_digest=expected_digest,
             expected_length=expected_length,
         ):
+            self._complete_directory_barrier(target)
             return
 
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -267,13 +277,7 @@ class SnapshotStore:
                 ) from error
 
             temp.unlink()
-            self._inject("before_directory_fsync", target)
-            try:
-                self._fsync_directory(target.parent)
-            except OSError as error:
-                raise SnapshotDurabilityError(
-                    f"directory fsync failed after immutable publication: {target.parent}"
-                ) from error
+            self._complete_directory_barrier(target)
         finally:
             # If publication happened and the directory barrier failed, the target is a valid
             # orphan. It must remain available for a later idempotent verification.
