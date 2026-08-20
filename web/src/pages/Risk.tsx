@@ -464,9 +464,11 @@ export function Risk() {
                 <div className="num text-muted text-[10px]">
                   {regression.data.alpha_note}
                   {" · "}
-                  {regression.data.alpha_tstat != null && Math.abs(regression.data.alpha_tstat) >= 2
-                    ? "alpha is statistically distinguishable from luck (|t|≥2)"
-                    : "alpha not distinguishable from luck (|t|<2)"}
+                  {regression.data.alpha_tstat == null
+                    ? "skill-vs-luck unavailable"
+                    : Math.abs(regression.data.alpha_tstat) >= 2
+                      ? "alpha is statistically distinguishable from luck (|t|≥2)"
+                      : "alpha not distinguishable from luck (|t|<2)"}
                 </div>
               </div>
               <div className="col-span-2 text-muted text-[10px]">{regression.data.horizon_note}</div>

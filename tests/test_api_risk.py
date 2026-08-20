@@ -45,13 +45,15 @@ def test_risk_beta_of_benchmark_vs_itself_is_one(client):
     assert all(p["date"] for p in series)
 
 
-def test_risk_returns_es_vol_and_alpha_note(client):
+def test_risk_returns_es_vol_and_refuses_alpha_without_risk_free(client):
     r = client.get("/api/risk/QQQ", params={"window": 30, "years": 1})
     assert r.status_code == 200
     body = r.json()
     assert body["es_975"] is None or body["es_975"] >= 0
     assert body["ann_vol"] is None or body["ann_vol"] >= 0
-    assert body["alpha_note"] == "vs SPY, rf=0 until FRED wiring"
+    assert body["alpha_annualized"] is None
+    assert "alpha unavailable" in body["alpha_note"].lower()
+    assert "rf=0" not in body["alpha_note"]
     assert body["window"] == 30
     assert body["years"] == 1
 
@@ -231,27 +233,53 @@ def test_regression_applies_rf_jensen_alpha_when_us3m_present(client_with_rf):
     assert body["alpha_tstat"] is not None
 
 
-def test_regression_falls_back_to_rf_zero_when_us3m_missing(client_with_named_series):
-    # US3M NOT cached -> honest rf=0 note, no 500, stats still populated.
+def test_risk_applies_rf_jensen_alpha_when_us3m_present(client_with_rf):
+    r = client_with_rf.get("/api/risk/MTUM", params={"window": 30, "years": 1})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["alpha_annualized"] is not None
+    assert body["alpha_note"] == "excess-return Jensen alpha vs SPY, rf=US3M/252"
+
+
+def test_regression_suppresses_alpha_when_us3m_missing(client_with_named_series):
     r = client_with_named_series.get(
         "/api/risk/MTUM/regression", params={"factors": "SPY", "years": 1}
     )
     assert r.status_code == 200
     body = r.json()
-    assert "rf=0" in body["alpha_note"]
-    assert "Jensen" not in body["alpha_note"]
+    for field in (
+        "alpha_daily",
+        "alpha_annualized",
+        "alpha_se",
+        "alpha_tstat",
+        "information_ratio",
+    ):
+        assert body[field] is None
+    assert body["alpha_ci"] == [None, None]
+    assert body["fit_line"]["intercept"] is None
+    alpha_row = next(row for row in body["attribution"] if row["name"] == "alpha")
+    assert alpha_row["daily"] is None
+    assert alpha_row["annualized"] is None
+    assert "alpha unavailable" in body["alpha_note"].lower()
+    assert "rf=0" not in body["alpha_note"]
 
 
-def test_regression_no_rf_when_benchmark_not_among_factors(client_with_rf):
-    # US3M cached but benchmark (SPY) NOT requested -> do not silently subtract
-    # rf from a non-market factor set; keep the honest rf=0 note.
+def test_regression_suppresses_alpha_when_benchmark_not_among_factors(client_with_rf):
     r = client_with_rf.get(
         "/api/risk/MTUM/regression", params={"factors": "US10Y", "years": 1}
     )
     assert r.status_code == 200
     body = r.json()
-    assert "rf=0" in body["alpha_note"]
-    assert "Jensen" not in body["alpha_note"]
+    assert body["alpha_daily"] is None
+    assert body["alpha_annualized"] is None
+    assert body["alpha_se"] is None
+    assert body["alpha_ci"] == [None, None]
+    assert body["alpha_tstat"] is None
+    assert body["information_ratio"] is None
+    assert body["fit_line"]["intercept"] is None
+    assert "alpha unavailable" in body["alpha_note"].lower()
+    assert "benchmark SPY is not among factors" in body["alpha_note"]
+    assert "rf=0" not in body["alpha_note"]
 
 
 def test_regression_single_factor_capm_shape(client_with_named_series):

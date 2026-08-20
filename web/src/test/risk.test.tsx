@@ -65,7 +65,7 @@ const RISK_SPY = {
     { date: "2026-07-21T00:00:00Z", beta: 1.02 },
   ],
   alpha_annualized: 0.012,
-  alpha_note: "vs SPY, rf=0 until FRED wiring",
+  alpha_note: "excess-return Jensen alpha vs SPY, rf=US3M/252",
   es_975: 0.0314,
   ann_vol: 0.182,
   mean_arith_annual: 0.20,
@@ -299,4 +299,27 @@ test("Risk page surfaces the volatility-drag and skill-vs-luck (alpha honesty) l
   expect(screen.getByText(/2\.00 \/ 1\.50/)).toBeInTheDocument();
   expect(screen.getByText(/rf=US3M\/252/)).toBeInTheDocument();
   expect(screen.getByText(/statistically distinguishable from luck/i)).toBeInTheDocument();
+});
+
+test("Risk page explains unavailable alpha without making a skill-vs-luck claim", async () => {
+  const unavailable = {
+    ...REGRESSION_SINGLE,
+    fit_line: { ...REGRESSION_SINGLE.fit_line, intercept: null },
+    alpha_daily: null,
+    alpha_annualized: null,
+    alpha_se: null,
+    alpha_ci: [null, null],
+    alpha_tstat: null,
+    information_ratio: null,
+    alpha_note: "alpha unavailable: US3M risk-free series is not cached",
+    attribution: REGRESSION_SINGLE.attribution.map((row) =>
+      row.name === "alpha" ? { ...row, daily: null, annualized: null } : row
+    ),
+  };
+  mockHappyPath(() => unavailable);
+  renderRisk();
+
+  expect(await screen.findByText(/alpha unavailable: US3M/i)).toBeInTheDocument();
+  expect(screen.queryByText(/alpha not distinguishable from luck/i)).not.toBeInTheDocument();
+  expect(screen.getByText(/skill-vs-luck unavailable/i)).toBeInTheDocument();
 });

@@ -41,6 +41,7 @@ _MAX_BETA_POINTS = 500
 _MAX_HIST_BINS = 60
 _MAX_SCATTER_POINTS = 500
 _MAX_RESIDUAL_POINTS = 500
+_PERIODS_PER_YEAR = 252
 
 # Named series that are decimal RATE LEVELS (FRED yields, cached like
 # 0.045 = 4.5% — see quantmind.sources.fred.FRED_STORE_SERIES) rather than
@@ -49,6 +50,22 @@ _MAX_RESIDUAL_POINTS = 500
 # near zero makes pct_change degenerate/explosive. Any other named series
 # (e.g. NET_LIQUIDITY) falls back to simple_returns, same as a price series.
 _RATE_LEVEL_SERIES = {"US10Y", "US2Y", "US3M"}
+
+
+def _daily_risk_free(
+    request: Request, index: pd.Index, *, min_obs: int
+) -> tuple[pd.Series | None, str | None]:
+    """Resolve aligned daily US3M or explain why production alpha is unavailable."""
+    try:
+        levels = request.app.state.store.read_series("US3M")
+    except FileNotFoundError:
+        return None, "US3M risk-free series is not cached"
+
+    daily = (levels / _PERIODS_PER_YEAR).replace([np.inf, -np.inf], np.nan).reindex(index)
+    n_obs = int(daily.notna().sum())
+    if n_obs < min_obs:
+        return None, f"US3M has only {n_obs} aligned observations; need at least {min_obs}"
+    return daily, None
 
 
 def _price_series(request: Request, symbol: str, years: int) -> pd.Series:
@@ -161,9 +178,12 @@ def risk(
     asset_returns = simple_returns(prices["asset"])
     bench_returns = simple_returns(prices["bench"])
 
+    rf_series, rf_unavailable_reason = _daily_risk_free(
+        request, asset_returns.index, min_obs=window
+    )
+
     try:
-        beta = rolling_beta(asset_returns, bench_returns, window=window, rf=0.0)
-        alpha = rolling_alpha(asset_returns, bench_returns, window=window, rf=0.0)
+        beta = rolling_beta(asset_returns, bench_returns, window=window, rf=rf_series)
     except InsufficientDataError as e:
         raise HTTPException(422, detail=str(e))
 
@@ -171,8 +191,11 @@ def risk(
     points = [BetaPoint(date=iso(d), beta=clean(v)) for d, v in beta_valid.items()]
     points = downsample(points, _MAX_BETA_POINTS)
 
-    alpha_valid = alpha.dropna()
-    alpha_last = clean(alpha_valid.iloc[-1]) if len(alpha_valid) else None
+    alpha_last = None
+    if rf_series is not None:
+        alpha = rolling_alpha(asset_returns, bench_returns, window=window, rf=rf_series)
+        alpha_valid = alpha.dropna()
+        alpha_last = clean(alpha_valid.iloc[-1]) if len(alpha_valid) else None
 
     try:
         es = historical_es(asset_returns, confidence=0.975)
@@ -201,7 +224,11 @@ def risk(
         n_obs=len(asset_returns),
         beta_series=points,
         alpha_annualized=alpha_last,
-        alpha_note=f"vs {benchmark}, rf=0 until FRED wiring",
+        alpha_note=(
+            f"excess-return Jensen alpha vs {benchmark}, rf=US3M/252"
+            if rf_series is not None
+            else f"alpha unavailable: {rf_unavailable_reason}"
+        ),
         es_975=clean(es),
         ann_vol=ann_vol,
         mean_arith_annual=mean_arith_annual,
@@ -345,8 +372,9 @@ class RegressionResponse(BaseModel):
     # pair that a raw annualized-alpha number alone can't answer.
     alpha_tstat: float | None
     information_ratio: float | None
-    # Honest provenance of the intercept: excess-return Jensen alpha (rf wired)
-    # vs a raw-return fallback with rf=0 (see the endpoint for when each holds).
+    # Honest provenance of the intercept: excess-return Jensen alpha when the
+    # market factor and aligned risk-free series are available; otherwise all
+    # alpha fields are suppressed.
     alpha_note: str
     betas: list[BetaEstimate]
     r_squared: float | None
@@ -356,9 +384,6 @@ class RegressionResponse(BaseModel):
     residuals: list[ResidualPoint]
     as_of: str | None
     horizon_note: str
-
-
-_PERIODS_PER_YEAR = 252
 
 
 @router.get("/risk/{symbol}/regression", response_model=RegressionResponse)
@@ -385,41 +410,45 @@ def regression(
     y = aligned["asset"]
     xs = {name: aligned[name] for name in factor_names}
 
-    # True excess-return Jensen alpha: subtract the daily risk-free (US3M level
-    # / 252) from both the asset and the ONE market factor, but only when the
-    # benchmark is actually among the requested factors — otherwise there is no
-    # market column to de-risk and subtracting rf from an arbitrary factor set
-    # would be dishonest, so we fall back to the raw-return (rf=0) intercept.
-    # A missing US3M cache also falls back to rf=0 (structured, never a 500).
+    # True excess-return Jensen alpha requires both the market factor and an
+    # aligned daily risk-free series. The raw OLS fit remains useful for beta,
+    # variance, and residual diagnostics when either input is missing, but its
+    # intercept must never be published as production alpha.
     benchmark = request.app.state.benchmark
     rf_series: pd.Series | None = None
     market_factor: str | None = None
-    rf_applied = False
+    alpha_unavailable_reason: str | None = None
     if benchmark in factor_names:
-        try:
-            rf_levels = request.app.state.store.read_series("US3M")
-        except FileNotFoundError:
-            rf_levels = None
-        if rf_levels is not None:
-            rf_series = (rf_levels / _PERIODS_PER_YEAR).reindex(aligned.index)
+        rf_series, alpha_unavailable_reason = _daily_risk_free(
+            request,
+            aligned.index,
+            min_obs=max(_MIN_FACTOR_WINDOW, 5 * (len(factor_names) + 1)),
+        )
+        if rf_series is not None:
             market_factor = benchmark
-            rf_applied = True
+    else:
+        alpha_unavailable_reason = f"benchmark {benchmark} is not among factors"
+
+    alpha_available = rf_series is not None and market_factor is not None
 
     try:
         full = factor_regression(y, xs, rf=rf_series, market_factor=market_factor)
-        single = factor_regression(y, {factor_names[0]: xs[factor_names[0]]})
+        primary = factor_names[0]
+        single = factor_regression(
+            y,
+            {primary: xs[primary]},
+            rf=rf_series if alpha_available and primary == benchmark else None,
+            market_factor=benchmark if alpha_available and primary == benchmark else None,
+        )
         progression = r_squared_progression(y, [(name, xs[name]) for name in factor_names])
     except InsufficientDataError as e:
         raise HTTPException(422, detail=str(e))
 
-    if rf_applied:
+    if alpha_available:
         alpha_note = f"excess-return Jensen alpha vs {benchmark}, rf=US3M/252"
-    elif benchmark in factor_names:
-        alpha_note = f"vs {benchmark}, rf=0 (US3M unavailable)"
     else:
-        alpha_note = f"rf=0; raw-return intercept ({benchmark} not among factors)"
+        alpha_note = f"alpha unavailable: {alpha_unavailable_reason}"
 
-    primary = factor_names[0]
     scatter_points = [
         ScatterPoint(date=iso(d), asset=clean(row["asset"]), factor=clean(row[primary]))
         for d, row in aligned.iterrows()
@@ -431,7 +460,7 @@ def regression(
         slope=clean(single.betas[primary]),
         slope_se=clean(single.beta_se[primary]),
         slope_ci=(clean(single.beta_ci[primary][0]), clean(single.beta_ci[primary][1])),
-        intercept=clean(single.alpha),
+        intercept=clean(single.alpha) if alpha_available and primary == benchmark else None,
         r_squared=clean(single.r_squared),
     )
 
@@ -453,7 +482,9 @@ def regression(
         annualized = daily * _PERIODS_PER_YEAR if daily is not None else None
         return AttributionRow(name=name, daily=clean(daily), annualized=clean(annualized))
 
-    attribution_rows = [_attribution_row("alpha", full.attribution["alpha"])]
+    attribution_rows = [
+        _attribution_row("alpha", full.attribution["alpha"] if alpha_available else None)
+    ]
     attribution_rows += [_attribution_row(name, full.attribution[name]) for name in factor_names]
     attribution_rows.append(_attribution_row("idiosyncratic", full.attribution["idiosyncratic"]))
 
@@ -461,7 +492,7 @@ def regression(
         [ResidualPoint(date=iso(d), value=clean(v)) for d, v in full.residuals.items()], _MAX_RESIDUAL_POINTS
     )
 
-    alpha_daily = full.alpha
+    alpha_daily = full.alpha if alpha_available else None
     return RegressionResponse(
         symbol=symbol,
         factors=factor_names,
@@ -472,11 +503,17 @@ def regression(
         scatter=scatter_points,
         fit_line=fit_line,
         alpha_daily=clean(alpha_daily),
-        alpha_annualized=clean(alpha_daily * _PERIODS_PER_YEAR),
-        alpha_se=clean(full.alpha_se),
-        alpha_ci=(clean(full.alpha_ci[0]), clean(full.alpha_ci[1])),
-        alpha_tstat=clean(full.alpha_tstat),
-        information_ratio=clean(full.information_ratio),
+        alpha_annualized=clean(
+            alpha_daily * _PERIODS_PER_YEAR if alpha_daily is not None else None
+        ),
+        alpha_se=clean(full.alpha_se) if alpha_available else None,
+        alpha_ci=(
+            (clean(full.alpha_ci[0]), clean(full.alpha_ci[1]))
+            if alpha_available
+            else (None, None)
+        ),
+        alpha_tstat=clean(full.alpha_tstat) if alpha_available else None,
+        information_ratio=clean(full.information_ratio) if alpha_available else None,
         alpha_note=alpha_note,
         betas=betas,
         r_squared=clean(full.r_squared),
@@ -486,7 +523,8 @@ def regression(
         residuals=residual_points,
         as_of=iso(aligned.index[-1]) if len(aligned) else None,
         horizon_note=(
-            "daily returns; alpha/attribution figures shown daily and annualized (x252); "
+            "daily returns; Jensen alpha is shown only with aligned US3M and the market factor; "
+            "available attribution figures are shown daily and annualized (x252); "
             f"n_obs is {'the full ' + str(years) + 'y cache' if window is None else f'the last {window} aligned observations'}"
         ),
     )
