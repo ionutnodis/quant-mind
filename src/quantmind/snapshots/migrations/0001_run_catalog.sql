@@ -215,6 +215,12 @@ CREATE UNIQUE INDEX one_live_snapshot_per_book_generation
     ON snapshot_runs(book_id, captured_generation)
     WHERE run_outcome = 'RUNNING' AND book_id IS NOT NULL;
 
+CREATE INDEX snapshot_runs_by_identity
+    ON snapshot_runs(run_kind, idempotency_identity);
+
+CREATE INDEX snapshot_runs_by_book_generation
+    ON snapshot_runs(book_id, captured_generation);
+
 CREATE INDEX snapshot_runs_by_book_requested
     ON snapshot_runs(book_id, requested_at_utc DESC, run_id DESC);
 
@@ -253,6 +259,12 @@ CREATE TABLE snapshot_manifests (
 CREATE INDEX blessed_manifest_fallback
     ON snapshot_manifests(book_id, publication_sequence DESC)
     WHERE snapshot_status = 'BLESSED';
+
+CREATE INDEX snapshot_manifests_by_book_generation
+    ON snapshot_manifests(book_id, book_generation);
+
+CREATE INDEX snapshot_manifests_by_book_sequence
+    ON snapshot_manifests(book_id, publication_sequence DESC);
 
 CREATE TABLE active_snapshots (
     book_id TEXT NOT NULL PRIMARY KEY REFERENCES book_heads(book_id),
@@ -309,6 +321,9 @@ CREATE TABLE snapshot_recovery_events (
         REFERENCES snapshot_manifests(book_id, snapshot_id)
 );
 
+CREATE INDEX recovery_events_by_book_sequence
+    ON snapshot_recovery_events(book_id, event_sequence);
+
 CREATE TRIGGER recovery_selected_snapshot_blessed_on_insert
 BEFORE INSERT ON snapshot_recovery_events
 WHEN NEW.selected_snapshot_id IS NOT NULL
@@ -333,6 +348,19 @@ WHEN NEW.selected_snapshot_id IS NOT NULL
  )
 BEGIN
     SELECT RAISE(ABORT, 'selected recovery snapshot must be BLESSED');
+END;
+
+CREATE TRIGGER manifest_selected_snapshot_stays_blessed
+BEFORE UPDATE OF snapshot_status ON snapshot_manifests
+WHEN OLD.snapshot_status = 'BLESSED'
+ AND NEW.snapshot_status <> 'BLESSED'
+ AND EXISTS (
+    SELECT 1 FROM snapshot_recovery_events
+    WHERE book_id = OLD.book_id
+      AND selected_snapshot_id = OLD.snapshot_id
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'selected recovery snapshot must remain BLESSED');
 END;
 
 PRAGMA user_version = 1;

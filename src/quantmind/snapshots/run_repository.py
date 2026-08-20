@@ -88,8 +88,13 @@ _EXPECTED_SCHEMA_COLUMNS = {
 _EXPECTED_SCHEMA_INDEXES = {
     "one_live_idempotency_identity",
     "one_live_snapshot_per_book_generation",
+    "snapshot_runs_by_identity",
+    "snapshot_runs_by_book_generation",
     "snapshot_runs_by_book_requested",
     "blessed_manifest_fallback",
+    "snapshot_manifests_by_book_generation",
+    "snapshot_manifests_by_book_sequence",
+    "recovery_events_by_book_sequence",
 }
 _EXPECTED_INDEX_SHAPES = {
     "one_live_idempotency_identity": (
@@ -98,11 +103,26 @@ _EXPECTED_INDEX_SHAPES = {
     "one_live_snapshot_per_book_generation": (
         "snapshot_runs", ("book_id", "captured_generation"), 1, 1
     ),
+    "snapshot_runs_by_identity": (
+        "snapshot_runs", ("run_kind", "idempotency_identity"), 0, 0
+    ),
+    "snapshot_runs_by_book_generation": (
+        "snapshot_runs", ("book_id", "captured_generation"), 0, 0
+    ),
     "snapshot_runs_by_book_requested": (
         "snapshot_runs", ("book_id", "requested_at_utc", "run_id"), 0, 0
     ),
     "blessed_manifest_fallback": (
         "snapshot_manifests", ("book_id", "publication_sequence"), 0, 1
+    ),
+    "snapshot_manifests_by_book_generation": (
+        "snapshot_manifests", ("book_id", "book_generation"), 0, 0
+    ),
+    "snapshot_manifests_by_book_sequence": (
+        "snapshot_manifests", ("book_id", "publication_sequence"), 0, 0
+    ),
+    "recovery_events_by_book_sequence": (
+        "snapshot_recovery_events", ("book_id", "event_sequence"), 0, 0
     ),
 }
 _EXPECTED_FOREIGN_KEY_GROUPS = tuple(
@@ -1612,6 +1632,7 @@ class RunRepository:
             if expected_row is None:
                 raise RunDatabaseError("expected active publication is missing")
             expected = RunRepository._publication_from_row(expected_row)
+            RunRepository._validate_publication_relations(connection, expected)
             if (
                 record.captured_generation is None
                 or expected.book_generation > record.captured_generation
@@ -1709,7 +1730,10 @@ class RunRepository:
         ).fetchone()
         if rejected is None:
             raise RunDatabaseError("recovery rejected publication is missing")
-        RunRepository._publication_from_row(rejected)
+        rejected_publication = RunRepository._publication_from_row(rejected)
+        RunRepository._validate_publication_relations(
+            connection, rejected_publication
+        )
         if event.selected_snapshot_id is None:
             return
         selected = connection.execute(
@@ -1722,6 +1746,7 @@ class RunRepository:
         if selected is None:
             raise RunDatabaseError("recovery selected publication is missing")
         publication = RunRepository._publication_from_row(selected)
+        RunRepository._validate_publication_relations(connection, publication)
         if (
             publication.snapshot_status is not SnapshotStatus.BLESSED
             or event.selected_snapshot_id == event.rejected_snapshot_id
@@ -1814,6 +1839,16 @@ class RunRepository:
         }
         return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
+    @staticmethod
+    def _validated_run_neighborhood(
+        connection: sqlite3.Connection,
+        rows: tuple[sqlite3.Row, ...] | list[sqlite3.Row],
+    ) -> tuple[RunRecordV1, ...]:
+        records = tuple(RunRepository._run_from_row(row) for row in rows)
+        for record in records:
+            RunRepository._validate_run_relations(connection, record)
+        return records
+
     def create_or_join(
         self, request: NewRunV1, *, now: datetime
     ) -> CreateRunResultV1:
@@ -1862,34 +1897,49 @@ class RunRepository:
             identity = self._idempotency_identity(
                 request, captured_generation, client_key_digest
             )
-            compatible = connection.execute(
-                """
-                SELECT * FROM snapshot_runs
-                WHERE run_kind = ? AND idempotency_identity = ?
-                  AND run_outcome = 'RUNNING'
-                """,
-                (request.run_kind, identity),
-            ).fetchone()
-            if compatible is not None:
-                record = self._run_from_row(compatible)
-                self._validate_run_relations(connection, record)
-                return CreateRunResultV1(
-                    record=record, created=False
+            identity_records = self._validated_run_neighborhood(
+                connection,
+                connection.execute(
+                    """
+                    SELECT * FROM snapshot_runs
+                    WHERE run_kind = ? AND idempotency_identity = ?
+                    ORDER BY requested_at_utc, run_id
+                    """,
+                    (request.run_kind, identity),
+                ).fetchall(),
+            )
+            generation_records: tuple[RunRecordV1, ...] = ()
+            if request.book_id is not None:
+                generation_records = self._validated_run_neighborhood(
+                    connection,
+                    connection.execute(
+                        """
+                        SELECT * FROM snapshot_runs
+                        WHERE book_id = ? AND captured_generation = ?
+                        ORDER BY requested_at_utc, run_id
+                        """,
+                        (request.book_id, captured_generation),
+                    ).fetchall(),
                 )
 
-            if request.book_id is not None:
-                incompatible = connection.execute(
-                    """
-                    SELECT run_id FROM snapshot_runs
-                    WHERE book_id = ? AND captured_generation = ?
-                      AND run_outcome = 'RUNNING'
-                    """,
-                    (request.book_id, captured_generation),
-                ).fetchone()
-                if incompatible is not None:
-                    raise IncompatibleLiveRunError(
-                        "a different live snapshot run already targets this book generation"
-                    )
+            compatible = next(
+                (
+                    record
+                    for record in identity_records
+                    if record.run_outcome is RunOutcome.RUNNING
+                ),
+                None,
+            )
+            if compatible is not None:
+                return CreateRunResultV1(record=compatible, created=False)
+
+            if any(
+                record.run_outcome is RunOutcome.RUNNING
+                for record in generation_records
+            ):
+                raise IncompatibleLiveRunError(
+                    "a different live snapshot run already targets this book generation"
+                )
 
             try:
                 connection.execute(
@@ -1975,25 +2025,18 @@ class RunRepository:
         connection: sqlite3.Connection,
         run_id: str,
         expected_version: int | None,
-        *,
-        validate_record: bool = True,
     ) -> sqlite3.Row:
         row = connection.execute(
             "SELECT * FROM snapshot_runs WHERE run_id = ?", (run_id,)
         ).fetchone()
         if row is None:
             raise RunNotFoundError(f"run not found: {run_id}")
-        try:
-            outcome = RunOutcome(row["run_outcome"])
-        except (LookupError, TypeError, ValueError) as error:
-            raise RunDatabaseError("durable run outcome is malformed") from error
-        if outcome is not RunOutcome.RUNNING:
+        record = RunRepository._run_from_row(row)
+        RunRepository._validate_run_relations(connection, record)
+        if record.run_outcome is not RunOutcome.RUNNING:
             raise TerminalRunMutationError("terminal run records are immutable")
-        if expected_version is not None and row["version"] != expected_version:
+        if expected_version is not None and record.version != expected_version:
             raise StaleRunVersionError("run version does not match durable state")
-        if validate_record:
-            record = RunRepository._run_from_row(row)
-            RunRepository._validate_run_relations(connection, record)
         return row
 
     def claim_start(
@@ -2127,18 +2170,11 @@ class RunRepository:
         expected_version = _require_expected_version(expected_version)
         now_text = _timestamp_text(now, "candidate attachment time")
         with self._write_transaction() as connection:
-            row = self._running_row(
-                connection,
-                run_id,
-                expected_version,
-                validate_record=False,
-            )
+            row = self._running_row(connection, run_id, expected_version)
             if row["book_id"] is None:
                 raise IllegalRunTransitionError(
                     "non-book runs cannot attach snapshot candidates"
                 )
-            record = self._run_from_row(row)
-            self._validate_run_relations(connection, record)
             _require_monotonic_update(row, now_text)
             if RunStage(row["run_stage"]) is not RunStage.PUBLISHING:
                 raise IllegalRunTransitionError(
@@ -2693,15 +2729,20 @@ class RunRepository:
             rows = connection.execute(
                 """
                 SELECT * FROM snapshot_manifests
-                WHERE book_id = ? AND snapshot_status = 'BLESSED' AND snapshot_id <> ?
+                WHERE book_id = ?
                 ORDER BY publication_sequence DESC
                 """,
-                (book_id, excluding),
+                (book_id,),
             ).fetchall()
             publications = tuple(self._publication_from_row(row) for row in rows)
             for publication in publications:
                 self._validate_publication_relations(connection, publication)
-            return publications
+            return tuple(
+                publication
+                for publication in publications
+                if publication.snapshot_status is SnapshotStatus.BLESSED
+                and publication.snapshot_id != excluding
+            )
 
     def list_recovery_events(self, book_id: str) -> tuple[RecoveryEventV1, ...]:
         book_id = _require_nonblank(book_id, "book ID")
@@ -2823,17 +2864,22 @@ class RunRepository:
                 fallback_rows = connection.execute(
                     """
                     SELECT * FROM snapshot_manifests
-                    WHERE book_id = ? AND snapshot_status = 'BLESSED'
-                      AND snapshot_id <> ?
+                    WHERE book_id = ?
                     ORDER BY publication_sequence DESC
                     """,
-                    (book_id, previous_active.snapshot_id),
+                    (book_id,),
                 ).fetchall()
-                fallbacks = tuple(
+                same_book_publications = tuple(
                     self._publication_from_row(row) for row in fallback_rows
                 )
-                for fallback in fallbacks:
-                    self._validate_publication_relations(connection, fallback)
+                for publication in same_book_publications:
+                    self._validate_publication_relations(connection, publication)
+                fallbacks = tuple(
+                    publication
+                    for publication in same_book_publications
+                    if publication.snapshot_status is SnapshotStatus.BLESSED
+                    and publication.snapshot_id != previous_active.snapshot_id
+                )
         if previous_active is None:
             return ActiveRecoveryResultV1(
                 decision=ActiveRecoveryDecision.UNCHANGED,
@@ -2898,6 +2944,32 @@ class RunRepository:
             )
             if current_active is not None:
                 self._validate_active_relations(connection, current_active)
+            rejected_row = connection.execute(
+                """
+                SELECT * FROM snapshot_manifests
+                WHERE book_id = ? AND snapshot_id = ? AND book_generation = ?
+                """,
+                (
+                    book_id,
+                    previous_active.snapshot_id,
+                    previous_active.book_generation,
+                ),
+            ).fetchone()
+            rejected_publication = (
+                None
+                if rejected_row is None
+                else self._publication_from_row(rejected_row)
+            )
+            if (
+                rejected_publication is None
+                or rejected_publication != active_publication
+            ):
+                raise PublicationConflictError(
+                    "rejected publication metadata changed before resolution"
+                )
+            self._validate_publication_relations(
+                connection, rejected_publication
+            )
             pointer_matches = (
                 current_row is not None
                 and current_row["snapshot_id"] == previous_active.snapshot_id
