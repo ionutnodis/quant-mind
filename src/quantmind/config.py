@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     benchmark: str = "SPY"
     data_dir: Path = Path("data")
     fred_api_key: str = ""
+    api_token: str = ""
+    api_allowed_origins: str = (
+        "http://127.0.0.1:8000,http://localhost:8000,"
+        "http://127.0.0.1:5173,http://localhost:5173"
+    )
     n_paths: int = 10_000  # Monte Carlo default, Engineering Constraint 10
     # Free-fallback allowlist (Task A2, Global Constraints: free-first data,
     # single-provenance law): comma-separated symbols synced via yfinance
@@ -24,3 +29,11 @@ class Settings(BaseSettings):
 
     def yfinance_symbol_list(self) -> list[str]:
         return [s.strip() for s in self.yfinance_symbols.split(",") if s.strip()]
+
+    def api_allowed_origin_list(self) -> tuple[str, ...]:
+        origins = tuple(
+            origin.strip()
+            for origin in self.api_allowed_origins.split(",")
+            if origin.strip()
+        )
+        return origins

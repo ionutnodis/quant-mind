@@ -2,8 +2,8 @@
 
 Binds 127.0.0.1 only (Engineering Constraint 5). On startup we TRY to connect
 the live broker (paper Gateway) so /api/portfolio shows the real book; failure
-degrades to broker=None (structured-empty portfolio) — the app never depends
-on the Gateway being up (staleness policy).
+degrades to broker=None and live-broker reads report unavailable — the app
+never depends on the Gateway being up (staleness policy).
 """
 
 from __future__ import annotations
@@ -24,7 +24,8 @@ def build():
     app = create_app(
         store=BarStore(settings.data_dir),
         benchmark=settings.benchmark,
-        api_token=getattr(settings, "api_token", ""),
+        api_token=settings.api_token,
+        allowed_origins=settings.api_allowed_origin_list(),
     )
 
     @asynccontextmanager
@@ -46,7 +47,7 @@ def build():
             print("broker: connected to Gateway")
         except Exception as exc:  # degrade, never block startup
             _app.state.broker = None
-            print(f"broker: unavailable ({type(exc).__name__}) — portfolio shows empty book")
+            print(f"broker: unavailable ({type(exc).__name__}) — live broker views unavailable")
         yield
         try:
             ib.disconnect()

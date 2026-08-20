@@ -2,8 +2,8 @@
 
 Serialization policy (Phase Plan): all timestamps UTC ISO Z-suffixed; NaN/Inf
 map to null; empty cache returns structured empties, never 500. Security:
-static bearer token (when configured) + localhost host check — in place from
-Phase 1, not deferred to the execution phase.
+static bearer token (when configured) + localhost Host and browser-origin
+checks — in place from Phase 1, not deferred to the execution phase.
 """
 
 from __future__ import annotations
@@ -77,19 +77,50 @@ class SimulateResponse(BaseModel):
     n_paths: int
 
 
-def create_app(store: BarStore, benchmark: str, api_token: str = "", broker=None) -> FastAPI:
+_DEFAULT_ALLOWED_ORIGINS = frozenset(
+    {
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    }
+)
+
+
+def create_app(
+    store: BarStore,
+    benchmark: str,
+    api_token: str = "",
+    broker=None,
+    allowed_origins: tuple[str, ...] | None = None,
+) -> FastAPI:
     app = FastAPI(title="QuantMind API", version="0.1.0")
     # Shared state for domain routers (routers/*.py): read via request.app.state
     app.state.store = store
     app.state.benchmark = benchmark
     app.state.broker = broker
+    accepted_origins = (
+        _DEFAULT_ALLOWED_ORIGINS
+        if allowed_origins is None
+        else frozenset(allowed_origins)
+    )
 
     async def auth(request: Request):
-        # Security review: strict host allowlist (no test backdoors) and
-        # constant-time token comparison.
+        # Security review: strict local Host plus browser request provenance,
+        # followed by constant-time bearer comparison. Origin-less CLI/native
+        # clients remain supported and rely on the bearer when configured.
         host = request.headers.get("host", "").split(":")[0]
         if host not in ("127.0.0.1", "localhost"):
             raise HTTPException(403, "local access only")
+
+        fetch_site = request.headers.get("sec-fetch-site", "").lower()
+        if fetch_site and fetch_site not in {"same-origin", "same-site", "none"}:
+            raise HTTPException(403, "cross-site browser request rejected")
+
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in accepted_origins:
+            raise HTTPException(403, "browser origin not allowed")
+
         if api_token:
             header = request.headers.get("authorization", "")
             if not secrets.compare_digest(header, f"Bearer {api_token}"):
