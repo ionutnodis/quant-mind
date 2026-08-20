@@ -1,8 +1,6 @@
-// Playwright smoke config (Task 4, wave-2 ops). Boots the real FastAPI
-// backend (reading the developer's local data/ cache — renders-from-cache,
-// no network needed) plus the Vite dev server, and runs ONE smoke spec
-// against them. `reuseExistingServer: true` so a dev already running
-// `bun run dev` / `uv run python -m quantmind.api.main` isn't duplicated.
+// Hermetic Playwright smoke config. Boots a deterministic synthetic FastAPI
+// cache plus an isolated Vite port; it never reads a developer's holdings or
+// reuses an already-running local dashboard.
 import { defineConfig, devices } from "@playwright/test";
 import { fileURLToPath } from "node:url";
 
@@ -16,26 +14,27 @@ export default defineConfig({
   retries: 0,
   reporter: "list",
   use: {
-    // "localhost" (not 127.0.0.1) — Vite's default dev-server host resolves
-    // to ::1 on this machine; matching it here is what makes
-    // reuseExistingServer actually detect an already-running `vite`.
-    baseURL: "http://localhost:5173",
+    baseURL: "http://localhost:4173",
     trace: "retain-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+    { name: "webkit", use: { ...devices["Desktop Safari"] } },
+  ],
   webServer: [
     {
-      command: "uv run python -m quantmind.api.main",
+      command: "uv run python -m quantmind.testing.synthetic_e2e --port 8765",
       cwd: REPO_ROOT,
-      url: "http://127.0.0.1:8000/api/health",
-      reuseExistingServer: true,
+      url: "http://127.0.0.1:8765/api/health",
+      reuseExistingServer: false,
       timeout: 30_000,
     },
     {
-      command: "bun run dev",
+      command: "bun run dev -- --host localhost --port 4173 --strictPort",
       cwd: WEB_DIR,
-      url: "http://localhost:5173",
-      reuseExistingServer: true,
+      env: { QM_API_PROXY_TARGET: "http://127.0.0.1:8765" },
+      url: "http://localhost:4173",
+      reuseExistingServer: false,
       timeout: 30_000,
     },
   ],

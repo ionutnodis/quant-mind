@@ -68,7 +68,7 @@ test("renders tiles with direction glyphs and ES from the API", async () => {
   expect(screen.getByText("Your book")).toBeInTheDocument();
   expect(screen.getByText(/ranked by move/i)).toBeInTheDocument();
   expect(await screen.findByText(/Ornstein-Uhlenbeck/)).toBeInTheDocument();
-  expect(screen.getByText(/as of 2026-07-24/)).toBeInTheDocument();
+  expect(screen.getAllByText(/as of 2026-07-24/).length).toBeGreaterThan(0);
   // wave-3B additions are wired into the page (each component's behavior is
   // covered by its own dedicated test file — here just prove Today mounts them)
   expect(screen.getByTestId("news-ticker-stub")).toBeInTheDocument();

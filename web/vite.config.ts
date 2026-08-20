@@ -4,12 +4,14 @@ import { configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
+const apiProxyTarget = process.env.QM_API_PROXY_TARGET ?? "http://127.0.0.1:8000";
+
 // Dev topology (design doc decision 5A): Vite proxies /api to FastAPI —
 // zero CORS surface. Daily use: FastAPI serves the built assets itself.
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
-    proxy: { "/api": "http://127.0.0.1:8000" },
+    proxy: { "/api": apiProxyTarget },
   },
   test: {
     environment: "jsdom",
