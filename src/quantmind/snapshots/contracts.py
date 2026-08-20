@@ -6,7 +6,7 @@ import json
 import math
 import unicodedata
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -122,6 +122,8 @@ def _canonicalize(value: Any) -> Any:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("canonical datetimes must be timezone-aware")
         return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    if isinstance(value, date):
+        return value.isoformat()
     if isinstance(value, Decimal):
         if not value.is_finite():
             raise ValueError("canonical decimals must be finite")
