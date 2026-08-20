@@ -13,11 +13,14 @@ from pathlib import Path
 from typing import Final
 
 from quantmind.snapshots.contracts import FrozenContractBase, SnapshotStatus, canonical_json_bytes
-from quantmind.snapshots.input_artifacts import ArtifactRefV1
+from quantmind.snapshots.input_artifacts import (
+    ArtifactRefV1,
+    revalidate_frozen_contract,
+    validate_artifact_ref,
+)
 from quantmind.snapshots.manifest import (
     AnalyticalSnapshotManifestV1,
     parse_manifest,
-    verify_manifest,
 )
 
 
@@ -332,18 +335,20 @@ class SnapshotStore:
     ) -> ArtifactRefV1:
         if not isinstance(value, FrozenContractBase):
             raise TypeError("canonical artifact must be a frozen analytical contract")
-        schema_version = getattr(value, "schema_version", type(value).__name__)
+        validated_value = revalidate_frozen_contract(value)
+        schema_version = getattr(
+            validated_value, "schema_version", type(validated_value).__name__
+        )
         if not isinstance(schema_version, str):
             raise ValueError("canonical artifact schema version must be a string")
         return self.put_bytes(
-            canonical_json_bytes(value),
+            canonical_json_bytes(validated_value),
             media_type=media_type,
             schema_version=schema_version,
         )
 
     def read_verified_artifact(self, reference: ArtifactRefV1) -> bytes:
-        if not isinstance(reference, ArtifactRefV1):
-            raise TypeError("artifact reference must be ArtifactRefV1")
+        reference = validate_artifact_ref(reference)
         return self._read_verified_file(
             self._object_path(reference.digest),
             expected_digest=reference.digest,
@@ -369,11 +374,11 @@ class SnapshotStore:
     def put_manifest(self, manifest: AnalyticalSnapshotManifestV1) -> Path:
         if not isinstance(manifest, AnalyticalSnapshotManifestV1):
             raise TypeError("manifest must be AnalyticalSnapshotManifestV1")
-        verify_manifest(manifest)
-        self._verify_manifest_references(manifest)
         payload = canonical_json_bytes(manifest)
+        validated_manifest = parse_manifest(payload)
+        self._verify_manifest_references(validated_manifest)
         envelope_digest = hashlib.sha256(payload).hexdigest()
-        target = self._manifest_path(manifest.snapshot_id)
+        target = self._manifest_path(validated_manifest.snapshot_id)
         self._publish_immutable(target, payload, expected_digest=envelope_digest)
         return target
 

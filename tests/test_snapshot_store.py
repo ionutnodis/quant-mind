@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import stat
 import subprocess
@@ -17,6 +18,7 @@ from quantmind.snapshots.contracts import (
     RecoveryClass,
     SnapshotStatus,
     ValuationCutV1,
+    canonical_json_bytes,
 )
 from quantmind.snapshots.input_artifacts import (
     ArtifactRightsMode,
@@ -26,8 +28,10 @@ from quantmind.snapshots.input_artifacts import (
 )
 from quantmind.snapshots.manifest import (
     AnalyticalSnapshotManifestBodyV1,
+    AnalyticalSnapshotManifestV1,
     ArtifactRefV1,
     DuplicateJSONKeyError,
+    ManifestIdentityError,
     OutputArtifactBindingV1,
     UnsupportedManifestSchemaError,
     create_manifest,
@@ -71,6 +75,8 @@ def _manifest(
         object_ref=input_ref,
         source="synthetic",
         provider="quantmind",
+        entitlement_reference=None,
+        entitlement_version=None,
         rights_mode=ArtifactRightsMode.RAW_ALLOWED,
         rights_manifest_version="synthetic-rights-v1",
         reproducibility_class=ReproducibilityClass.NORMALIZED_ONLY,
@@ -81,6 +87,41 @@ def _manifest(
         object_ref=output_ref,
         model_version="xray-v1",
     )
+    book_gate = GateEvidenceV1(
+        gate_code="BOOK_RECONCILIATION",
+        status=GateStatus.PASSED,
+        recovery_class=RecoveryClass.USER_RESOLVABLE,
+        evidence=("book reconciles",),
+        recovery_action="Resolve the book mismatch",
+    )
+    gates = [book_gate]
+    policy_evidence = [
+        {
+            "subject_kind": "OUTPUT",
+            "subject_id": "xray",
+            "gate_code": "BOOK_RECONCILIATION",
+        }
+    ]
+    refused_outputs: tuple[str, ...] = ()
+    if status is SnapshotStatus.DEGRADED:
+        gates.append(
+            GateEvidenceV1(
+                gate_code="TAIL_POLICY",
+                status=GateStatus.REFUSED,
+                recovery_class=RecoveryClass.MODEL_OWNER_UPDATE,
+                evidence=("tail model is unavailable",),
+                recovery_action="Publish a supported tail model",
+            )
+        )
+        policy_evidence.append(
+            {
+                "subject_kind": "CAPABILITY",
+                "subject_id": "TAIL",
+                "gate_code": "TAIL_POLICY",
+            }
+        )
+        refused_outputs = ("TAIL",)
+
     body = AnalyticalSnapshotManifestBodyV1(
         schema_version="analytical_snapshot_manifest_v1",
         canonicalization_version="quantmind_canonical_json_v1",
@@ -102,6 +143,8 @@ def _manifest(
         position_hash="1" * 64,
         input_artifacts=(input_binding,),
         security_master_mapping_version="security-master-v1",
+        corporate_action_version=None,
+        calendar_version=None,
         rights_manifest_versions=("synthetic-rights-v1",),
         factor_taxonomy_version="factor-taxonomy-v1",
         return_series_version="returns-v1",
@@ -115,17 +158,19 @@ def _manifest(
         application_commit="1d2b187",
         application_build_id="test-build",
         snapshot_status=status,
-        gates=(
-            GateEvidenceV1(
-                gate_code="BOOK_RECONCILIATION",
-                status=GateStatus.PASSED,
-                recovery_class=RecoveryClass.USER_RESOLVABLE,
-                evidence=("book reconciles",),
-                recovery_action="Resolve the book mismatch",
-            ),
+        gates=tuple(sorted(gates, key=lambda gate: gate.gate_code)),
+        policy_evidence=tuple(
+            sorted(
+                policy_evidence,
+                key=lambda evidence: (
+                    evidence["subject_kind"],
+                    evidence["subject_id"],
+                    evidence["gate_code"],
+                ),
+            )
         ),
         warnings=(),
-        refused_outputs=() if status is SnapshotStatus.BLESSED else ("TAIL",),
+        refused_outputs=refused_outputs,
         outputs=(output_binding,),
     )
     return create_manifest(body)
@@ -451,6 +496,77 @@ def test_put_manifest_refuses_missing_or_corrupt_referenced_objects(tmp_path):
     assert not _manifest_path(tmp_path, corrupt_manifest.snapshot_id).exists()
 
 
+def test_store_revalidates_bypassed_generic_canonical_contract_before_writing(tmp_path):
+    store = SnapshotStore(tmp_path)
+    cut = ValuationCutV1(
+        target_cut_utc=datetime(2026, 7, 24, 20, 15, tzinfo=UTC),
+        display_timezone="America/New_York",
+        capture_start_utc=datetime(2026, 7, 24, 20, 15, tzinfo=UTC),
+        capture_end_utc=datetime(2026, 7, 24, 20, 20, tzinfo=UTC),
+    )
+    invalid_cut = cut.model_copy(update={"display_timezone": "Mars/Olympus_Mons"})
+    with pytest.raises(ValueError):
+        store.put_canonical(invalid_cut, media_type="application/json")
+
+    missing_cut = ValuationCutV1.model_construct(
+        target_cut_utc=cut.target_cut_utc,
+        capture_start_utc=cut.capture_start_utc,
+        capture_end_utc=cut.capture_end_utc,
+    )
+    with pytest.raises(ValueError):
+        store.put_canonical(missing_cut, media_type="application/json")
+    assert not (tmp_path / "snapshots").exists()
+
+
+def test_store_revalidates_bypassed_artifact_reference_before_reading(tmp_path):
+    store = SnapshotStore(tmp_path)
+    reference = store.put_bytes(
+        b"valid bytes",
+        media_type="application/octet-stream",
+        schema_version="opaque_v1",
+    )
+    invalid_reference = reference.model_copy(update={"hash_algorithm": "sha512"})
+    with pytest.raises(ValueError):
+        store.read_verified_artifact(invalid_reference)
+
+    missing_reference = ArtifactRefV1.model_construct(
+        hash_algorithm="sha256",
+        byte_length=reference.byte_length,
+        media_type=reference.media_type,
+        schema_version=reference.schema_version,
+    )
+    with pytest.raises(ValueError):
+        store.read_verified_artifact(missing_reference)
+
+
+def test_store_strictly_parses_bypassed_manifest_bytes_before_reference_checks(tmp_path):
+    store = SnapshotStore(tmp_path)
+    manifest = _complete_manifest(store)
+
+    invalid_top_body = manifest.body.model_copy(update={"base_currency": "US"})
+    invalid_output_ref = manifest.body.outputs[0].object_ref.model_copy(
+        update={"hash_algorithm": "sha512"}
+    )
+    invalid_output = manifest.body.outputs[0].model_copy(
+        update={"object_ref": invalid_output_ref}
+    )
+    invalid_nested_body = manifest.body.model_copy(update={"outputs": (invalid_output,)})
+
+    for invalid_body in (invalid_top_body, invalid_nested_body):
+        invalid_id = hashlib.sha256(canonical_json_bytes(invalid_body)).hexdigest()
+        bypassed = AnalyticalSnapshotManifestV1.model_construct(
+            snapshot_id=invalid_id,
+            body=invalid_body,
+        )
+        with pytest.raises(ValueError):
+            store.put_manifest(bypassed)
+        assert not _manifest_path(tmp_path, invalid_id).exists()
+
+    missing_envelope = AnalyticalSnapshotManifestV1.model_construct(body=manifest.body)
+    with pytest.raises(ValueError):
+        store.put_manifest(missing_envelope)
+
+
 @pytest.mark.parametrize("corruption", ["duplicate", "unknown_schema", "embedded_id"])
 def test_manifest_reader_rejects_ambiguous_schema_or_filename_identity(tmp_path, corruption):
     store = SnapshotStore(tmp_path)
@@ -510,6 +626,29 @@ def test_select_last_good_keeps_a_verified_active_blessed_or_degraded_snapshot(t
         assert resolution.fallback_used is False
         assert resolution.failures == ()
         assert calls == [active.snapshot_id]
+
+
+def test_selector_preserves_manifest_identity_error_code_for_a_full_wrong_id(tmp_path):
+    store = SnapshotStore(tmp_path)
+    prior = _complete_manifest(store, generation=9)
+    store.put_manifest(prior)
+
+    wrong_id = "0" * 64
+    wrong_path = _manifest_path(tmp_path, wrong_id)
+    wrong_path.parent.mkdir(parents=True)
+    wrong_path.write_bytes(
+        canonical_json_bytes({"snapshot_id": wrong_id, "body": prior.body})
+    )
+
+    resolution = select_last_good(
+        wrong_id,
+        (prior.snapshot_id,),
+        store.verify_snapshot,
+    )
+    assert resolution.resolved_snapshot_id == prior.snapshot_id
+    assert resolution.fallback_used is True
+    assert resolution.failures[0].snapshot_id == wrong_id
+    assert resolution.failures[0].error_code == ManifestIdentityError.__name__
 
 
 def test_select_last_good_uses_only_caller_ordered_verified_prior_blessed_ids(tmp_path):

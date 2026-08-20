@@ -56,7 +56,7 @@ def _nonblank(value: str, field_name: str) -> str:
 
 
 def _full_digest(value: str, field_name: str) -> str:
-    if not _SHA256_RE.fullmatch(value):
+    if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
         raise ValueError(f"{field_name} must be 64 lowercase hexadecimal characters")
     return value
 
@@ -85,6 +85,19 @@ class OutputArtifactBindingV1(FrozenContractBase):
         return _nonblank(value, info.field_name)
 
 
+class ManifestPolicyEvidenceV1(FrozenContractBase):
+    """Typed linkage from a retained output or refused capability to its gate."""
+
+    subject_kind: Literal["CAPABILITY", "OUTPUT"]
+    subject_id: str
+    gate_code: str
+
+    @field_validator("subject_id", "gate_code")
+    @classmethod
+    def _identifiers_are_explicit(cls, value: str, info) -> str:
+        return _nonblank(value, info.field_name)
+
+
 class AnalyticalSnapshotManifestBodyV1(FrozenContractBase):
     """The complete analytical identity preimage, with no publication metadata."""
 
@@ -103,6 +116,8 @@ class AnalyticalSnapshotManifestBodyV1(FrozenContractBase):
     position_hash: str
     input_artifacts: tuple[InputArtifactBindingV1, ...]
     security_master_mapping_version: str
+    corporate_action_version: str | None
+    calendar_version: str | None
     rights_manifest_versions: tuple[str, ...]
     factor_taxonomy_version: str
     return_series_version: str
@@ -117,6 +132,7 @@ class AnalyticalSnapshotManifestBodyV1(FrozenContractBase):
     application_build_id: str
     snapshot_status: SnapshotStatus
     gates: tuple[GateEvidenceV1, ...]
+    policy_evidence: tuple[ManifestPolicyEvidenceV1, ...]
     warnings: tuple[str, ...]
     refused_outputs: tuple[str, ...]
     outputs: tuple[OutputArtifactBindingV1, ...]
@@ -140,6 +156,8 @@ class AnalyticalSnapshotManifestBodyV1(FrozenContractBase):
         "option_pricer_version",
         "surface_model_version",
         "scenario_library_version",
+        "corporate_action_version",
+        "calendar_version",
     )
     @classmethod
     def _optional_strings_are_null_or_explicit(
@@ -218,6 +236,9 @@ class AnalyticalSnapshotManifestBodyV1(FrozenContractBase):
             raise ValueError("output artifact role/ID pairs must be unique")
         if output_keys != tuple(sorted(output_keys)):
             raise ValueError("outputs must be sorted by logical role and ID")
+        output_ids = tuple(binding.logical_id for binding in self.outputs)
+        if len(output_ids) != len(set(output_ids)):
+            raise ValueError("output logical IDs must be unique")
 
         gate_codes = tuple(gate.gate_code for gate in self.gates)
         if len(gate_codes) != len(set(gate_codes)):
@@ -227,10 +248,68 @@ class AnalyticalSnapshotManifestBodyV1(FrozenContractBase):
         if any(gate.status is GateStatus.FAILED for gate in self.gates):
             raise ValueError("a published manifest cannot contain failed gate evidence")
 
-        if self.snapshot_status is SnapshotStatus.BLESSED and self.refused_outputs:
-            raise ValueError("a blessed manifest cannot contain refused outputs")
-        if self.snapshot_status is SnapshotStatus.DEGRADED and not self.refused_outputs:
-            raise ValueError("a degraded manifest must name at least one refused output")
+        policy_keys = tuple(
+            (evidence.subject_kind, evidence.subject_id, evidence.gate_code)
+            for evidence in self.policy_evidence
+        )
+        policy_subjects = tuple(key[:2] for key in policy_keys)
+        if len(policy_subjects) != len(set(policy_subjects)):
+            raise ValueError("policy evidence subjects must be unique")
+        if policy_keys != tuple(sorted(policy_keys)):
+            raise ValueError("policy evidence must be sorted by subject kind, ID, and gate code")
+
+        gates_by_code = {gate.gate_code: gate for gate in self.gates}
+        unknown_gate_codes = {
+            evidence.gate_code
+            for evidence in self.policy_evidence
+            if evidence.gate_code not in gates_by_code
+        }
+        if unknown_gate_codes:
+            raise ValueError("policy evidence must reference a declared gate")
+
+        output_policy = {
+            evidence.subject_id: evidence
+            for evidence in self.policy_evidence
+            if evidence.subject_kind == "OUTPUT"
+        }
+        if set(output_policy) != set(output_ids):
+            raise ValueError("policy evidence must cover every retained output exactly once")
+        if any(
+            gates_by_code[evidence.gate_code].status
+            not in {GateStatus.PASSED, GateStatus.WARNED}
+            for evidence in output_policy.values()
+        ):
+            raise ValueError("retained output policy evidence must be PASSED or WARNED")
+
+        capability_policy = {
+            evidence.subject_id: evidence
+            for evidence in self.policy_evidence
+            if evidence.subject_kind == "CAPABILITY"
+        }
+        if set(capability_policy) != set(self.refused_outputs):
+            raise ValueError("policy evidence must cover every refused capability exactly once")
+        if any(
+            gates_by_code[evidence.gate_code].status is not GateStatus.REFUSED
+            for evidence in capability_policy.values()
+        ):
+            raise ValueError("refused capability policy evidence must reference a REFUSED gate")
+
+        refused_gate_codes = {
+            gate.gate_code for gate in self.gates if gate.status is GateStatus.REFUSED
+        }
+        if self.snapshot_status is SnapshotStatus.BLESSED:
+            if self.refused_outputs or refused_gate_codes:
+                raise ValueError("a blessed manifest cannot contain refusals")
+
+        linked_refused_gate_codes = {
+            evidence.gate_code for evidence in capability_policy.values()
+        }
+        if refused_gate_codes != linked_refused_gate_codes:
+            raise ValueError("REFUSED gates and refused capability evidence must be coherent")
+
+        if self.snapshot_status is SnapshotStatus.DEGRADED:
+            if not self.refused_outputs or not refused_gate_codes:
+                raise ValueError("a degraded manifest must contain a coherent refusal")
         return self
 
 
@@ -256,16 +335,27 @@ def create_manifest(
 ) -> AnalyticalSnapshotManifestV1:
     if not isinstance(body, AnalyticalSnapshotManifestBodyV1):
         raise TypeError("manifest body must be AnalyticalSnapshotManifestBodyV1")
-    snapshot_id = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
-    return AnalyticalSnapshotManifestV1(snapshot_id=snapshot_id, body=body)
+    validated_body = AnalyticalSnapshotManifestBodyV1.model_validate(
+        body.model_dump(mode="python", warnings=False)
+    )
+    snapshot_id = hashlib.sha256(canonical_json_bytes(validated_body)).hexdigest()
+    return AnalyticalSnapshotManifestV1(snapshot_id=snapshot_id, body=validated_body)
 
 
 def verify_manifest(manifest: AnalyticalSnapshotManifestV1) -> None:
     if not isinstance(manifest, AnalyticalSnapshotManifestV1):
         raise TypeError("manifest must be AnalyticalSnapshotManifestV1")
-    expected = hashlib.sha256(canonical_json_bytes(manifest.body)).hexdigest()
-    if manifest.snapshot_id != expected:
+    values = manifest.model_dump(mode="python", warnings=False)
+    validated_body = AnalyticalSnapshotManifestBodyV1.model_validate(values.get("body"))
+    snapshot_id = values.get("snapshot_id")
+    _full_digest(snapshot_id, "snapshot ID")
+    expected = hashlib.sha256(canonical_json_bytes(validated_body)).hexdigest()
+    if snapshot_id != expected:
         raise ManifestIdentityError("snapshot ID does not match canonical manifest body")
+    AnalyticalSnapshotManifestV1(
+        snapshot_id=snapshot_id,
+        body=validated_body,
+    )
 
 
 def snapshot_display_prefix(snapshot_id: str, length: int = 12) -> str:
@@ -319,6 +409,31 @@ def parse_manifest(payload: bytes) -> AnalyticalSnapshotManifestV1:
         raise UnsupportedManifestSchemaError(f"unsupported manifest schema: {schema}")
 
     try:
+        validated_body = AnalyticalSnapshotManifestBodyV1.model_validate_json(
+            canonical_json_bytes(body)
+        )
+    except ValueError as error:
+        raise ManifestError("manifest violates the analytical v1 schema") from error
+
+    supplied_snapshot_id = parsed.get("snapshot_id")
+    envelope_keys_are_exact = isinstance(parsed, dict) and set(parsed) == {
+        "body",
+        "snapshot_id",
+    }
+    if (
+        envelope_keys_are_exact
+        and isinstance(supplied_snapshot_id, str)
+        and _SHA256_RE.fullmatch(supplied_snapshot_id)
+    ):
+        expected_snapshot_id = hashlib.sha256(
+            canonical_json_bytes(validated_body)
+        ).hexdigest()
+        if supplied_snapshot_id != expected_snapshot_id:
+            raise ManifestIdentityError(
+                "snapshot ID does not match canonical manifest body"
+            )
+
+    try:
         manifest = AnalyticalSnapshotManifestV1.model_validate_json(payload)
     except ValueError as error:
         raise ManifestError("manifest violates the analytical v1 schema") from error
@@ -335,6 +450,7 @@ __all__ = [
     "DuplicateJSONKeyError",
     "ManifestError",
     "ManifestIdentityError",
+    "ManifestPolicyEvidenceV1",
     "NonCanonicalManifestError",
     "NonFiniteJSONConstantError",
     "OutputArtifactBindingV1",

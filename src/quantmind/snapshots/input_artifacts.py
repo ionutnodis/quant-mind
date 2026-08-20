@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from pydantic import Field, field_validator, model_validator
 
@@ -12,6 +12,7 @@ from quantmind.snapshots.contracts import FrozenContractBase, canonical_json_byt
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_ContractT = TypeVar("_ContractT", bound=FrozenContractBase)
 
 
 def _nonblank(value: str, field_name: str) -> str:
@@ -67,6 +68,8 @@ class InputArtifactBindingV1(FrozenContractBase):
     object_ref: ArtifactRefV1
     source: str
     provider: str
+    entitlement_reference: str | None
+    entitlement_version: str | None
     rights_mode: ArtifactRightsMode
     rights_manifest_version: str
     reproducibility_class: ReproducibilityClass
@@ -82,8 +85,19 @@ class InputArtifactBindingV1(FrozenContractBase):
     def _identifiers_are_explicit(cls, value: str, info) -> str:
         return _nonblank(value, info.field_name)
 
+    @field_validator("entitlement_reference", "entitlement_version")
+    @classmethod
+    def _optional_entitlement_is_null_or_explicit(
+        cls, value: str | None, info
+    ) -> str | None:
+        return None if value is None else _nonblank(value, info.field_name)
+
     @model_validator(mode="after")
     def _rights_and_representation_are_honest(self) -> "InputArtifactBindingV1":
+        if (self.entitlement_reference is None) != (self.entitlement_version is None):
+            raise ValueError(
+                "entitlement reference and version must both be supplied or both be null"
+            )
         if (
             self.representation is InputRepresentation.RAW_RETAINED
             and self.rights_mode is not ArtifactRightsMode.RAW_ALLOWED
@@ -114,12 +128,29 @@ class InputArtifactBindingV1(FrozenContractBase):
         return self
 
 
+def revalidate_frozen_contract(contract: _ContractT) -> _ContractT:
+    """Re-run a contract's strict validators after any Pydantic bypass API use."""
+
+    if not isinstance(contract, FrozenContractBase):
+        raise TypeError("value must be a frozen analytical contract")
+    model_type = type(contract)
+    return model_type.model_validate(contract.model_dump(mode="python", warnings=False))
+
+
+def validate_artifact_ref(reference: ArtifactRefV1) -> ArtifactRefV1:
+    if not isinstance(reference, ArtifactRefV1):
+        raise TypeError("artifact reference must be ArtifactRefV1")
+    return ArtifactRefV1.model_validate(
+        reference.model_dump(mode="python", warnings=False)
+    )
+
+
 def canonical_input_bytes(contract: FrozenContractBase) -> bytes:
     """Return T1 canonical bytes; this module deliberately has no serializer of its own."""
 
     if not isinstance(contract, FrozenContractBase):
         raise TypeError("canonical input must be a frozen analytical contract")
-    return canonical_json_bytes(contract)
+    return canonical_json_bytes(revalidate_frozen_contract(contract))
 
 
 def retained_raw_input_bytes(
@@ -129,8 +160,13 @@ def retained_raw_input_bytes(
 
     if not isinstance(payload, bytes):
         raise TypeError("raw input payload must be bytes")
-    if rights_mode is ArtifactRightsMode.PROVENANCE_ONLY:
-        raise ValueError("PROVENANCE_ONLY rights forbid retaining raw vendor bytes")
+    if not isinstance(rights_mode, ArtifactRightsMode):
+        raise TypeError("rights mode must be an ArtifactRightsMode instance")
+    if rights_mode is not ArtifactRightsMode.RAW_ALLOWED:
+        raise ValueError(
+            f"{rights_mode.value} does not permit retaining raw vendor bytes; "
+            "only RAW_ALLOWED does"
+        )
     return payload
 
 
@@ -142,6 +178,8 @@ def bind_input_artifact(
     object_ref: ArtifactRefV1,
     source: str,
     provider: str,
+    entitlement_reference: str | None,
+    entitlement_version: str | None,
     rights_mode: ArtifactRightsMode,
     rights_manifest_version: str,
     reproducibility_class: ReproducibilityClass,
@@ -149,6 +187,7 @@ def bind_input_artifact(
 ) -> InputArtifactBindingV1:
     """Construct a strict immutable binding after the adapter made its rights decision."""
 
+    object_ref = validate_artifact_ref(object_ref)
     return InputArtifactBindingV1(
         logical_role=logical_role,
         logical_id=logical_id,
@@ -156,6 +195,8 @@ def bind_input_artifact(
         object_ref=object_ref,
         source=source,
         provider=provider,
+        entitlement_reference=entitlement_reference,
+        entitlement_version=entitlement_version,
         rights_mode=rights_mode,
         rights_manifest_version=rights_manifest_version,
         reproducibility_class=reproducibility_class,
