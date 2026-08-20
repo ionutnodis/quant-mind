@@ -161,4 +161,3 @@ def bind_input_artifact(
         reproducibility_class=reproducibility_class,
         **extra,
     )
-

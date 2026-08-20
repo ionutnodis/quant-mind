@@ -51,4 +51,3 @@ def test_verified_existing_target_retry_must_complete_the_directory_barrier(
         schema_version="opaque_v1",
     )
     assert SnapshotStore(tmp_path).read_verified_artifact(ref) == payload
-
