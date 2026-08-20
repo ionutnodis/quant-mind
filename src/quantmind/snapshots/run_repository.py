@@ -105,15 +105,78 @@ _EXPECTED_INDEX_SHAPES = {
         "snapshot_manifests", ("book_id", "publication_sequence"), 0, 1
     ),
 }
-_EXPECTED_FOREIGN_KEYS = {
-    ("snapshot_runs", "book_id", "book_heads", "book_id"),
-    ("snapshot_manifests", "run_id", "snapshot_runs", "run_id"),
-    ("snapshot_manifests", "book_id", "book_heads", "book_id"),
-    ("active_snapshots", "snapshot_id", "snapshot_manifests", "snapshot_id"),
-    ("active_snapshots", "book_id", "book_heads", "book_id"),
-    ("snapshot_recovery_events", "selected_snapshot_id", "snapshot_manifests", "snapshot_id"),
-    ("snapshot_recovery_events", "book_id", "book_heads", "book_id"),
-}
+_EXPECTED_FOREIGN_KEY_GROUPS = tuple(
+    sorted(
+        (
+            table,
+            parent,
+            columns,
+            "NO ACTION",
+            "NO ACTION",
+            "NONE",
+        )
+        for table, parent, columns in (
+            (
+                "active_snapshots",
+                "book_heads",
+                (("book_id", "book_id"),),
+            ),
+            (
+                "active_snapshots",
+                "snapshot_manifests",
+                (
+                    ("book_id", "book_id"),
+                    ("snapshot_id", "snapshot_id"),
+                    ("book_generation", "book_generation"),
+                ),
+            ),
+            (
+                "snapshot_manifests",
+                "book_heads",
+                (("book_id", "book_id"),),
+            ),
+            (
+                "snapshot_manifests",
+                "snapshot_runs",
+                (("run_id", "run_id"),),
+            ),
+            (
+                "snapshot_recovery_events",
+                "book_heads",
+                (("book_id", "book_id"),),
+            ),
+            (
+                "snapshot_recovery_events",
+                "snapshot_manifests",
+                (
+                    ("book_id", "book_id"),
+                    ("rejected_snapshot_id", "snapshot_id"),
+                ),
+            ),
+            (
+                "snapshot_recovery_events",
+                "snapshot_manifests",
+                (
+                    ("book_id", "book_id"),
+                    ("selected_snapshot_id", "snapshot_id"),
+                ),
+            ),
+            (
+                "snapshot_runs",
+                "book_heads",
+                (("book_id", "book_id"),),
+            ),
+            (
+                "snapshot_runs",
+                "snapshot_manifests",
+                (
+                    ("book_id", "book_id"),
+                    ("expected_active_snapshot_id", "snapshot_id"),
+                ),
+            ),
+        )
+    )
+)
 
 
 class RunRepositoryError(RuntimeError):
@@ -543,7 +606,11 @@ class RunRecordV1(FrozenContractBase):
     def _stored_identity_is_normalized(cls, value: str | None, info) -> str | None:
         if value is None:
             return None
-        normalized = _require_nonblank(value, info.field_name)
+        normalized = _require_nonblank(
+            value,
+            info.field_name,
+            limit=64 if info.field_name == "run_kind" else 256,
+        )
         if normalized != value:
             raise ValueError(f"stored {info.field_name} must already be NFC normalized")
         return value
@@ -574,6 +641,11 @@ class RunRecordV1(FrozenContractBase):
                 raise ValueError("missing active snapshot requires pointer version zero")
         elif self.expected_active_pointer_version < 1:
             raise ValueError("expected active snapshot requires a positive pointer version")
+        if self.book_id is None and (
+            self.expected_active_snapshot_id is not None
+            or self.expected_active_pointer_version != 0
+        ):
+            raise ValueError("non-book runs cannot carry active-pointer state")
         if self.updated_at_utc < self.requested_at_utc:
             raise ValueError("run update cannot precede its request")
         for value in (
@@ -631,6 +703,17 @@ class RunRecordV1(FrozenContractBase):
             and self.run_outcome is not RunOutcome.SUCCEEDED
         ):
             raise ValueError("published snapshot identity requires successful outcome")
+        if self.book_id is None and self.published_snapshot_id is not None:
+            raise ValueError("non-book runs cannot carry a published snapshot identity")
+        if self.run_outcome is RunOutcome.SUCCEEDED and self.book_id is not None:
+            if (
+                self.run_stage is not RunStage.PUBLISHING
+                or self.candidate_snapshot_id is None
+                or self.published_snapshot_id != self.candidate_snapshot_id
+            ):
+                raise ValueError(
+                    "successful book runs require their exact candidate publication"
+                )
         return self
 
 
@@ -797,6 +880,22 @@ class RecoveryEventV1(FrozenContractBase):
             _require_digest(failure["snapshot_id"], "recovery snapshot ID")
         return value
 
+    @model_validator(mode="after")
+    def _action_and_selection_are_coherent(self) -> "RecoveryEventV1":
+        if self.resolution_action is ActiveRecoveryDecision.UNCHANGED:
+            raise ValueError("UNCHANGED recovery does not create durable evidence")
+        if self.resolution_action is ActiveRecoveryDecision.REPOINTED:
+            if self.selected_snapshot_id is None:
+                raise ValueError("REPOINTED recovery requires a selected snapshot")
+            if self.selected_snapshot_id == self.rejected_snapshot_id:
+                raise ValueError("REPOINTED recovery must change snapshot identity")
+        elif (
+            self.resolution_action is ActiveRecoveryDecision.REMOVED
+            and self.selected_snapshot_id is not None
+        ):
+            raise ValueError("REMOVED recovery cannot retain a selected snapshot")
+        return self
+
 
 class ActiveRecoveryResultV1(FrozenContractBase):
     decision: ActiveRecoveryDecision
@@ -861,6 +960,8 @@ class RunRepository:
     def _read_connection(self) -> Iterator[sqlite3.Connection]:
         connection = self._connect()
         try:
+            connection.execute("BEGIN")
+            self._validate_relational_invariants(connection)
             yield connection
         except RunRepositoryError:
             raise
@@ -870,11 +971,17 @@ class RunRepository:
             connection.close()
 
     @contextmanager
-    def _write_transaction(self) -> Iterator[sqlite3.Connection]:
+    def _write_transaction(
+        self, *, validate_relations: bool = True
+    ) -> Iterator[sqlite3.Connection]:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            if validate_relations:
+                self._validate_relational_invariants(connection)
             yield connection
+            if validate_relations:
+                self._validate_relational_invariants(connection)
             connection.commit()
         except RunRepositoryError:
             connection.rollback()
@@ -920,6 +1027,7 @@ class RunRepository:
             self._validate_schema(
                 connection, expected_signature=expected_signature
             )
+            self._validate_relational_invariants(connection)
             connection.commit()
             for _ in range(8):
                 try:
@@ -936,6 +1044,7 @@ class RunRepository:
             self._validate_schema(
                 connection, expected_signature=expected_signature
             )
+            self._validate_relational_invariants(connection)
         except RunRepositoryError:
             connection.rollback()
             raise
@@ -969,12 +1078,66 @@ class RunRepository:
             for row in connection.execute(
                 """
                 SELECT type, name, tbl_name, sql
-                FROM sqlite_master
-                WHERE lower(substr(name, 1, 7)) <> 'sqlite_'
-                ORDER BY type, name
+                FROM sqlite_schema
+                ORDER BY type, name, tbl_name, sql
                 """
             ).fetchall()
         )
+
+    @staticmethod
+    def _foreign_key_signature(
+        connection: sqlite3.Connection,
+    ) -> tuple[
+        tuple[
+            str,
+            str,
+            tuple[tuple[str, str], ...],
+            str,
+            str,
+            str,
+        ],
+        ...,
+    ]:
+        signature = []
+        for table in sorted(_EXPECTED_SCHEMA_COLUMNS):
+            grouped: dict[int, list[sqlite3.Row]] = {}
+            for row in connection.execute(
+                f'PRAGMA foreign_key_list("{table}")'
+            ).fetchall():
+                grouped.setdefault(int(row["id"]), []).append(row)
+            for rows in grouped.values():
+                ordered = sorted(rows, key=lambda row: int(row["seq"]))
+                if [int(row["seq"]) for row in ordered] != list(
+                    range(len(ordered))
+                ):
+                    raise RunDatabaseError(
+                        "durable run catalog composite foreign key is malformed"
+                    )
+                parent = str(ordered[0]["table"])
+                on_update = str(ordered[0]["on_update"])
+                on_delete = str(ordered[0]["on_delete"])
+                match = str(ordered[0]["match"])
+                if any(
+                    row["table"] != parent
+                    or row["on_update"] != on_update
+                    or row["on_delete"] != on_delete
+                    or row["match"] != match
+                    for row in ordered
+                ):
+                    raise RunDatabaseError(
+                        "durable run catalog composite foreign key is incoherent"
+                    )
+                signature.append(
+                    (
+                        table,
+                        parent,
+                        tuple((str(row["from"]), str(row["to"])) for row in ordered),
+                        on_update,
+                        on_delete,
+                        match,
+                    )
+                )
+        return tuple(sorted(signature))
 
     @classmethod
     def _expected_schema_signature(
@@ -998,14 +1161,15 @@ class RunRepository:
         tables = {
             row["name"]
             for row in connection.execute(
-                """
-                SELECT name FROM sqlite_master
-                WHERE type = 'table'
-                  AND lower(substr(name, 1, 7)) <> 'sqlite_'
-                """
+                "SELECT name FROM sqlite_schema WHERE type = 'table'"
             ).fetchall()
         }
-        if tables != set(_EXPECTED_SCHEMA_COLUMNS):
+        expected_tables = {
+            name
+            for object_type, name, _owner, _sql in expected_signature
+            if object_type == "table"
+        }
+        if tables != expected_tables:
             raise RunDatabaseError("durable run catalog table shape is incomplete")
         for table, expected_columns in _EXPECTED_SCHEMA_COLUMNS.items():
             columns = {
@@ -1056,20 +1220,154 @@ class RunRepository:
                 or flag_row["partial"] != expected_partial
             ):
                 raise RunDatabaseError("durable run catalog index shape is malformed")
-        foreign_keys: set[tuple[str, str, str, str]] = set()
-        for table in _EXPECTED_SCHEMA_COLUMNS:
-            foreign_keys.update(
-                (table, row["from"], row["table"], row["to"])
-                for row in connection.execute(
-                    f'PRAGMA foreign_key_list("{table}")'
-                ).fetchall()
-            )
-        if foreign_keys != _EXPECTED_FOREIGN_KEYS:
+        if (
+            RunRepository._foreign_key_signature(connection)
+            != _EXPECTED_FOREIGN_KEY_GROUPS
+        ):
             raise RunDatabaseError("durable run catalog foreign-key shape is malformed")
         if connection.execute("PRAGMA foreign_key_check").fetchall():
             raise RunDatabaseError("durable run catalog contains foreign-key violations")
         if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise RunDatabaseError("durable run catalog integrity check failed")
+
+    @staticmethod
+    def _validate_relational_invariants(connection: sqlite3.Connection) -> None:
+        invariant_queries = (
+            (
+                "durable run ownership or expected-pointer provenance is malformed",
+                """
+                SELECT 1
+                FROM snapshot_runs AS run
+                LEFT JOIN book_heads AS head ON head.book_id = run.book_id
+                LEFT JOIN snapshot_manifests AS expected
+                  ON expected.book_id = run.book_id
+                 AND expected.snapshot_id = run.expected_active_snapshot_id
+                LEFT JOIN snapshot_manifests AS owned
+                  ON owned.run_id = run.run_id
+                WHERE
+                    (
+                        run.book_id IS NULL
+                        AND (
+                            run.captured_generation IS NOT NULL
+                            OR run.target_cut_utc IS NOT NULL
+                            OR run.expected_active_snapshot_id IS NOT NULL
+                            OR run.expected_active_pointer_version <> 0
+                            OR run.published_snapshot_id IS NOT NULL
+                        )
+                    )
+                    OR (
+                        run.book_id IS NOT NULL
+                        AND (
+                            run.captured_generation IS NULL
+                            OR run.target_cut_utc IS NULL
+                            OR head.book_id IS NULL
+                            OR run.captured_generation > head.generation
+                        )
+                    )
+                    OR (
+                        run.expected_active_snapshot_id IS NULL
+                        AND run.expected_active_pointer_version <> 0
+                    )
+                    OR (
+                        run.expected_active_snapshot_id IS NOT NULL
+                        AND (
+                            run.expected_active_pointer_version < 1
+                            OR expected.snapshot_id IS NULL
+                            OR expected.book_generation > run.captured_generation
+                            OR expected.published_at_utc > run.requested_at_utc
+                        )
+                    )
+                    OR (
+                        run.run_outcome = 'SUCCEEDED'
+                        AND run.book_id IS NOT NULL
+                        AND (
+                            run.run_stage <> 'PUBLISHING'
+                            OR run.candidate_snapshot_id IS NULL
+                            OR run.published_snapshot_id IS NULL
+                            OR run.candidate_snapshot_id <> run.published_snapshot_id
+                            OR owned.run_id IS NULL
+                            OR owned.book_id <> run.book_id
+                            OR owned.book_generation <> run.captured_generation
+                            OR owned.snapshot_id <> run.candidate_snapshot_id
+                            OR owned.published_at_utc <> run.finished_at_utc
+                            OR owned.published_at_utc <> run.updated_at_utc
+                        )
+                    )
+                LIMIT 1
+                """,
+            ),
+            (
+                "publication provenance does not match its durable run",
+                """
+                SELECT 1
+                FROM snapshot_manifests AS publication
+                LEFT JOIN snapshot_runs AS run ON run.run_id = publication.run_id
+                WHERE run.run_id IS NULL
+                   OR run.book_id IS NULL
+                   OR run.run_outcome <> 'SUCCEEDED'
+                   OR run.run_stage <> 'PUBLISHING'
+                   OR publication.book_id <> run.book_id
+                   OR publication.book_generation <> run.captured_generation
+                   OR publication.snapshot_id <> run.candidate_snapshot_id
+                   OR publication.snapshot_id <> run.published_snapshot_id
+                   OR publication.published_at_utc <> run.finished_at_utc
+                   OR publication.published_at_utc <> run.updated_at_utc
+                LIMIT 1
+                """,
+            ),
+            (
+                "active snapshot provenance is malformed",
+                """
+                SELECT 1
+                FROM active_snapshots AS active
+                LEFT JOIN book_heads AS head ON head.book_id = active.book_id
+                LEFT JOIN snapshot_manifests AS publication
+                  ON publication.book_id = active.book_id
+                 AND publication.snapshot_id = active.snapshot_id
+                 AND publication.book_generation = active.book_generation
+                WHERE head.book_id IS NULL
+                   OR publication.snapshot_id IS NULL
+                   OR active.book_generation > head.generation
+                   OR active.updated_at_utc < publication.published_at_utc
+                LIMIT 1
+                """,
+            ),
+            (
+                "recovery evidence provenance is malformed",
+                """
+                SELECT 1
+                FROM snapshot_recovery_events AS event
+                LEFT JOIN snapshot_manifests AS rejected
+                  ON rejected.book_id = event.book_id
+                 AND rejected.snapshot_id = event.rejected_snapshot_id
+                LEFT JOIN snapshot_manifests AS selected
+                  ON selected.book_id = event.book_id
+                 AND selected.snapshot_id = event.selected_snapshot_id
+                WHERE rejected.snapshot_id IS NULL
+                   OR (
+                       event.selected_snapshot_id IS NOT NULL
+                       AND selected.snapshot_id IS NULL
+                   )
+                   OR (
+                       event.resolution_action = 'REPOINTED'
+                       AND (
+                           event.selected_snapshot_id IS NULL
+                           OR event.selected_snapshot_id = event.rejected_snapshot_id
+                           OR selected.snapshot_status <> 'BLESSED'
+                       )
+                   )
+                   OR (
+                       event.resolution_action = 'REMOVED'
+                       AND event.selected_snapshot_id IS NOT NULL
+                   )
+                   OR event.resolution_action NOT IN ('REPOINTED', 'REMOVED', 'CAS_LOST')
+                LIMIT 1
+                """,
+            ),
+        )
+        for message, query in invariant_queries:
+            if connection.execute(query).fetchone() is not None:
+                raise RunDatabaseError(message)
 
     def inspect_connection_pragmas(self) -> ConnectionPragmasV1:
         with self._read_connection() as connection:
@@ -1170,6 +1468,12 @@ class RunRepository:
     @staticmethod
     def _active_from_row(row: sqlite3.Row) -> ActiveSnapshotV1:
         try:
+            if (
+                row["_bound_snapshot_id"] != row["snapshot_id"]
+                or row["_bound_book_id"] != row["book_id"]
+                or row["_bound_book_generation"] != row["book_generation"]
+            ):
+                raise ValueError("active pointer is not bound to one publication")
             return ActiveSnapshotV1(
                 book_id=row["book_id"],
                 snapshot_id=row["snapshot_id"],
@@ -1303,11 +1607,13 @@ class RunRepository:
                     (request.book_id,),
                 ).fetchone()["updated_at_utc"]:
                     raise ValueError("run request cannot precede its canonical book head")
-                active = connection.execute(
-                    "SELECT snapshot_id, pointer_version FROM active_snapshots WHERE book_id = ?",
-                    (request.book_id,),
-                ).fetchone()
+                active = self._active_row(connection, request.book_id)
                 if active is not None:
+                    self._active_from_row(active)
+                    if now_text < active["updated_at_utc"]:
+                        raise ValueError(
+                            "run request cannot precede its active snapshot pointer"
+                        )
                     expected_active_snapshot_id = active["snapshot_id"]
                     expected_active_pointer_version = int(active["pointer_version"])
 
@@ -1681,7 +1987,22 @@ class RunRepository:
         connection: sqlite3.Connection, book_id: str
     ) -> sqlite3.Row | None:
         return connection.execute(
-            "SELECT * FROM active_snapshots WHERE book_id = ?", (book_id,)
+            """
+            SELECT active.*,
+                   publication.snapshot_id AS _bound_snapshot_id,
+                   publication.book_id AS _bound_book_id,
+                   publication.book_generation AS _bound_book_generation,
+                   publication.snapshot_status AS _bound_snapshot_status,
+                   publication.publication_sequence AS _bound_publication_sequence,
+                   publication.published_at_utc AS _bound_published_at_utc
+            FROM active_snapshots AS active
+            LEFT JOIN snapshot_manifests AS publication
+              ON publication.book_id = active.book_id
+             AND publication.snapshot_id = active.snapshot_id
+             AND publication.book_generation = active.book_generation
+            WHERE active.book_id = ?
+            """,
+            (book_id,),
         ).fetchone()
 
     @staticmethod
@@ -1790,6 +2111,7 @@ class RunRepository:
             self._inject("db.before_begin")
             connection = self._connect()
             connection.execute("BEGIN IMMEDIATE")
+            self._validate_relational_invariants(connection)
             row = connection.execute(
                 "SELECT * FROM snapshot_runs WHERE run_id = ?", (run_id,)
             ).fetchone()
@@ -1977,7 +2299,8 @@ class RunRepository:
                     UPDATE active_snapshots
                     SET snapshot_id = ?, book_generation = ?, pointer_version = ?,
                         updated_at_utc = ?
-                    WHERE book_id = ? AND snapshot_id = ? AND pointer_version = ?
+                    WHERE book_id = ? AND snapshot_id = ? AND book_generation = ?
+                      AND pointer_version = ?
                     """,
                     (
                         publication.snapshot_id,
@@ -1986,6 +2309,7 @@ class RunRepository:
                         now_text,
                         publication.book_id,
                         expected_active_id,
+                        active_row["book_generation"],
                         expected_pointer_version,
                     ),
                 )
@@ -1994,6 +2318,7 @@ class RunRepository:
                         "active pointer changed during publication"
                     )
             self._inject("db.after_active_cas")
+            self._validate_relational_invariants(connection)
             connection.commit()
             committed = True
             try:
@@ -2036,7 +2361,21 @@ class RunRepository:
     def list_active(self) -> tuple[ActiveSnapshotV1, ...]:
         with self._read_connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM active_snapshots ORDER BY book_id ASC"
+                """
+                SELECT active.*,
+                       publication.snapshot_id AS _bound_snapshot_id,
+                       publication.book_id AS _bound_book_id,
+                       publication.book_generation AS _bound_book_generation,
+                       publication.snapshot_status AS _bound_snapshot_status,
+                       publication.publication_sequence AS _bound_publication_sequence,
+                       publication.published_at_utc AS _bound_published_at_utc
+                FROM active_snapshots AS active
+                LEFT JOIN snapshot_manifests AS publication
+                  ON publication.book_id = active.book_id
+                 AND publication.snapshot_id = active.snapshot_id
+                 AND publication.book_generation = active.book_generation
+                ORDER BY active.book_id ASC
+                """
             ).fetchall()
             return tuple(self._active_from_row(row) for row in rows)
 
@@ -2106,7 +2445,10 @@ class RunRepository:
         return value
 
     @staticmethod
-    def _closed_verifier(verify: SnapshotVerifier) -> SnapshotVerifier:
+    def _closed_verifier(
+        verify: SnapshotVerifier,
+        expected_publications: dict[str, ManifestPublicationRecordV1],
+    ) -> SnapshotVerifier:
         def strict_verify(snapshot_id: str) -> VerifiedSnapshotV1:
             try:
                 candidate = verify(snapshot_id)
@@ -2139,6 +2481,18 @@ class RunRepository:
                     raise ValueError("verified wrapper and manifest IDs disagree")
                 if validated.status is not validated.manifest.body.snapshot_status:
                     raise ValueError("verified wrapper and manifest statuses disagree")
+                expected = expected_publications.get(snapshot_id)
+                if expected is None:
+                    raise ValueError("snapshot is absent from the recovery catalog view")
+                if validated.manifest.body.book_id != expected.book_id:
+                    raise ValueError("manifest book does not match its publication")
+                if (
+                    validated.manifest.body.book_generation
+                    != expected.book_generation
+                ):
+                    raise ValueError("manifest generation does not match its publication")
+                if validated.status is not expected.snapshot_status:
+                    raise ValueError("manifest status does not match its publication")
                 return validated
             except Exception as error:
                 raise _RecoveryInvalidVerifierResult from error
@@ -2156,7 +2510,45 @@ class RunRepository:
         if not callable(verify):
             raise TypeError("snapshot verifier must be callable")
         now_text = _timestamp_text(now, "active recovery time")
-        previous_active = self.get_active(book_id)
+        with self._read_connection() as connection:
+            previous_row = self._active_row(connection, book_id)
+            previous_active = (
+                None
+                if previous_row is None
+                else self._active_from_row(previous_row)
+            )
+            if previous_active is None:
+                active_publication = None
+                fallbacks: tuple[ManifestPublicationRecordV1, ...] = ()
+            else:
+                publication_row = connection.execute(
+                    """
+                    SELECT * FROM snapshot_manifests
+                    WHERE book_id = ? AND snapshot_id = ? AND book_generation = ?
+                    """,
+                    (
+                        book_id,
+                        previous_active.snapshot_id,
+                        previous_active.book_generation,
+                    ),
+                ).fetchone()
+                if publication_row is None:
+                    raise RunDatabaseError(
+                        "active snapshot publication disappeared during recovery read"
+                    )
+                active_publication = self._publication_from_row(publication_row)
+                fallback_rows = connection.execute(
+                    """
+                    SELECT * FROM snapshot_manifests
+                    WHERE book_id = ? AND snapshot_status = 'BLESSED'
+                      AND snapshot_id <> ?
+                    ORDER BY publication_sequence DESC
+                    """,
+                    (book_id, previous_active.snapshot_id),
+                ).fetchall()
+                fallbacks = tuple(
+                    self._publication_from_row(row) for row in fallback_rows
+                )
         if previous_active is None:
             return ActiveRecoveryResultV1(
                 decision=ActiveRecoveryDecision.UNCHANGED,
@@ -2168,15 +2560,32 @@ class RunRepository:
             previous_active.updated_at_utc, "active pointer update time"
         ):
             raise ValueError("active recovery time cannot move backward")
-        fallbacks = self.list_blessed_fallbacks(
-            book_id, excluding=previous_active.snapshot_id
-        )
+        if active_publication is None:
+            raise RunDatabaseError("active snapshot has no publication metadata")
+        expected_publications = {
+            active_publication.snapshot_id: active_publication,
+            **{record.snapshot_id: record for record in fallbacks},
+        }
         resolution = select_last_good(
             previous_active.snapshot_id,
             tuple(record.snapshot_id for record in fallbacks),
-            self._closed_verifier(verify),
+            self._closed_verifier(verify, expected_publications),
         )
         if resolution.resolved_snapshot_id == previous_active.snapshot_id:
+            with self._read_connection() as connection:
+                current_row = self._active_row(connection, book_id)
+                current_active = (
+                    None
+                    if current_row is None
+                    else self._active_from_row(current_row)
+                )
+            if current_active != previous_active:
+                return ActiveRecoveryResultV1(
+                    decision=ActiveRecoveryDecision.CAS_LOST,
+                    previous_active=previous_active,
+                    active=current_active,
+                    event=None,
+                )
             return ActiveRecoveryResultV1(
                 decision=ActiveRecoveryDecision.UNCHANGED,
                 previous_active=previous_active,
@@ -2186,11 +2595,13 @@ class RunRepository:
 
         detail_json = self._recovery_detail_json(resolution)
         self._inject("recovery.after_selection")
-        with self._write_transaction() as connection:
+        with self._write_transaction(validate_relations=False) as connection:
             current_row = self._active_row(connection, book_id)
             pointer_matches = (
                 current_row is not None
                 and current_row["snapshot_id"] == previous_active.snapshot_id
+                and current_row["book_generation"]
+                == previous_active.book_generation
                 and current_row["pointer_version"] == previous_active.pointer_version
             )
             selected_id = resolution.resolved_snapshot_id
@@ -2200,45 +2611,59 @@ class RunRepository:
                 connection.execute(
                     """
                     DELETE FROM active_snapshots
-                    WHERE book_id = ? AND snapshot_id = ? AND pointer_version = ?
+                    WHERE book_id = ? AND snapshot_id = ? AND book_generation = ?
+                      AND pointer_version = ?
                     """,
                     (
                         book_id,
                         previous_active.snapshot_id,
+                        previous_active.book_generation,
                         previous_active.pointer_version,
                     ),
                 )
                 decision = ActiveRecoveryDecision.REMOVED
             else:
+                expected_publication = expected_publications[selected_id]
                 selected_publication = connection.execute(
                     """
                     SELECT * FROM snapshot_manifests
-                    WHERE book_id = ? AND snapshot_id = ? AND snapshot_status = 'BLESSED'
+                    WHERE snapshot_id = ?
                     """,
-                    (book_id, selected_id),
+                    (selected_id,),
                 ).fetchone()
-                if selected_publication is None:
+                if (
+                    selected_publication is None
+                    or self._publication_from_row(selected_publication)
+                    != expected_publication
+                    or expected_publication.book_id != book_id
+                    or expected_publication.snapshot_status is not SnapshotStatus.BLESSED
+                ):
                     raise PublicationConflictError(
-                        "verified fallback is absent from BLESSED publication history"
+                        "verified fallback publication metadata changed before repoint"
                     )
-                connection.execute(
+                updated = connection.execute(
                     """
                     UPDATE active_snapshots
                     SET snapshot_id = ?, book_generation = ?, pointer_version = ?,
                         updated_at_utc = ?
-                    WHERE book_id = ? AND snapshot_id = ? AND pointer_version = ?
+                    WHERE book_id = ? AND snapshot_id = ? AND book_generation = ?
+                      AND pointer_version = ?
                     """,
                     (
                         selected_id,
-                        selected_publication["book_generation"],
+                        expected_publication.book_generation,
                         previous_active.pointer_version + 1,
                         now_text,
                         book_id,
                         previous_active.snapshot_id,
+                        previous_active.book_generation,
                         previous_active.pointer_version,
                     ),
                 )
-                decision = ActiveRecoveryDecision.REPOINTED
+                if updated.rowcount != 1:
+                    decision = ActiveRecoveryDecision.CAS_LOST
+                else:
+                    decision = ActiveRecoveryDecision.REPOINTED
 
             cursor = connection.execute(
                 """
@@ -2262,6 +2687,7 @@ class RunRepository:
                 (cursor.lastrowid,),
             ).fetchone()
             new_active_row = self._active_row(connection, book_id)
+            self._validate_relational_invariants(connection)
             return ActiveRecoveryResultV1(
                 decision=decision,
                 previous_active=previous_active,

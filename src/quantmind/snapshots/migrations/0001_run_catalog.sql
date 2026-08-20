@@ -1,5 +1,5 @@
 CREATE TABLE book_heads (
-    book_id TEXT PRIMARY KEY CHECK (length(book_id) BETWEEN 1 AND 256),
+    book_id TEXT NOT NULL PRIMARY KEY CHECK (length(book_id) BETWEEN 1 AND 256),
     generation INTEGER NOT NULL CHECK (generation >= 0),
     canonical_book_ref TEXT NOT NULL CHECK (
         length(canonical_book_ref) = 64
@@ -14,8 +14,10 @@ CREATE TABLE book_heads (
 );
 
 CREATE TABLE snapshot_runs (
-    run_id TEXT PRIMARY KEY CHECK (length(run_id) BETWEEN 16 AND 128),
-    run_kind TEXT NOT NULL CHECK (length(run_kind) BETWEEN 1 AND 64),
+    run_id TEXT NOT NULL PRIMARY KEY CHECK (length(run_id) BETWEEN 16 AND 128),
+    run_kind TEXT NOT NULL CHECK (
+        length(CAST(run_kind AS BLOB)) BETWEEN 1 AND 64
+    ),
     idempotency_identity TEXT NOT NULL CHECK (
         length(idempotency_identity) = 64
         AND idempotency_identity NOT GLOB '*[^0-9a-f]*'
@@ -145,8 +147,17 @@ CREATE TABLE snapshot_runs (
         OR (book_id IS NOT NULL AND captured_generation IS NOT NULL AND target_cut_utc IS NOT NULL)
     ),
     CHECK (
-        (expected_active_snapshot_id IS NULL AND expected_active_pointer_version = 0)
-        OR (expected_active_snapshot_id IS NOT NULL AND expected_active_pointer_version >= 1)
+        (book_id IS NULL AND expected_active_snapshot_id IS NULL
+            AND expected_active_pointer_version = 0)
+        OR (
+            book_id IS NOT NULL
+            AND (
+                (expected_active_snapshot_id IS NULL
+                    AND expected_active_pointer_version = 0)
+                OR (expected_active_snapshot_id IS NOT NULL
+                    AND expected_active_pointer_version >= 1)
+            )
+        )
     ),
     CHECK (updated_at_utc >= requested_at_utc),
     CHECK (started_at_utc IS NULL OR (
@@ -178,7 +189,17 @@ CREATE TABLE snapshot_runs (
         )
     ),
     CHECK (result_json IS NULL OR (run_outcome = 'SUCCEEDED' AND book_id IS NULL)),
-    CHECK (published_snapshot_id IS NULL OR run_outcome = 'SUCCEEDED')
+    CHECK (published_snapshot_id IS NULL OR run_outcome = 'SUCCEEDED'),
+    CHECK (
+        run_outcome <> 'SUCCEEDED' OR book_id IS NULL OR (
+            run_stage = 'PUBLISHING'
+            AND candidate_snapshot_id IS NOT NULL
+            AND published_snapshot_id IS NOT NULL
+            AND published_snapshot_id = candidate_snapshot_id
+        )
+    ),
+    FOREIGN KEY (book_id, expected_active_snapshot_id)
+        REFERENCES snapshot_manifests(book_id, snapshot_id)
 );
 
 CREATE UNIQUE INDEX one_live_idempotency_identity
@@ -219,7 +240,9 @@ CREATE TABLE snapshot_manifests (
         length(published_at_utc) = 27
         AND published_at_utc GLOB
             '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
-    )
+    ),
+    UNIQUE (book_id, snapshot_id),
+    UNIQUE (book_id, snapshot_id, book_generation)
 );
 
 CREATE INDEX blessed_manifest_fallback
@@ -227,15 +250,17 @@ CREATE INDEX blessed_manifest_fallback
     WHERE snapshot_status = 'BLESSED';
 
 CREATE TABLE active_snapshots (
-    book_id TEXT PRIMARY KEY REFERENCES book_heads(book_id),
-    snapshot_id TEXT NOT NULL REFERENCES snapshot_manifests(snapshot_id),
+    book_id TEXT NOT NULL PRIMARY KEY REFERENCES book_heads(book_id),
+    snapshot_id TEXT NOT NULL,
     book_generation INTEGER NOT NULL CHECK (book_generation >= 0),
     pointer_version INTEGER NOT NULL CHECK (pointer_version >= 1),
     updated_at_utc TEXT NOT NULL CHECK (
         length(updated_at_utc) = 27
         AND updated_at_utc GLOB
             '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
-    )
+    ),
+    FOREIGN KEY (book_id, snapshot_id, book_generation)
+        REFERENCES snapshot_manifests(book_id, snapshot_id, book_generation)
 );
 
 CREATE TABLE snapshot_recovery_events (
@@ -249,7 +274,7 @@ CREATE TABLE snapshot_recovery_events (
     resolution_action TEXT NOT NULL CHECK (
         resolution_action IN ('REPOINTED', 'REMOVED', 'CAS_LOST')
     ),
-    selected_snapshot_id TEXT REFERENCES snapshot_manifests(snapshot_id),
+    selected_snapshot_id TEXT,
     detail_json TEXT NOT NULL CHECK (
         length(CAST(detail_json AS BLOB)) <= 65536
         AND json_valid(detail_json)
@@ -262,9 +287,15 @@ CREATE TABLE snapshot_recovery_events (
             '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
     ),
     CHECK (
-        (resolution_action = 'REPOINTED' AND selected_snapshot_id IS NOT NULL)
-        OR (resolution_action IN ('REMOVED', 'CAS_LOST'))
-    )
+        (resolution_action = 'REPOINTED' AND selected_snapshot_id IS NOT NULL
+            AND selected_snapshot_id <> rejected_snapshot_id)
+        OR (resolution_action = 'REMOVED' AND selected_snapshot_id IS NULL)
+        OR resolution_action = 'CAS_LOST'
+    ),
+    FOREIGN KEY (book_id, rejected_snapshot_id)
+        REFERENCES snapshot_manifests(book_id, snapshot_id),
+    FOREIGN KEY (book_id, selected_snapshot_id)
+        REFERENCES snapshot_manifests(book_id, snapshot_id)
 );
 
 PRAGMA user_version = 1;
