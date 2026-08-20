@@ -191,6 +191,11 @@ CREATE TABLE snapshot_runs (
     CHECK (result_json IS NULL OR (run_outcome = 'SUCCEEDED' AND book_id IS NULL)),
     CHECK (published_snapshot_id IS NULL OR run_outcome = 'SUCCEEDED'),
     CHECK (
+        book_id IS NOT NULL OR (
+            candidate_snapshot_id IS NULL AND published_snapshot_id IS NULL
+        )
+    ),
+    CHECK (
         run_outcome <> 'SUCCEEDED' OR book_id IS NULL OR (
             run_stage = 'PUBLISHING'
             AND candidate_snapshot_id IS NOT NULL
@@ -290,12 +295,44 @@ CREATE TABLE snapshot_recovery_events (
         (resolution_action = 'REPOINTED' AND selected_snapshot_id IS NOT NULL
             AND selected_snapshot_id <> rejected_snapshot_id)
         OR (resolution_action = 'REMOVED' AND selected_snapshot_id IS NULL)
-        OR resolution_action = 'CAS_LOST'
+        OR (
+            resolution_action = 'CAS_LOST'
+            AND (
+                selected_snapshot_id IS NULL
+                OR selected_snapshot_id <> rejected_snapshot_id
+            )
+        )
     ),
     FOREIGN KEY (book_id, rejected_snapshot_id)
         REFERENCES snapshot_manifests(book_id, snapshot_id),
     FOREIGN KEY (book_id, selected_snapshot_id)
         REFERENCES snapshot_manifests(book_id, snapshot_id)
 );
+
+CREATE TRIGGER recovery_selected_snapshot_blessed_on_insert
+BEFORE INSERT ON snapshot_recovery_events
+WHEN NEW.selected_snapshot_id IS NOT NULL
+ AND NOT EXISTS (
+    SELECT 1 FROM snapshot_manifests
+    WHERE book_id = NEW.book_id
+      AND snapshot_id = NEW.selected_snapshot_id
+      AND snapshot_status = 'BLESSED'
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'selected recovery snapshot must be BLESSED');
+END;
+
+CREATE TRIGGER recovery_selected_snapshot_blessed_on_update
+BEFORE UPDATE OF book_id, selected_snapshot_id ON snapshot_recovery_events
+WHEN NEW.selected_snapshot_id IS NOT NULL
+ AND NOT EXISTS (
+    SELECT 1 FROM snapshot_manifests
+    WHERE book_id = NEW.book_id
+      AND snapshot_id = NEW.selected_snapshot_id
+      AND snapshot_status = 'BLESSED'
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'selected recovery snapshot must be BLESSED');
+END;
 
 PRAGMA user_version = 1;
