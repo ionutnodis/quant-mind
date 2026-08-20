@@ -110,6 +110,8 @@ class ValuationCutV1(FrozenContractBase):
     def _capture_window_is_ordered(self) -> "ValuationCutV1":
         if self.capture_start_utc > self.capture_end_utc:
             raise ValueError("capture start must not follow capture end")
+        if self.target_cut_utc > self.capture_end_utc:
+            raise ValueError("target cut must not follow capture end")
         return self
 
 
@@ -127,7 +129,7 @@ def _canonicalize(value: Any) -> Any:
     if isinstance(value, Decimal):
         if not value.is_finite():
             raise ValueError("canonical decimals must be finite")
-        return "0" if value.is_zero() else format(value, "f")
+        return format(value.copy_abs() if value.is_zero() else value, "f")
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError("canonical floats must be finite")

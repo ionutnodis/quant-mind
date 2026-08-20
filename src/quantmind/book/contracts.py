@@ -49,7 +49,7 @@ def _require_nonblank(value: str, name: str) -> str:
 
 
 def _require_currency(value: str) -> str:
-    if len(value) != 3 or not value.isalpha() or value != value.upper():
+    if len(value) != 3 or any(character < "A" or character > "Z" for character in value):
         raise ValueError("currency must be an uppercase three-letter code")
     return value
 

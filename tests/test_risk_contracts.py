@@ -14,6 +14,7 @@ from quantmind.book.contracts import (
     AssetClass,
     CanonicalBookV1,
     ExerciseStyle,
+    FxObservationV1,
     InstrumentV1,
     PositionV1,
     ReconciliationStatus,
@@ -153,6 +154,21 @@ def test_usd_triangulation_uses_usd_per_currency_for_non_usd_base():
     )
     with pytest.raises(ValueError):
         convert_via_usd(Decimal("1"), "JPY", "USD", quotes)
+
+
+def test_currency_codes_reject_non_ascii_letters_at_model_and_conversion_boundaries():
+    quote = _canonical_book_payload()["fx_quotes"][1]
+    quote["currency"] = "\u00c5BC"
+    with pytest.raises(ValueError):
+        FxObservationV1.model_validate_json(json.dumps(quote))
+
+    with pytest.raises(ValueError):
+        convert_via_usd(
+            Decimal("1"),
+            "\u00c5BC",
+            "USD",
+            {"\u00c5BC": Decimal("1.10"), "USD": Decimal("1")},
+        )
 
 
 def test_canonical_book_rejects_identity_reference_fx_value_and_time_violations():

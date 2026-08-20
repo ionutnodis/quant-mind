@@ -73,6 +73,18 @@ def test_canonical_json_bytes_rejects_ambiguous_values(value):
         canonical_json_bytes(value)
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (Decimal("0"), b'"0"'),
+        (Decimal("0.00"), b'"0.00"'),
+        (Decimal("-0.00"), b'"0.00"'),
+    ],
+)
+def test_canonical_decimal_zero_preserves_scale_while_normalizing_sign(value, expected):
+    assert canonical_json_bytes(value) == expected
+
+
 def test_lifecycle_and_gate_vocabulary_serializes_to_exact_public_strings():
     assert [stage.value for stage in RunStage] == [
         "QUEUED",
@@ -165,3 +177,21 @@ def test_valuation_cut_requires_utc_resolvable_timezone_and_ordered_capture_wind
     for update in invalid_updates:
         with pytest.raises(ValueError):
             ValuationCutV1.model_validate(good | update)
+
+
+def test_valuation_cut_rejects_target_after_capture_end():
+    with pytest.raises(ValueError):
+        ValuationCutV1(
+            target_cut_utc=datetime(2026, 7, 24, 20, 21, tzinfo=UTC),
+            display_timezone="America/New_York",
+            capture_start_utc=datetime(2026, 7, 24, 20, 15, tzinfo=UTC),
+            capture_end_utc=datetime(2026, 7, 24, 20, 20, tzinfo=UTC),
+        )
+
+    post_cut_capture = ValuationCutV1(
+        target_cut_utc=datetime(2026, 7, 24, 20, 15, tzinfo=UTC),
+        display_timezone="America/New_York",
+        capture_start_utc=datetime(2026, 7, 24, 20, 16, tzinfo=UTC),
+        capture_end_utc=datetime(2026, 7, 24, 20, 20, tzinfo=UTC),
+    )
+    assert post_cut_capture.capture_start_utc > post_cut_capture.target_cut_utc
