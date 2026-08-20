@@ -158,6 +158,11 @@ CREATE TABLE snapshot_runs (
     )),
     CHECK (finished_at_utc IS NULL OR (
         finished_at_utc >= requested_at_utc AND finished_at_utc <= updated_at_utc
+        AND (started_at_utc IS NULL OR finished_at_utc >= started_at_utc)
+        AND (
+            cancel_requested_at_utc IS NULL
+            OR finished_at_utc >= cancel_requested_at_utc
+        )
     )),
     CHECK (
         (run_outcome = 'RUNNING' AND finished_at_utc IS NULL)

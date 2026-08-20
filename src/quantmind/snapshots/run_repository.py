@@ -573,25 +573,52 @@ class RunRecordV1(FrozenContractBase):
                 self.requested_at_utc <= value <= self.updated_at_utc
             ):
                 raise ValueError("run lifecycle timestamps are not monotonic")
+        if self.finished_at_utc is not None:
+            if (
+                self.started_at_utc is not None
+                and self.finished_at_utc < self.started_at_utc
+            ):
+                raise ValueError("run finish cannot precede its start")
+            if (
+                self.cancel_requested_at_utc is not None
+                and self.finished_at_utc < self.cancel_requested_at_utc
+            ):
+                raise ValueError("run finish cannot precede cancellation intent")
+        if (self.run_outcome is RunOutcome.RUNNING) != (
+            self.finished_at_utc is None
+        ):
+            raise ValueError("running and terminal finish state is incoherent")
         if self.error_code is None:
             if self.error_message is not None:
                 raise ValueError("error message requires a typed error code")
         elif self.error_message != _ERROR_MESSAGES[self.error_code]:
             raise ValueError("durable error message is not the curated code message")
-        if self.run_outcome is RunOutcome.CANCELLED:
+        if self.run_outcome in {RunOutcome.RUNNING, RunOutcome.SUCCEEDED}:
+            if self.error_code is not None:
+                raise ValueError("running and successful runs cannot carry failure evidence")
+        elif self.run_outcome is RunOutcome.FAILED:
+            if (
+                self.error_code is None
+                or self.error_code is RunErrorCode.CANCELLED_BY_USER
+            ):
+                raise ValueError("failed runs require non-cancellation failure evidence")
+        else:
             if (
                 self.error_code is not RunErrorCode.CANCELLED_BY_USER
                 or self.cancel_requested_at_utc is None
             ):
                 raise ValueError("cancelled outcome requires durable cancellation intent")
-        elif self.error_code is RunErrorCode.CANCELLED_BY_USER:
-            raise ValueError("cancellation code is valid only for CANCELLED outcome")
         if self.result is not None and (
             self.run_outcome is not RunOutcome.SUCCEEDED or self.book_id is not None
         ):
             raise ValueError(
                 "durable results are valid only for successful non-book runs"
             )
+        if (
+            self.published_snapshot_id is not None
+            and self.run_outcome is not RunOutcome.SUCCEEDED
+        ):
+            raise ValueError("published snapshot identity requires successful outcome")
         return self
 
 
@@ -924,16 +951,14 @@ class RunRepository:
     @staticmethod
     def _schema_signature(
         connection: sqlite3.Connection,
-    ) -> tuple[tuple[str, str, str, str], ...]:
+    ) -> tuple[tuple[str, str, str, str | None], ...]:
         return tuple(
             tuple(row)
             for row in connection.execute(
                 """
                 SELECT type, name, tbl_name, sql
                 FROM sqlite_master
-                WHERE type IN ('table', 'index')
-                  AND name NOT LIKE 'sqlite_%'
-                  AND sql IS NOT NULL
+                WHERE name NOT LIKE 'sqlite_%'
                 ORDER BY type, name
                 """
             ).fetchall()
@@ -942,7 +967,7 @@ class RunRepository:
     @classmethod
     def _expected_schema_signature(
         cls, migration_statements: tuple[str, ...]
-    ) -> tuple[tuple[str, str, str, str], ...]:
+    ) -> tuple[tuple[str, str, str, str | None], ...]:
         with sqlite3.connect(":memory:") as reference:
             for statement in migration_statements:
                 reference.execute(statement)
@@ -952,7 +977,7 @@ class RunRepository:
     def _validate_schema(
         connection: sqlite3.Connection,
         *,
-        expected_signature: tuple[tuple[str, str, str, str], ...],
+        expected_signature: tuple[tuple[str, str, str, str | None], ...],
     ) -> None:
         if RunRepository._schema_signature(connection) != expected_signature:
             raise RunDatabaseError(
@@ -1955,7 +1980,7 @@ class RunRepository:
             committed = True
             try:
                 self._inject("db.after_commit")
-            except BaseException:
+            except Exception:
                 connection.close()
                 connection = None
                 return self._publication_result_from_durable_truth(
@@ -1976,7 +2001,7 @@ class RunRepository:
             if connection is not None and not committed:
                 connection.rollback()
             raise
-        except BaseException as error:
+        except Exception as error:
             if connection is not None and not committed:
                 connection.rollback()
             raise RunDatabaseError("atomic publication transaction failed") from error
@@ -1989,6 +2014,13 @@ class RunRepository:
         with self._read_connection() as connection:
             row = self._active_row(connection, book_id)
             return None if row is None else self._active_from_row(row)
+
+    def list_active(self) -> tuple[ActiveSnapshotV1, ...]:
+        with self._read_connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM active_snapshots ORDER BY book_id ASC"
+            ).fetchall()
+            return tuple(self._active_from_row(row) for row in rows)
 
     def list_publications(
         self, book_id: str
