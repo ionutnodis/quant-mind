@@ -410,6 +410,28 @@ def _seed_recovery_event_history(
         )
 
 
+def _execute_without_named_trigger(
+    repository: RunRepository,
+    trigger_name: str,
+    statement: str,
+    parameters: tuple[object, ...],
+    *,
+    ignore_check_constraints: bool = False,
+) -> None:
+    with sqlite3.connect(repository.database_path) as connection:
+        if ignore_check_constraints:
+            connection.execute("PRAGMA ignore_check_constraints = ON")
+        trigger = connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?",
+            (trigger_name,),
+        ).fetchone()
+        if trigger is not None:
+            connection.execute(f'DROP TRIGGER "{trigger_name}"')
+        connection.execute(statement, parameters)
+        if trigger is not None:
+            connection.execute(trigger[0])
+
+
 class _VmBudgetRunRepository(RunRepository):
     def __init__(self, root: Path) -> None:
         super().__init__(root)
@@ -434,6 +456,25 @@ class _VmBudgetRunRepository(RunRepository):
 
     def reset_vm_callbacks(self) -> None:
         self.vm_callbacks = 0
+
+
+class _TracingVmRunRepository(_VmBudgetRunRepository):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.statements: list[str] = []
+
+    def _open_connection(
+        self,
+        *,
+        configure_wal: bool,
+        timeout_ms: int = 5_000,
+    ) -> sqlite3.Connection:
+        connection = super()._open_connection(
+            configure_wal=configure_wal,
+            timeout_ms=timeout_ms,
+        )
+        connection.set_trace_callback(self.statements.append)
+        return connection
 
 
 def test_initialize_migrates_empty_root_idempotently_and_reopens(tmp_path: Path) -> None:
@@ -1508,12 +1549,13 @@ def test_constraint_bypassed_65_character_run_kind_fails_typed(
     run = repository.create_or_join(
         _new_run(book_id=None, client_idempotency_key="long-run-kind"), now=T0
     ).record
-    with sqlite3.connect(repository.database_path) as connection:
-        connection.execute("PRAGMA ignore_check_constraints = ON")
-        connection.execute(
-            "UPDATE snapshot_runs SET run_kind = ? WHERE run_id = ?",
-            ("R" * 65, run.run_id),
-        )
+    _execute_without_named_trigger(
+        repository,
+        "snapshot_run_allocation_immutable",
+        "UPDATE snapshot_runs SET run_kind = ? WHERE run_id = ?",
+        ("R" * 65, run.run_id),
+        ignore_check_constraints=True,
+    )
 
     with pytest.raises(RunDatabaseError):
         repository.get(run.run_id)
@@ -1740,12 +1782,13 @@ def test_constraint_bypassed_run_identity_tuples_fail_typed(
             "expected_active_pointer_version = 0"
         ),
     }[corruption]
-    with sqlite3.connect(repository.database_path) as connection:
-        connection.execute("PRAGMA ignore_check_constraints = ON")
-        connection.execute(
-            f"UPDATE snapshot_runs SET {assignments} WHERE run_id = ?",
-            (run.run_id,),
-        )
+    _execute_without_named_trigger(
+        repository,
+        "snapshot_run_allocation_immutable",
+        f"UPDATE snapshot_runs SET {assignments} WHERE run_id = ?",
+        (run.run_id,),
+        ignore_check_constraints=True,
+    )
 
     with pytest.raises(RunDatabaseError):
         repository.get(run.run_id)
@@ -2138,15 +2181,15 @@ def test_expected_active_publication_cannot_postdate_its_run_request(
         expected_version=second.version,
         now=T4,
     )
-    with sqlite3.connect(repository.database_path) as connection:
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute(
-            """
-            UPDATE snapshot_runs SET expected_active_snapshot_id = ?
-            WHERE run_id = ?
-            """,
-            (SNAPSHOT_B, second.run_id),
-        )
+    _execute_without_named_trigger(
+        repository,
+        "snapshot_run_allocation_immutable",
+        """
+        UPDATE snapshot_runs SET expected_active_snapshot_id = ?
+        WHERE run_id = ?
+        """,
+        (SNAPSHOT_B, second.run_id),
+    )
 
     with pytest.raises(RunDatabaseError):
         if operation == "initialize":
@@ -3338,7 +3381,16 @@ def test_recovery_caps_700_candidate_failures_and_still_removes_active(
         connection.execute("PRAGMA foreign_keys = ON")
         for index, snapshot_id in enumerate(snapshot_ids):
             run_id = f"run_seed_{index:08d}"
-            identity = f"{index + 1:064x}"
+            request_fingerprint = f"{index + 1:064x}"
+            identity = RunRepository._idempotency_identity(
+                _new_run(
+                    run_id=run_id,
+                    request_fingerprint=request_fingerprint,
+                    client_idempotency_key=None,
+                ),
+                1,
+                None,
+            )
             connection.execute(
                 """
                 INSERT INTO snapshot_runs (
@@ -3358,7 +3410,7 @@ def test_recovery_caps_700_candidate_failures_and_still_removes_active(
                 (
                     run_id,
                     identity,
-                    identity,
+                    request_fingerprint,
                     timestamp,
                     timestamp,
                     timestamp,
@@ -4184,8 +4236,15 @@ def test_recovery_decodes_unknown_fallback_status_before_selection(
             now=T5,
         )
 
-    assert repository.get_active("book-alpha").snapshot_id == SNAPSHOT_B
-    assert repository.list_recovery_events("book-alpha") == ()
+    with sqlite3.connect(repository.database_path) as connection:
+        active_snapshot_id = connection.execute(
+            "SELECT snapshot_id FROM active_snapshots WHERE book_id = 'book-alpha'"
+        ).fetchone()[0]
+        recovery_event_count = connection.execute(
+            "SELECT count(*) FROM snapshot_recovery_events"
+        ).fetchone()[0]
+    assert active_snapshot_id == SNAPSHOT_B
+    assert recovery_event_count == 0
 
 
 def test_expected_active_reference_validates_publication_owner_provenance(
@@ -4492,6 +4551,13 @@ def test_complete_neighborhood_queries_use_named_full_indexes(tmp_path: Path) ->
             "WHERE run_kind = ? AND idempotency_identity = ?",
             ("ANALYTICAL_SNAPSHOT", "a" * 64),
         ),
+        "snapshot_runs_by_preimage": (
+            "SELECT * FROM snapshot_runs WHERE run_kind = ? "
+            "AND request_fingerprint = ? "
+            "AND client_idempotency_key_digest IS ? AND book_id IS ? "
+            "AND captured_generation IS ? AND target_cut_utc IS ?",
+            ("SYNC", "a" * 64, None, None, None, None),
+        ),
         "snapshot_runs_by_book_generation": (
             "SELECT * FROM snapshot_runs "
             "WHERE book_id = ? AND captured_generation = ?",
@@ -4527,3 +4593,740 @@ def test_complete_neighborhood_queries_use_named_full_indexes(tmp_path: Path) ->
     assert {
         index_name: index_name in plan for index_name, plan in plans.items()
     } == {index_name: True for index_name in statements}
+
+
+@pytest.mark.parametrize(
+    ("column", "assignment", "parameters"),
+    [
+        ("run_id", "run_id = ?", ("run_01J5X5S8J5J8P7KQ4Y0T3N6E1A",)),
+        ("run_kind", "run_kind = ?", ("ANALYTICAL_SNAPSHOT_V2",)),
+        ("idempotency_identity", "idempotency_identity = ?", ("b" * 64,)),
+        ("request_fingerprint", "request_fingerprint = ?", ("b" * 64,)),
+        (
+            "client_idempotency_key_digest",
+            "client_idempotency_key_digest = ?",
+            ("b" * 64,),
+        ),
+        ("book_id", "book_id = ?", ("book-beta",)),
+        ("captured_generation", "captured_generation = ?", (2,)),
+        (
+            "expected_active",
+            "expected_active_snapshot_id = ?, expected_active_pointer_version = 1",
+            (SNAPSHOT_A,),
+        ),
+        (
+            "target_cut_utc",
+            "target_cut_utc = ?",
+            ("2026-08-20T08:01:00.000000Z",),
+        ),
+        (
+            "requested_at_utc",
+            "requested_at_utc = ?",
+            ("2026-08-20T08:00:00.000000Z",),
+        ),
+    ],
+)
+def test_sql_makes_run_allocation_fields_immutable(
+    tmp_path: Path,
+    column: str,
+    assignment: str,
+    parameters: tuple[object, ...],
+) -> None:
+    # Break caught: ordinary SQL changing the server-derived allocation preimage.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    repository.advance_book_head("book-beta", 2, BOOK_REF_2, now=T0)
+    run = repository.create_or_join(
+        _new_run(client_idempotency_key=f"immutable-{column}"), now=T1
+    ).record
+
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        with pytest.raises(sqlite3.IntegrityError) as captured:
+            connection.execute(
+                f"UPDATE snapshot_runs SET {assignment} WHERE run_id = ?",
+                (*parameters, run.run_id),
+            )
+
+    assert "run allocation fields are immutable" in str(captured.value)
+
+
+def test_allocation_immutability_trigger_preserves_lifecycle_updates(
+    tmp_path: Path,
+) -> None:
+    # Protective regression: allocation immutability must not freeze worker-owned state.
+    repository = _repository(tmp_path)
+    run = repository.create_or_join(
+        _new_run(book_id=None, client_idempotency_key="mutable-lifecycle"), now=T0
+    ).record
+
+    started = repository.claim_start(
+        run.run_id, expected_version=run.version, now=T1
+    )
+    cancelled = repository.request_cancel(started.run_id, now=T2)
+
+    assert started.run_stage is RunStage.INGESTING
+    assert cancelled.cancel_requested_at_utc == T2
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("idempotency_identity", "b" * 64),
+        ("request_fingerprint", "b" * 64),
+    ],
+)
+def test_target_and_full_audit_recompute_stored_idempotency_identity(
+    tmp_path: Path,
+    column: str,
+    value: str,
+) -> None:
+    # Break caught: a valid-shaped stored identity/preimage drifting from canonical derivation.
+    repository = _repository(tmp_path)
+    run = repository.create_or_join(
+        _new_run(book_id=None, client_idempotency_key=f"attest-{column}"), now=T0
+    ).record
+    _execute_without_named_trigger(
+        repository,
+        "snapshot_run_allocation_immutable",
+        f"UPDATE snapshot_runs SET {column} = ? WHERE run_id = ?",
+        (value, run.run_id),
+    )
+
+    with pytest.raises(RunDatabaseError):
+        repository.get(run.run_id)
+    with pytest.raises(RunDatabaseError):
+        repository.audit_integrity()
+
+
+@pytest.mark.parametrize(
+    ("corruption", "assignment"),
+    [
+        ("identity", "idempotency_identity = ?"),
+        ("preimage", "request_fingerprint = ?"),
+    ],
+)
+def test_create_or_join_validates_identity_and_exact_preimage_neighborhoods(
+    tmp_path: Path,
+    corruption: str,
+    assignment: str,
+) -> None:
+    # Break caught: corruption moving a logically identical non-book run out of lookup sight.
+    repository = _repository(tmp_path)
+    request = _new_run(
+        book_id=None,
+        client_idempotency_key=f"dual-neighborhood-{corruption}",
+    )
+    first = repository.create_or_join(request, now=T0).record
+    _execute_without_named_trigger(
+        repository,
+        "snapshot_run_allocation_immutable",
+        f"UPDATE snapshot_runs SET {assignment} WHERE run_id = ?",
+        ("b" * 64, first.run_id),
+    )
+
+    with pytest.raises(RunDatabaseError):
+        repository.create_or_join(
+            _new_run(
+                run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6E1B",
+                book_id=None,
+                client_idempotency_key=f"dual-neighborhood-{corruption}",
+            ),
+            now=T1,
+        )
+
+    with sqlite3.connect(repository.database_path) as connection:
+        assert connection.execute("SELECT count(*) FROM snapshot_runs").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("ancestor_corruption", ["invalid_owner", "identity_mismatch"])
+def test_expected_active_provenance_walk_reaches_deep_ancestors(
+    tmp_path: Path,
+    ancestor_corruption: str,
+) -> None:
+    # Break caught: target, active, and event reads stopping at the immediate owner tuple.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    second = _publishing_run(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6E2A",
+        snapshot_id=SNAPSHOT_B,
+    )
+    repository.commit_publication(
+        second.run_id,
+        _publication(SNAPSHOT_B, generation=1),
+        expected_version=second.version,
+        now=T4,
+    )
+    dependent = repository.create_or_join(
+        _new_run(
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6E2B",
+            client_idempotency_key=f"deep-dependent-{ancestor_corruption}",
+        ),
+        now=T5,
+    ).record
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """
+            INSERT INTO snapshot_recovery_events (
+                book_id, rejected_snapshot_id, expected_pointer_version,
+                resolution_action, selected_snapshot_id, detail_json,
+                recorded_at_utc
+            ) VALUES (
+                'book-alpha', ?, 2, 'CAS_LOST', NULL,
+                '{"failures":[],"omitted_count":0}',
+                '2026-08-20T08:05:00.000000Z'
+            )
+            """,
+            (SNAPSHOT_B,),
+        )
+
+    if ancestor_corruption == "invalid_owner":
+        invalid_owner = _failed_nonbook_run(
+            repository,
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6E2C",
+            client_idempotency_key="deep-invalid-owner",
+        )
+        with sqlite3.connect(repository.database_path) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute(
+                "UPDATE snapshot_manifests SET run_id = ? WHERE snapshot_id = ?",
+                (invalid_owner.run_id, SNAPSHOT_A),
+            )
+            assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    else:
+        _execute_without_named_trigger(
+            repository,
+            "snapshot_run_allocation_immutable",
+            "UPDATE snapshot_runs SET request_fingerprint = ? WHERE run_id = ?",
+            ("f" * 64, first.run_id),
+        )
+
+    with pytest.raises(RunDatabaseError):
+        repository.get(dependent.run_id)
+    with pytest.raises(RunDatabaseError):
+        repository.get_active("book-alpha")
+    with pytest.raises(RunDatabaseError):
+        repository.list_recovery_events("book-alpha")
+
+
+def test_expected_active_provenance_walk_accepts_equal_timestamp_multihop(
+    tmp_path: Path,
+) -> None:
+    # Protective regression: equality is valid when several publications share one cut.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    second = _publishing_run(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6E2D",
+        snapshot_id=SNAPSHOT_B,
+    )
+    repository.commit_publication(
+        second.run_id,
+        _publication(SNAPSHOT_B, generation=1),
+        expected_version=second.version,
+        now=T3,
+    )
+    third = _publishing_run(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6E2E",
+        snapshot_id=SNAPSHOT_C,
+    )
+    repository.commit_publication(
+        third.run_id,
+        _publication(SNAPSHOT_C, generation=1),
+        expected_version=third.version,
+        now=T3,
+    )
+
+    assert repository.get(third.run_id).expected_active_snapshot_id == SNAPSHOT_B
+    assert repository.get_active("book-alpha").snapshot_id == SNAPSHOT_C
+    repository.audit_integrity()
+
+
+def test_expected_active_provenance_walk_rejects_real_cycle(tmp_path: Path) -> None:
+    # Break caught: mutually expected publications looping forever or passing one-edge checks.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    run_a = _new_run(
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6E3A",
+        request_fingerprint="a" * 64,
+        client_idempotency_key=None,
+    )
+    run_b = _new_run(
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6E3B",
+        request_fingerprint="b" * 64,
+        client_idempotency_key=None,
+    )
+    identity_a = RunRepository._idempotency_identity(run_a, 1, None)
+    identity_b = RunRepository._idempotency_identity(run_b, 1, None)
+    timestamp = "2026-08-20T08:00:00.000000Z"
+    with sqlite3.connect(repository.database_path) as connection:
+        for request, identity, candidate, expected, pointer_version in (
+            (run_a, identity_a, SNAPSHOT_A, SNAPSHOT_B, 2),
+            (run_b, identity_b, SNAPSHOT_B, SNAPSHOT_A, 1),
+        ):
+            connection.execute(
+                """
+                INSERT INTO snapshot_runs (
+                    run_id, run_kind, idempotency_identity, request_fingerprint,
+                    client_idempotency_key_digest, book_id, captured_generation,
+                    expected_active_snapshot_id, expected_active_pointer_version,
+                    target_cut_utc, requested_at_utc, started_at_utc, updated_at_utc,
+                    finished_at_utc, run_stage, run_outcome,
+                    cancel_requested_at_utc, candidate_snapshot_id,
+                    published_snapshot_id, result_json, error_code, error_message, version
+                ) VALUES (
+                    ?, 'ANALYTICAL_SNAPSHOT', ?, ?, NULL, 'book-alpha', 1,
+                    ?, ?, ?, ?, ?, ?, ?, 'PUBLISHING', 'SUCCEEDED',
+                    NULL, ?, ?, NULL, NULL, NULL, 1
+                )
+                """,
+                (
+                    request.run_id,
+                    identity,
+                    request.request_fingerprint,
+                    expected,
+                    pointer_version,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    candidate,
+                    candidate,
+                ),
+            )
+        for request, snapshot_id, envelope in (
+            (run_a, SNAPSHOT_A, "e" * 64),
+            (run_b, SNAPSHOT_B, "d" * 64),
+        ):
+            connection.execute(
+                """
+                INSERT INTO snapshot_manifests (
+                    snapshot_id, run_id, book_id, book_generation, snapshot_status,
+                    schema_version, hash_algorithm, manifest_relpath, envelope_sha256,
+                    envelope_byte_length, published_at_utc
+                ) VALUES (?, ?, 'book-alpha', 1, 'BLESSED',
+                    'analytical_snapshot_manifest_v1', 'sha256', ?, ?, 4096, ?)
+                """,
+                (
+                    snapshot_id,
+                    request.run_id,
+                    "snapshots/manifests/analytical_snapshot_manifest_v1/"
+                    f"{snapshot_id[:2]}/{snapshot_id}.json",
+                    envelope,
+                    timestamp,
+                ),
+            )
+        connection.execute(
+            """
+            INSERT INTO active_snapshots (
+                book_id, snapshot_id, book_generation, pointer_version, updated_at_utc
+            ) VALUES ('book-alpha', ?, 1, 2, ?)
+            """,
+            (SNAPSHOT_B, timestamp),
+        )
+        connection.commit()
+        connection.execute("PRAGMA foreign_keys = ON")
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    with pytest.raises(RunDatabaseError, match="cycle"):
+        repository.get_active("book-alpha")
+    with pytest.raises(RunDatabaseError, match="cycle"):
+        repository.audit_integrity()
+
+
+def test_expected_active_provenance_walk_rejects_self_cycle(tmp_path: Path) -> None:
+    # Break caught: a publication owner naming its own publication as expected-active.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    request = _new_run(
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6E3C",
+        client_idempotency_key=None,
+    )
+    identity = RunRepository._idempotency_identity(request, 1, None)
+    timestamp = "2026-08-20T08:00:00.000000Z"
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO snapshot_runs (
+                run_id, run_kind, idempotency_identity, request_fingerprint,
+                client_idempotency_key_digest, book_id, captured_generation,
+                expected_active_snapshot_id, expected_active_pointer_version,
+                target_cut_utc, requested_at_utc, started_at_utc, updated_at_utc,
+                finished_at_utc, run_stage, run_outcome,
+                cancel_requested_at_utc, candidate_snapshot_id,
+                published_snapshot_id, result_json, error_code, error_message, version
+            ) VALUES (
+                ?, 'ANALYTICAL_SNAPSHOT', ?, ?, NULL, 'book-alpha', 1,
+                ?, 1, ?, ?, ?, ?, ?, 'PUBLISHING', 'SUCCEEDED',
+                NULL, ?, ?, NULL, NULL, NULL, 1
+            )
+            """,
+            (
+                request.run_id,
+                identity,
+                request.request_fingerprint,
+                SNAPSHOT_A,
+                timestamp,
+                timestamp,
+                timestamp,
+                timestamp,
+                timestamp,
+                SNAPSHOT_A,
+                SNAPSHOT_A,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO snapshot_manifests (
+                snapshot_id, run_id, book_id, book_generation, snapshot_status,
+                schema_version, hash_algorithm, manifest_relpath, envelope_sha256,
+                envelope_byte_length, published_at_utc
+            ) VALUES (?, ?, 'book-alpha', 1, 'BLESSED',
+                'analytical_snapshot_manifest_v1', 'sha256', ?, ?, 4096, ?)
+            """,
+            (
+                SNAPSHOT_A,
+                request.run_id,
+                "snapshots/manifests/analytical_snapshot_manifest_v1/"
+                f"{SNAPSHOT_A[:2]}/{SNAPSHOT_A}.json",
+                "e" * 64,
+                timestamp,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO active_snapshots (
+                book_id, snapshot_id, book_generation, pointer_version, updated_at_utc
+            ) VALUES ('book-alpha', ?, 1, 1, ?)
+            """,
+            (SNAPSHOT_A, timestamp),
+        )
+        connection.commit()
+        connection.execute("PRAGMA foreign_keys = ON")
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    with pytest.raises(RunDatabaseError, match="cycle"):
+        repository.get_active("book-alpha")
+    with pytest.raises(RunDatabaseError, match="cycle"):
+        repository.audit_integrity()
+
+
+def test_publication_provenance_walk_allows_normal_owner_back_edge(
+    tmp_path: Path,
+) -> None:
+    # Protective regression: owner -> owned publication is not an expected-active cycle.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    run = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        run.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=run.version,
+        now=T3,
+    )
+
+    assert repository.get(run.run_id).published_snapshot_id == SNAPSHOT_A
+    assert repository.get_active("book-alpha").snapshot_id == SNAPSHOT_A
+
+
+@pytest.mark.parametrize("resolution", ["fallback", "removal"])
+def test_recovery_timestamp_only_pointer_drift_loses_exact_cas(
+    tmp_path: Path,
+    resolution: str,
+) -> None:
+    # Break caught: recovery overwriting a pointer whose timestamp changed after capture.
+    armed = False
+
+    def drift_pointer_timestamp(stage: str) -> None:
+        if armed and stage == "recovery.after_selection":
+            with sqlite3.connect(repository.database_path) as connection:
+                connection.execute(
+                    "UPDATE active_snapshots SET updated_at_utc = ? "
+                    "WHERE book_id = 'book-alpha'",
+                    ("2026-08-20T08:05:00.000000Z",),
+                )
+
+    repository = RunRepository(tmp_path, fault_injector=drift_pointer_timestamp)
+    repository.initialize()
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    if resolution == "fallback":
+        first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+        repository.commit_publication(
+            first.run_id,
+            _publication(SNAPSHOT_A, generation=1),
+            expected_version=first.version,
+            now=T3,
+        )
+    second = _publishing_run(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6E4A",
+        snapshot_id=SNAPSHOT_B,
+    )
+    repository.commit_publication(
+        second.run_id,
+        _publication(SNAPSHOT_B, generation=1),
+        expected_version=second.version,
+        now=T4,
+    )
+
+    def verify(snapshot_id: str) -> VerifiedSnapshotV1:
+        if snapshot_id == SNAPSHOT_B:
+            raise ValueError("corrupt active")
+        if resolution == "removal":
+            raise ValueError("no fallback")
+        return _verified(snapshot_id)
+
+    armed = True
+    recovered = repository.recover_active("book-alpha", verify=verify, now=T6)
+
+    assert recovered.decision is ActiveRecoveryDecision.CAS_LOST
+    assert recovered.active.snapshot_id == SNAPSHOT_B
+    assert recovered.active.pointer_version == (2 if resolution == "fallback" else 1)
+    assert recovered.active.updated_at_utc == T5
+    assert recovered.event.resolution_action is ActiveRecoveryDecision.CAS_LOST
+    assert recovered.event.selected_snapshot_id == (
+        SNAPSHOT_A if resolution == "fallback" else None
+    )
+
+
+def test_insert_or_replace_cannot_replace_immutable_manifest_identity(
+    tmp_path: Path,
+) -> None:
+    # Break caught: REPLACE bypassing update triggers and degrading selected evidence.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    second = _publishing_run(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6E4B",
+        snapshot_id=SNAPSHOT_B,
+    )
+    repository.commit_publication(
+        second.run_id,
+        _publication(SNAPSHOT_B, generation=1),
+        expected_version=second.version,
+        now=T4,
+    )
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """
+            INSERT INTO snapshot_recovery_events (
+                book_id, rejected_snapshot_id, expected_pointer_version,
+                resolution_action, selected_snapshot_id, detail_json,
+                recorded_at_utc
+            ) VALUES (
+                'book-alpha', ?, 2, 'CAS_LOST', ?,
+                '{"failures":[],"omitted_count":0}',
+                '2026-08-20T08:05:00.000000Z'
+            )
+            """,
+            (SNAPSHOT_B, SNAPSHOT_A),
+        )
+        row = connection.execute(
+            "SELECT * FROM snapshot_manifests WHERE snapshot_id = ?",
+            (SNAPSHOT_A,),
+        ).fetchone()
+        with pytest.raises(sqlite3.IntegrityError) as captured:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO snapshot_manifests (
+                    publication_sequence, snapshot_id, run_id, book_id,
+                    book_generation, snapshot_status, schema_version,
+                    hash_algorithm, manifest_relpath, envelope_sha256,
+                    envelope_byte_length, published_at_utc
+                ) VALUES (?, ?, ?, ?, ?, 'DEGRADED', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[6],
+                    row[7],
+                    row[8],
+                    row[9],
+                    row[10],
+                    row[11],
+                ),
+            )
+
+    assert "manifest identity is immutable" in str(captured.value)
+    assert repository.list_publications("book-alpha")[-1].snapshot_status is SnapshotStatus.BLESSED
+    assert repository.list_recovery_events("book-alpha")[0].selected_snapshot_id == SNAPSHOT_A
+
+
+def test_insert_or_replace_cannot_replace_positive_publication_sequence(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a fresh snapshot/run pair replacing history by explicit sequence alone.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("DELETE FROM active_snapshots WHERE book_id = 'book-alpha'")
+
+    replacement = _publishing_run(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6E4C",
+        snapshot_id=SNAPSHOT_C,
+    )
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """
+            UPDATE snapshot_runs
+            SET run_outcome = 'SUCCEEDED', published_snapshot_id = ?,
+                updated_at_utc = ?, finished_at_utc = ?, version = version + 1
+            WHERE run_id = ?
+            """,
+            (
+                SNAPSHOT_C,
+                "2026-08-20T08:03:00.000000Z",
+                "2026-08-20T08:03:00.000000Z",
+                replacement.run_id,
+            ),
+        )
+        publication_sequence = connection.execute(
+            "SELECT publication_sequence FROM snapshot_manifests WHERE snapshot_id = ?",
+            (SNAPSHOT_A,),
+        ).fetchone()[0]
+        with pytest.raises(sqlite3.IntegrityError) as captured:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO snapshot_manifests (
+                    publication_sequence, snapshot_id, run_id, book_id,
+                    book_generation, snapshot_status, schema_version,
+                    hash_algorithm, manifest_relpath, envelope_sha256,
+                    envelope_byte_length, published_at_utc
+                ) VALUES (?, ?, ?, 'book-alpha', 1, 'BLESSED',
+                    'analytical_snapshot_manifest_v1', 'sha256', ?, ?, 4096, ?)
+                """,
+                (
+                    publication_sequence,
+                    SNAPSHOT_C,
+                    replacement.run_id,
+                    "snapshots/manifests/analytical_snapshot_manifest_v1/"
+                    f"{SNAPSHOT_C[:2]}/{SNAPSHOT_C}.json",
+                    "d" * 64,
+                    "2026-08-20T08:03:00.000000Z",
+                ),
+            )
+
+    assert "manifest identity is immutable" in str(captured.value)
+    assert repository.list_publications("book-alpha")[0].snapshot_id == SNAPSHOT_A
+
+
+def test_create_or_join_neighborhood_queries_use_named_indexes_without_sort(
+    tmp_path: Path,
+) -> None:
+    # Break caught: complete-neighborhood reads sorting or missing the exact preimage lookup.
+    repository = _TracingVmRunRepository(tmp_path)
+    repository.initialize()
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    repository.statements.clear()
+
+    repository.create_or_join(
+        _new_run(client_idempotency_key="trace-neighborhoods"), now=T1
+    )
+
+    statements = [" ".join(statement.split()) for statement in repository.statements]
+    identity = [
+        statement
+        for statement in statements
+        if statement.startswith("SELECT * FROM snapshot_runs")
+        and "WHERE run_kind =" in statement
+        and "idempotency_identity =" in statement
+    ]
+    preimage = [
+        statement
+        for statement in statements
+        if statement.startswith("SELECT * FROM snapshot_runs")
+        and "request_fingerprint =" in statement
+        and "client_idempotency_key_digest" in statement
+        and "WHERE run_kind =" in statement
+    ]
+    generation = [
+        statement
+        for statement in statements
+        if statement.startswith("SELECT * FROM snapshot_runs")
+        and "WHERE book_id =" in statement
+        and "captured_generation =" in statement
+    ]
+    assert len(identity) == len(preimage) == len(generation) == 1
+    assert all("ORDER BY" not in statement for statement in (*identity, *preimage, *generation))
+
+    expected_indexes = {
+        identity[0]: "snapshot_runs_by_identity",
+        preimage[0]: "snapshot_runs_by_preimage",
+        generation[0]: "snapshot_runs_by_book_generation",
+    }
+    with sqlite3.connect(repository.database_path) as connection:
+        for statement, index_name in expected_indexes.items():
+            plan = " ".join(
+                row[3]
+                for row in connection.execute(f"EXPLAIN QUERY PLAN {statement}")
+            )
+            assert index_name in plan
+            assert "TEMP B-TREE" not in plan
+
+
+def test_identity_and_preimage_lookups_remain_constant_with_100k_unrelated_rows(
+    tmp_path: Path,
+) -> None:
+    # Break caught: adding complete preimage validation as an unindexed catalog scan.
+    small = _VmBudgetRunRepository(tmp_path / "small-preimage")
+    large = _VmBudgetRunRepository(tmp_path / "large-preimage")
+    for repository, count in ((small, 100), (large, 100_000)):
+        repository.initialize()
+        _seed_nonbook_history(repository, count)
+
+    def allocation_cost(repository: _VmBudgetRunRepository, suffix: str) -> int:
+        repository.reset_vm_callbacks()
+        repository.create_or_join(
+            _new_run(
+                run_id=f"run_01J5X5S8J5J8P7KQ4Y0T3N6{suffix}",
+                book_id=None,
+                request_fingerprint="f" * 64,
+                client_idempotency_key=f"preimage-scale-{suffix}",
+            ),
+            now=T0,
+        )
+        return repository.vm_callbacks
+
+    small_cost = allocation_cost(small, "E5A")
+    large_cost = allocation_cost(large, "E5B")
+
+    assert large_cost <= small_cost + 100

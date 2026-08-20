@@ -218,11 +218,50 @@ CREATE UNIQUE INDEX one_live_snapshot_per_book_generation
 CREATE INDEX snapshot_runs_by_identity
     ON snapshot_runs(run_kind, idempotency_identity);
 
+CREATE INDEX snapshot_runs_by_preimage
+    ON snapshot_runs(
+        run_kind,
+        request_fingerprint,
+        client_idempotency_key_digest,
+        book_id,
+        captured_generation,
+        target_cut_utc
+    );
+
 CREATE INDEX snapshot_runs_by_book_generation
     ON snapshot_runs(book_id, captured_generation);
 
 CREATE INDEX snapshot_runs_by_book_requested
     ON snapshot_runs(book_id, requested_at_utc DESC, run_id DESC);
+
+CREATE TRIGGER snapshot_run_allocation_immutable
+BEFORE UPDATE OF
+    run_id,
+    run_kind,
+    idempotency_identity,
+    request_fingerprint,
+    client_idempotency_key_digest,
+    book_id,
+    captured_generation,
+    expected_active_snapshot_id,
+    expected_active_pointer_version,
+    target_cut_utc,
+    requested_at_utc
+ON snapshot_runs
+WHEN NEW.run_id IS NOT OLD.run_id
+  OR NEW.run_kind IS NOT OLD.run_kind
+  OR NEW.idempotency_identity IS NOT OLD.idempotency_identity
+  OR NEW.request_fingerprint IS NOT OLD.request_fingerprint
+  OR NEW.client_idempotency_key_digest IS NOT OLD.client_idempotency_key_digest
+  OR NEW.book_id IS NOT OLD.book_id
+  OR NEW.captured_generation IS NOT OLD.captured_generation
+  OR NEW.expected_active_snapshot_id IS NOT OLD.expected_active_snapshot_id
+  OR NEW.expected_active_pointer_version IS NOT OLD.expected_active_pointer_version
+  OR NEW.target_cut_utc IS NOT OLD.target_cut_utc
+  OR NEW.requested_at_utc IS NOT OLD.requested_at_utc
+BEGIN
+    SELECT RAISE(ABORT, 'run allocation fields are immutable');
+END;
 
 CREATE TABLE snapshot_manifests (
     publication_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -265,6 +304,22 @@ CREATE INDEX snapshot_manifests_by_book_generation
 
 CREATE INDEX snapshot_manifests_by_book_sequence
     ON snapshot_manifests(book_id, publication_sequence DESC);
+
+CREATE TRIGGER manifest_identity_collision_on_insert
+BEFORE INSERT ON snapshot_manifests
+WHEN EXISTS (
+    SELECT 1 FROM snapshot_manifests
+    WHERE (
+            NEW.publication_sequence > 0
+            AND publication_sequence = NEW.publication_sequence
+        )
+       OR snapshot_id = NEW.snapshot_id
+       OR run_id = NEW.run_id
+       OR (book_id = NEW.book_id AND snapshot_id = NEW.snapshot_id)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'manifest identity is immutable');
+END;
 
 CREATE TABLE active_snapshots (
     book_id TEXT NOT NULL PRIMARY KEY REFERENCES book_heads(book_id),
