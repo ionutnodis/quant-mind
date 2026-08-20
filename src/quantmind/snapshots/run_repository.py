@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import unicodedata
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -23,20 +24,32 @@ from quantmind.snapshots.contracts import (
     canonical_json_bytes,
 )
 from quantmind.snapshots.store import (
+    ArtifactDigestMismatchError,
+    ArtifactLengthMismatchError,
+    ArtifactNotFoundError,
+    ManifestFilenameMismatchError,
+    NonRegularSnapshotFileError,
+    SnapshotVerificationError,
     SnapshotVerifier,
+    VerifiedSnapshotV1,
     select_last_good,
+)
+from quantmind.snapshots.manifest import (
+    ManifestError,
+    ManifestIdentityError,
+    verify_manifest,
 )
 
 
 _CURRENT_SCHEMA_VERSION = 1
 _BUSY_TIMEOUT_MS = 5_000
-_MAX_JSON_BYTES = 65_536
-_MAX_ERROR_MESSAGE_BYTES = 1_024
+_MAX_RESULT_BYTES = 1_024
+_MAX_RECOVERY_JSON_BYTES = 65_536
+_MAX_RECOVERY_FAILURES = 128
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}$")
-_ABSOLUTE_PATH_RE = re.compile(r"(?:^|\s)(?:/|[A-Za-z]:[\\/])")
-_SECRET_MARKER_RE = re.compile(
-    r"(?:authorization\s*:|password\s*=|api[_-]?key\s*=|token\s*=)", re.IGNORECASE
+_CANONICAL_TIMESTAMP_RE = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$"
 )
 _STAGE_ORDER = (
     RunStage.QUEUED,
@@ -46,6 +59,61 @@ _STAGE_ORDER = (
     RunStage.MODELING,
     RunStage.PUBLISHING,
 )
+_EXPECTED_SCHEMA_COLUMNS = {
+    "book_heads": {
+        "book_id", "generation", "canonical_book_ref", "updated_at_utc", "version"
+    },
+    "snapshot_runs": {
+        "run_id", "run_kind", "idempotency_identity", "request_fingerprint",
+        "client_idempotency_key_digest", "book_id", "captured_generation",
+        "expected_active_snapshot_id", "expected_active_pointer_version",
+        "target_cut_utc", "requested_at_utc", "started_at_utc", "updated_at_utc",
+        "finished_at_utc", "run_stage", "run_outcome", "cancel_requested_at_utc",
+        "candidate_snapshot_id", "published_snapshot_id", "result_json", "error_code",
+        "error_message", "version",
+    },
+    "snapshot_manifests": {
+        "publication_sequence", "snapshot_id", "run_id", "book_id", "book_generation",
+        "snapshot_status", "schema_version", "hash_algorithm", "manifest_relpath",
+        "envelope_sha256", "envelope_byte_length", "published_at_utc",
+    },
+    "active_snapshots": {
+        "book_id", "snapshot_id", "book_generation", "pointer_version", "updated_at_utc"
+    },
+    "snapshot_recovery_events": {
+        "event_sequence", "book_id", "rejected_snapshot_id", "expected_pointer_version",
+        "resolution_action", "selected_snapshot_id", "detail_json", "recorded_at_utc",
+    },
+}
+_EXPECTED_SCHEMA_INDEXES = {
+    "one_live_idempotency_identity",
+    "one_live_snapshot_per_book_generation",
+    "snapshot_runs_by_book_requested",
+    "blessed_manifest_fallback",
+}
+_EXPECTED_INDEX_SHAPES = {
+    "one_live_idempotency_identity": (
+        "snapshot_runs", ("run_kind", "idempotency_identity"), 1, 1
+    ),
+    "one_live_snapshot_per_book_generation": (
+        "snapshot_runs", ("book_id", "captured_generation"), 1, 1
+    ),
+    "snapshot_runs_by_book_requested": (
+        "snapshot_runs", ("book_id", "requested_at_utc", "run_id"), 0, 0
+    ),
+    "blessed_manifest_fallback": (
+        "snapshot_manifests", ("book_id", "publication_sequence"), 0, 1
+    ),
+}
+_EXPECTED_FOREIGN_KEYS = {
+    ("snapshot_runs", "book_id", "book_heads", "book_id"),
+    ("snapshot_manifests", "run_id", "snapshot_runs", "run_id"),
+    ("snapshot_manifests", "book_id", "book_heads", "book_id"),
+    ("active_snapshots", "snapshot_id", "snapshot_manifests", "snapshot_id"),
+    ("active_snapshots", "book_id", "book_heads", "book_id"),
+    ("snapshot_recovery_events", "selected_snapshot_id", "snapshot_manifests", "snapshot_id"),
+    ("snapshot_recovery_events", "book_id", "book_heads", "book_id"),
+}
 
 
 class RunRepositoryError(RuntimeError):
@@ -99,6 +167,79 @@ class RunErrorCode(str, Enum):
     SHUTDOWN_INTERRUPTED = "SHUTDOWN_INTERRUPTED"
 
 
+_ERROR_MESSAGES: dict[RunErrorCode, str] = {
+    RunErrorCode.SUBMISSION_FAILED: "executor submission failed",
+    RunErrorCode.WORKER_FAILED: "worker execution failed",
+    RunErrorCode.SERIALIZATION_FAILED: "result serialization failed",
+    RunErrorCode.BROKEN_PROCESS_POOL: "worker pool unavailable",
+    RunErrorCode.DISK_WRITE_FAILED: "durable artifact write failed",
+    RunErrorCode.DATABASE_FAILED: "durable catalog operation failed",
+    RunErrorCode.CANCELLED_BY_USER: "cancelled by user",
+    RunErrorCode.INTERRUPTED: "run interrupted by process restart",
+    RunErrorCode.STALE_BOOK_GENERATION: (
+        "canonical book generation changed before publication"
+    ),
+    RunErrorCode.STALE_ACTIVE_POINTER: (
+        "active snapshot pointer changed before publication"
+    ),
+    RunErrorCode.HARD_GATE_FAILED: "analytical hard gate failed",
+    RunErrorCode.SHUTDOWN_INTERRUPTED: "run interrupted by shutdown",
+}
+
+
+class RunResultCode(str, Enum):
+    EMPTY = "EMPTY"
+    BOOLEAN = "BOOLEAN"
+    INTEGER = "INTEGER"
+    SYNC_COMPLETED = "SYNC_COMPLETED"
+    ARTIFACT_REFERENCE = "ARTIFACT_REFERENCE"
+
+
+class RecoveryRejectionCode(str, Enum):
+    NOT_FOUND = "NOT_FOUND"
+    IDENTITY_MISMATCH = "IDENTITY_MISMATCH"
+    INTEGRITY_FAILURE = "INTEGRITY_FAILURE"
+    INVALID_MANIFEST = "INVALID_MANIFEST"
+    INVALID_VERIFIER_RESULT = "INVALID_VERIFIER_RESULT"
+    NOT_BLESSED = "NOT_BLESSED"
+    VERIFICATION_FAILED = "VERIFICATION_FAILED"
+
+
+class _RecoveryNotFound(Exception):
+    pass
+
+
+class _RecoveryIdentityMismatch(Exception):
+    pass
+
+
+class _RecoveryIntegrityFailure(Exception):
+    pass
+
+
+class _RecoveryInvalidManifest(Exception):
+    pass
+
+
+class _RecoveryInvalidVerifierResult(Exception):
+    pass
+
+
+class _RecoveryVerificationFailed(Exception):
+    pass
+
+
+_SELECTOR_REJECTION_CODES = {
+    _RecoveryNotFound.__name__: RecoveryRejectionCode.NOT_FOUND,
+    _RecoveryIdentityMismatch.__name__: RecoveryRejectionCode.IDENTITY_MISMATCH,
+    _RecoveryIntegrityFailure.__name__: RecoveryRejectionCode.INTEGRITY_FAILURE,
+    _RecoveryInvalidManifest.__name__: RecoveryRejectionCode.INVALID_MANIFEST,
+    _RecoveryInvalidVerifierResult.__name__: RecoveryRejectionCode.INVALID_VERIFIER_RESULT,
+    _RecoveryVerificationFailed.__name__: RecoveryRejectionCode.VERIFICATION_FAILED,
+    "NOT_BLESSED": RecoveryRejectionCode.NOT_BLESSED,
+}
+
+
 class ActiveRecoveryDecision(str, Enum):
     UNCHANGED = "UNCHANGED"
     REPOINTED = "REPOINTED"
@@ -107,12 +248,29 @@ class ActiveRecoveryDecision(str, Enum):
 
 
 def _require_nonblank(value: str, field_name: str, *, limit: int = 256) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    value = unicodedata.normalize("NFC", value)
     if not value.strip():
         raise ValueError(f"{field_name} must be nonblank")
     if len(value.encode("utf-8")) > limit:
         raise ValueError(f"{field_name} exceeds its bounded length")
-    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Cs"}
+        for character in value
+    ):
         raise ValueError(f"{field_name} contains control characters")
+    return value
+
+
+def _normalized_transient_key(value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError("client idempotency key must be a string")
+    value = unicodedata.normalize("NFC", value)
+    if not value.strip():
+        raise ValueError("client idempotency key must be nonblank")
+    if len(value.encode("utf-8")) > 4_096:
+        raise ValueError("client idempotency key exceeds its transient bound")
     return value
 
 
@@ -131,24 +289,35 @@ def _require_utc(value: datetime, field_name: str) -> datetime:
 
 
 def _timestamp_text(value: datetime, field_name: str = "timestamp") -> str:
-    return _require_utc(value, field_name).isoformat().replace("+00:00", "Z")
+    return _require_utc(value, field_name).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:
     if value is None:
         return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    if not isinstance(value, str) or not _CANONICAL_TIMESTAMP_RE.fullmatch(value):
+        raise ValueError("durable timestamp is not canonical fixed-width UTC")
+    parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise ValueError("durable timestamp is not explicitly UTC")
+    return parsed.astimezone(UTC)
 
 
-def _safe_message(value: str) -> str:
-    if not isinstance(value, str):
-        raise TypeError("error message must be a string")
-    _require_nonblank(value, "error message", limit=_MAX_ERROR_MESSAGE_BYTES)
-    if _ABSOLUTE_PATH_RE.search(value):
-        raise ValueError("error message must not contain an absolute path")
-    if _SECRET_MARKER_RE.search(value):
-        raise ValueError("error message must not contain credential-like material")
+def _require_expected_version(value: int | None, *, optional: bool = False) -> int | None:
+    if value is None and optional:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("expected version must be an integer")
+    if value < 1:
+        raise ValueError("expected version must be positive")
     return value
+
+
+def _require_monotonic_update(row: sqlite3.Row, now_text: str) -> None:
+    if now_text < row["requested_at_utc"] or now_text < row["updated_at_utc"]:
+        raise ValueError("run lifecycle time cannot move backward")
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -164,12 +333,12 @@ def _reject_nonfinite(value: str) -> None:
     raise ValueError(f"non-finite JSON constant: {value}")
 
 
-def _validate_canonical_json_text(value: str) -> str:
+def _validate_canonical_json_text(value: str, *, maximum_bytes: int) -> Any:
     if not isinstance(value, str):
-        raise TypeError("result JSON must be a string")
+        raise TypeError("durable JSON must be a string")
     payload = value.encode("utf-8")
-    if len(payload) > _MAX_JSON_BYTES:
-        raise ValueError("JSON exceeds the durable ledger size limit")
+    if len(payload) > maximum_bytes:
+        raise ValueError("durable JSON exceeds its size limit")
     try:
         parsed = json.loads(
             value,
@@ -177,10 +346,10 @@ def _validate_canonical_json_text(value: str) -> str:
             parse_constant=_reject_nonfinite,
         )
     except (UnicodeError, json.JSONDecodeError) as error:
-        raise ValueError("result JSON is invalid") from error
+        raise ValueError("durable JSON is invalid") from error
     if canonical_json_bytes(parsed) != payload:
-        raise ValueError("result JSON must use canonical JSON encoding")
-    return value
+        raise ValueError("durable JSON must use canonical JSON encoding")
+    return parsed
 
 
 class NewRunV1(FrozenContractBase):
@@ -215,6 +384,8 @@ class NewRunV1(FrozenContractBase):
     ) -> str | None:
         if value is None:
             return None
+        if info.field_name == "client_idempotency_key":
+            return _normalized_transient_key(value)
         return _require_nonblank(value, info.field_name)
 
     @field_validator("target_cut_utc")
@@ -231,12 +402,87 @@ class NewRunV1(FrozenContractBase):
 
 class RunFailureV1(FrozenContractBase):
     code: RunErrorCode
-    message: str
 
-    @field_validator("message")
+    @field_validator("code")
     @classmethod
-    def _message_is_safe(cls, value: str) -> str:
-        return _safe_message(value)
+    def _generic_failure_cannot_claim_cancellation(
+        cls, value: RunErrorCode
+    ) -> RunErrorCode:
+        if value is RunErrorCode.CANCELLED_BY_USER:
+            raise ValueError("CANCELLED_BY_USER requires durable cancellation acknowledgement")
+        return value
+
+
+class RunResultV1(FrozenContractBase):
+    schema_version: Literal["durable_run_result_v1"]
+    result_code: RunResultCode
+    boolean_value: bool | None
+    integer_value: int | None
+    artifact_digest: str | None
+
+    @field_validator("integer_value")
+    @classmethod
+    def _integer_is_exact(cls, value: int | None) -> int | None:
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise TypeError("integer result must be an exact integer")
+        return value
+
+    @field_validator("artifact_digest")
+    @classmethod
+    def _artifact_is_full(cls, value: str | None) -> str | None:
+        return None if value is None else _require_digest(value, "result artifact digest")
+
+    @model_validator(mode="after")
+    def _payload_matches_closed_result_code(self) -> "RunResultV1":
+        populated = (
+            self.boolean_value is not None,
+            self.integer_value is not None,
+            self.artifact_digest is not None,
+        )
+        expected = {
+            RunResultCode.EMPTY: (False, False, False),
+            RunResultCode.BOOLEAN: (True, False, False),
+            RunResultCode.INTEGER: (False, True, False),
+            RunResultCode.SYNC_COMPLETED: (False, True, False),
+            RunResultCode.ARTIFACT_REFERENCE: (False, False, True),
+        }[self.result_code]
+        if populated != expected:
+            raise ValueError("result payload does not match its closed result code")
+        if (
+            self.result_code is RunResultCode.SYNC_COMPLETED
+            and self.integer_value is not None
+            and self.integer_value < 0
+        ):
+            raise ValueError("sync symbol count must be nonnegative")
+        return self
+
+
+def adapt_legacy_result(value: object) -> RunResultV1:
+    """Explicit T3C seam from the legacy executor's narrow safe result vocabulary."""
+
+    fields: dict[str, object] = {
+        "schema_version": "durable_run_result_v1",
+        "boolean_value": None,
+        "integer_value": None,
+        "artifact_digest": None,
+    }
+    if value is None:
+        fields["result_code"] = RunResultCode.EMPTY
+    elif isinstance(value, bool):
+        fields.update(result_code=RunResultCode.BOOLEAN, boolean_value=value)
+    elif isinstance(value, int):
+        fields.update(result_code=RunResultCode.INTEGER, integer_value=value)
+    elif isinstance(value, str):
+        match = re.fullmatch(r"synced ([0-9]+) symbols", value)
+        if match is None:
+            raise ValueError("legacy text result is outside the allowlisted adapter vocabulary")
+        fields.update(
+            result_code=RunResultCode.SYNC_COMPLETED,
+            integer_value=int(match.group(1)),
+        )
+    else:
+        raise TypeError("legacy result type is outside the allowlisted adapter vocabulary")
+    return RunResultV1(**fields)
 
 
 class BookHeadV1(FrozenContractBase):
@@ -246,13 +492,26 @@ class BookHeadV1(FrozenContractBase):
     updated_at_utc: datetime
     version: int = Field(ge=1)
 
+    @field_validator("book_id")
+    @classmethod
+    def _book_id_is_normalized(cls, value: str) -> str:
+        normalized = _require_nonblank(value, "book ID")
+        if normalized != value:
+            raise ValueError("stored book ID must already be NFC normalized")
+        return value
+
+    @field_validator("canonical_book_ref")
+    @classmethod
+    def _book_ref_is_full(cls, value: str) -> str:
+        return _require_digest(value, "canonical book reference")
+
 
 class RunRecordV1(FrozenContractBase):
     run_id: str
     run_kind: str
     idempotency_identity: str
     request_fingerprint: str
-    client_idempotency_key: str | None
+    client_idempotency_key_digest: str | None
     book_id: str | None
     captured_generation: int | None
     expected_active_snapshot_id: str | None
@@ -267,10 +526,73 @@ class RunRecordV1(FrozenContractBase):
     cancel_requested_at_utc: datetime | None
     candidate_snapshot_id: str | None
     published_snapshot_id: str | None
-    result_json: str | None
+    result: RunResultV1 | None
     error_code: RunErrorCode | None
     error_message: str | None
     version: int = Field(ge=1)
+
+    @field_validator("run_id")
+    @classmethod
+    def _run_id_is_valid(cls, value: str) -> str:
+        if not _OPAQUE_ID_RE.fullmatch(value):
+            raise ValueError("run ID must be a full bounded opaque identifier")
+        return value
+
+    @field_validator("run_kind", "book_id")
+    @classmethod
+    def _stored_identity_is_normalized(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        normalized = _require_nonblank(value, info.field_name)
+        if normalized != value:
+            raise ValueError(f"stored {info.field_name} must already be NFC normalized")
+        return value
+
+    @field_validator(
+        "idempotency_identity",
+        "request_fingerprint",
+        "client_idempotency_key_digest",
+        "expected_active_snapshot_id",
+        "candidate_snapshot_id",
+        "published_snapshot_id",
+    )
+    @classmethod
+    def _stored_digests_are_full(cls, value: str | None, info) -> str | None:
+        return None if value is None else _require_digest(value, info.field_name)
+
+    @model_validator(mode="after")
+    def _lifecycle_is_coherent(self) -> "RunRecordV1":
+        if self.updated_at_utc < self.requested_at_utc:
+            raise ValueError("run update cannot precede its request")
+        for value in (
+            self.started_at_utc,
+            self.cancel_requested_at_utc,
+            self.finished_at_utc,
+        ):
+            if value is not None and not (
+                self.requested_at_utc <= value <= self.updated_at_utc
+            ):
+                raise ValueError("run lifecycle timestamps are not monotonic")
+        if self.error_code is None:
+            if self.error_message is not None:
+                raise ValueError("error message requires a typed error code")
+        elif self.error_message != _ERROR_MESSAGES[self.error_code]:
+            raise ValueError("durable error message is not the curated code message")
+        if self.run_outcome is RunOutcome.CANCELLED:
+            if (
+                self.error_code is not RunErrorCode.CANCELLED_BY_USER
+                or self.cancel_requested_at_utc is None
+            ):
+                raise ValueError("cancelled outcome requires durable cancellation intent")
+        elif self.error_code is RunErrorCode.CANCELLED_BY_USER:
+            raise ValueError("cancellation code is valid only for CANCELLED outcome")
+        if self.result is not None and (
+            self.run_outcome is not RunOutcome.SUCCEEDED or self.book_id is not None
+        ):
+            raise ValueError(
+                "durable results are valid only for successful non-book runs"
+            )
+        return self
 
 
 class CreateRunResultV1(FrozenContractBase):
@@ -340,6 +662,23 @@ class ManifestPublicationRecordV1(FrozenContractBase):
     envelope_byte_length: int = Field(ge=0)
     published_at_utc: datetime
 
+    @model_validator(mode="after")
+    def _metadata_is_strict(self) -> "ManifestPublicationRecordV1":
+        ManifestPublicationV1(
+            snapshot_id=self.snapshot_id,
+            book_id=self.book_id,
+            book_generation=self.book_generation,
+            snapshot_status=self.snapshot_status,
+            schema_version=self.schema_version,
+            hash_algorithm=self.hash_algorithm,
+            manifest_relpath=self.manifest_relpath,
+            envelope_sha256=self.envelope_sha256,
+            envelope_byte_length=self.envelope_byte_length,
+        )
+        if not _OPAQUE_ID_RE.fullmatch(self.run_id):
+            raise ValueError("publication run ID is malformed")
+        return self
+
 
 class ActiveSnapshotV1(FrozenContractBase):
     book_id: str
@@ -347,6 +686,19 @@ class ActiveSnapshotV1(FrozenContractBase):
     book_generation: int = Field(ge=0)
     pointer_version: int = Field(ge=1)
     updated_at_utc: datetime
+
+    @field_validator("book_id")
+    @classmethod
+    def _book_id_is_normalized(cls, value: str) -> str:
+        normalized = _require_nonblank(value, "book ID")
+        if normalized != value:
+            raise ValueError("stored book ID must already be NFC normalized")
+        return value
+
+    @field_validator("snapshot_id")
+    @classmethod
+    def _snapshot_id_is_full(cls, value: str) -> str:
+        return _require_digest(value, "active snapshot ID")
 
 
 class PublicationResultV1(FrozenContractBase):
@@ -367,6 +719,44 @@ class RecoveryEventV1(FrozenContractBase):
     selected_snapshot_id: str | None
     detail_json: str
     recorded_at_utc: datetime
+
+    @field_validator("book_id")
+    @classmethod
+    def _book_id_is_normalized(cls, value: str) -> str:
+        normalized = _require_nonblank(value, "book ID")
+        if normalized != value:
+            raise ValueError("stored book ID must already be NFC normalized")
+        return value
+
+    @field_validator("rejected_snapshot_id", "selected_snapshot_id")
+    @classmethod
+    def _snapshot_ids_are_full(cls, value: str | None, info) -> str | None:
+        return None if value is None else _require_digest(value, info.field_name)
+
+    @field_validator("detail_json")
+    @classmethod
+    def _detail_is_closed_and_bounded(cls, value: str) -> str:
+        parsed = _validate_canonical_json_text(
+            value, maximum_bytes=_MAX_RECOVERY_JSON_BYTES
+        )
+        if not isinstance(parsed, dict) or set(parsed) != {"failures", "omitted_count"}:
+            raise ValueError("recovery detail fields are not the closed v1 shape")
+        if not isinstance(parsed["omitted_count"], int) or isinstance(
+            parsed["omitted_count"], bool
+        ) or parsed["omitted_count"] < 0:
+            raise ValueError("recovery omitted count is invalid")
+        failures = parsed["failures"]
+        if not isinstance(failures, list) or len(failures) > _MAX_RECOVERY_FAILURES:
+            raise ValueError("recovery failures exceed the deterministic cap")
+        for failure in failures:
+            if not isinstance(failure, dict) or set(failure) != {
+                "error_code",
+                "snapshot_id",
+            }:
+                raise ValueError("recovery failure fields are invalid")
+            RecoveryRejectionCode(failure["error_code"])
+            _require_digest(failure["snapshot_id"], "recovery snapshot ID")
+        return value
 
 
 class ActiveRecoveryResultV1(FrozenContractBase):
@@ -396,24 +786,37 @@ class RunRepository:
         if self._fault_injector is not None:
             self._fault_injector(stage)
 
-    def _connect(self) -> sqlite3.Connection:
+    def _open_connection(
+        self,
+        *,
+        configure_wal: bool,
+        timeout_ms: int = _BUSY_TIMEOUT_MS,
+    ) -> sqlite3.Connection:
         connection: sqlite3.Connection | None = None
         try:
             connection = sqlite3.connect(
                 self.database_path,
-                timeout=_BUSY_TIMEOUT_MS / 1_000,
+                timeout=timeout_ms / 1_000,
                 isolation_level=None,
             )
             connection.row_factory = sqlite3.Row
+            connection.execute(f"PRAGMA busy_timeout = {timeout_ms}")
             connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
-            connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = FULL")
+            if configure_wal:
+                mode = str(
+                    connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+                ).lower()
+                if mode != "wal":
+                    raise sqlite3.OperationalError("WAL journal mode was not enabled")
             return connection
         except sqlite3.Error as error:
             if connection is not None:
                 connection.close()
             raise RunDatabaseError("cannot open the durable run database") from error
+
+    def _connect(self) -> sqlite3.Connection:
+        return self._open_connection(configure_wal=True)
 
     @contextmanager
     def _read_connection(self) -> Iterator[sqlite3.Connection]:
@@ -451,28 +854,184 @@ class RunRepository:
             self.database_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as error:
             raise RunDatabaseError("cannot create the durable run database root") from error
-        connection = self._connect()
+        connection = self._open_connection(
+            configure_wal=False,
+            timeout_ms=30_000,
+        )
         try:
+            connection.execute("BEGIN IMMEDIATE")
+            migration = (
+                resources.files("quantmind.snapshots.migrations")
+                .joinpath("0001_run_catalog.sql")
+                .read_text(encoding="utf-8")
+            )
+            migration_statements = self._migration_statements(migration)
+            expected_signature = self._expected_schema_signature(
+                migration_statements
+            )
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if version == 0:
-                migration = (
-                    resources.files("quantmind.snapshots.migrations")
-                    .joinpath("0001_run_catalog.sql")
-                    .read_text(encoding="utf-8")
-                )
-                connection.executescript(f"BEGIN IMMEDIATE;\n{migration}\nCOMMIT;")
+                for statement in migration_statements:
+                    connection.execute(statement)
                 version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if version != _CURRENT_SCHEMA_VERSION:
                 raise RunDatabaseError(
                     f"unsupported durable run schema version: {version}"
                 )
+            self._validate_schema(
+                connection, expected_signature=expected_signature
+            )
+            connection.commit()
+            for _ in range(8):
+                try:
+                    mode = str(
+                        connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+                    ).lower()
+                    if mode == "wal":
+                        break
+                except sqlite3.OperationalError as error:
+                    if "locked" not in str(error).lower() and "busy" not in str(error).lower():
+                        raise
+            else:
+                raise RunDatabaseError("cannot enable WAL after catalog migration")
+            self._validate_schema(
+                connection, expected_signature=expected_signature
+            )
         except RunRepositoryError:
+            connection.rollback()
             raise
         except (OSError, sqlite3.Error) as error:
             connection.rollback()
             raise RunDatabaseError("cannot initialize the durable run database") from error
         finally:
             connection.close()
+
+    @staticmethod
+    def _migration_statements(script: str) -> tuple[str, ...]:
+        statements: list[str] = []
+        pending = ""
+        for line in script.splitlines(keepends=True):
+            pending += line
+            if sqlite3.complete_statement(pending):
+                statement = pending.strip()
+                if statement:
+                    statements.append(statement)
+                pending = ""
+        if pending.strip():
+            raise RunDatabaseError("packaged migration contains an incomplete statement")
+        return tuple(statements)
+
+    @staticmethod
+    def _schema_signature(
+        connection: sqlite3.Connection,
+    ) -> tuple[tuple[str, str, str, str], ...]:
+        return tuple(
+            tuple(row)
+            for row in connection.execute(
+                """
+                SELECT type, name, tbl_name, sql
+                FROM sqlite_master
+                WHERE type IN ('table', 'index')
+                  AND name NOT LIKE 'sqlite_%'
+                  AND sql IS NOT NULL
+                ORDER BY type, name
+                """
+            ).fetchall()
+        )
+
+    @classmethod
+    def _expected_schema_signature(
+        cls, migration_statements: tuple[str, ...]
+    ) -> tuple[tuple[str, str, str, str], ...]:
+        with sqlite3.connect(":memory:") as reference:
+            for statement in migration_statements:
+                reference.execute(statement)
+            return cls._schema_signature(reference)
+
+    @staticmethod
+    def _validate_schema(
+        connection: sqlite3.Connection,
+        *,
+        expected_signature: tuple[tuple[str, str, str, str], ...],
+    ) -> None:
+        if RunRepository._schema_signature(connection) != expected_signature:
+            raise RunDatabaseError(
+                "durable run catalog SQL schema does not match packaged v1"
+            )
+        tables = {
+            row["name"]
+            for row in connection.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                """
+            ).fetchall()
+        }
+        if tables != set(_EXPECTED_SCHEMA_COLUMNS):
+            raise RunDatabaseError("durable run catalog table shape is incomplete")
+        for table, expected_columns in _EXPECTED_SCHEMA_COLUMNS.items():
+            columns = {
+                row["name"]
+                for row in connection.execute(f'PRAGMA table_info("{table}")').fetchall()
+            }
+            if columns != expected_columns:
+                raise RunDatabaseError(
+                    f"durable run catalog columns are malformed for {table}"
+                )
+        indexes = {
+            row["name"]
+            for row in connection.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'index' AND sql IS NOT NULL
+                """
+            ).fetchall()
+        }
+        if indexes != _EXPECTED_SCHEMA_INDEXES:
+            raise RunDatabaseError("durable run catalog index shape is incomplete")
+        for index_name, (
+            expected_table,
+            expected_columns,
+            expected_unique,
+            expected_partial,
+        ) in _EXPECTED_INDEX_SHAPES.items():
+            index_row = connection.execute(
+                "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?",
+                (index_name,),
+            ).fetchone()
+            if index_row is None or index_row["tbl_name"] != expected_table:
+                raise RunDatabaseError("durable run catalog index owner is malformed")
+            columns = tuple(
+                row["name"]
+                for row in connection.execute(
+                    f'PRAGMA index_info("{index_name}")'
+                ).fetchall()
+            )
+            flags = connection.execute(
+                f'PRAGMA index_list("{expected_table}")'
+            ).fetchall()
+            flag_row = next((row for row in flags if row["name"] == index_name), None)
+            if (
+                columns != expected_columns
+                or flag_row is None
+                or flag_row["unique"] != expected_unique
+                or flag_row["partial"] != expected_partial
+            ):
+                raise RunDatabaseError("durable run catalog index shape is malformed")
+        foreign_keys: set[tuple[str, str, str, str]] = set()
+        for table in _EXPECTED_SCHEMA_COLUMNS:
+            foreign_keys.update(
+                (table, row["from"], row["table"], row["to"])
+                for row in connection.execute(
+                    f'PRAGMA foreign_key_list("{table}")'
+                ).fetchall()
+            )
+        if foreign_keys != _EXPECTED_FOREIGN_KEYS:
+            raise RunDatabaseError("durable run catalog foreign-key shape is malformed")
+        if connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise RunDatabaseError("durable run catalog contains foreign-key violations")
+        if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise RunDatabaseError("durable run catalog integrity check failed")
 
     def inspect_connection_pragmas(self) -> ConnectionPragmasV1:
         with self._read_connection() as connection:
@@ -489,22 +1048,34 @@ class RunRepository:
 
     @staticmethod
     def _book_head_from_row(row: sqlite3.Row) -> BookHeadV1:
-        return BookHeadV1(
-            book_id=row["book_id"],
-            generation=row["generation"],
-            canonical_book_ref=row["canonical_book_ref"],
-            updated_at_utc=_parse_timestamp(row["updated_at_utc"]),
-            version=row["version"],
-        )
+        try:
+            return BookHeadV1(
+                book_id=row["book_id"],
+                generation=row["generation"],
+                canonical_book_ref=row["canonical_book_ref"],
+                updated_at_utc=_parse_timestamp(row["updated_at_utc"]),
+                version=row["version"],
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise RunDatabaseError("durable book-head row violates the v1 schema") from error
 
     @staticmethod
-    def _run_from_row(row: sqlite3.Row) -> RunRecordV1:
+    def _decode_run_row(row: sqlite3.Row) -> RunRecordV1:
+        result_json = row["result_json"]
+        result = None
+        if result_json is not None:
+            parsed_result = _validate_canonical_json_text(
+                result_json, maximum_bytes=_MAX_RESULT_BYTES
+            )
+            result = RunResultV1.model_validate_json(
+                canonical_json_bytes(parsed_result)
+            )
         return RunRecordV1(
             run_id=row["run_id"],
             run_kind=row["run_kind"],
             idempotency_identity=row["idempotency_identity"],
             request_fingerprint=row["request_fingerprint"],
-            client_idempotency_key=row["client_idempotency_key"],
+            client_idempotency_key_digest=row["client_idempotency_key_digest"],
             book_id=row["book_id"],
             captured_generation=row["captured_generation"],
             expected_active_snapshot_id=row["expected_active_snapshot_id"],
@@ -521,7 +1092,7 @@ class RunRepository:
             ),
             candidate_snapshot_id=row["candidate_snapshot_id"],
             published_snapshot_id=row["published_snapshot_id"],
-            result_json=row["result_json"],
+            result=result,
             error_code=(
                 None if row["error_code"] is None else RunErrorCode(row["error_code"])
             ),
@@ -530,44 +1101,62 @@ class RunRepository:
         )
 
     @staticmethod
+    def _run_from_row(row: sqlite3.Row) -> RunRecordV1:
+        try:
+            return RunRepository._decode_run_row(row)
+        except RunRepositoryError:
+            raise
+        except (KeyError, TypeError, ValueError) as error:
+            raise RunDatabaseError("durable run row violates the v1 schema") from error
+
+    @staticmethod
     def _publication_from_row(row: sqlite3.Row) -> ManifestPublicationRecordV1:
-        return ManifestPublicationRecordV1(
-            publication_sequence=row["publication_sequence"],
-            snapshot_id=row["snapshot_id"],
-            run_id=row["run_id"],
-            book_id=row["book_id"],
-            book_generation=row["book_generation"],
-            snapshot_status=SnapshotStatus(row["snapshot_status"]),
-            schema_version=row["schema_version"],
-            hash_algorithm=row["hash_algorithm"],
-            manifest_relpath=row["manifest_relpath"],
-            envelope_sha256=row["envelope_sha256"],
-            envelope_byte_length=row["envelope_byte_length"],
-            published_at_utc=_parse_timestamp(row["published_at_utc"]),
-        )
+        try:
+            return ManifestPublicationRecordV1(
+                publication_sequence=row["publication_sequence"],
+                snapshot_id=row["snapshot_id"],
+                run_id=row["run_id"],
+                book_id=row["book_id"],
+                book_generation=row["book_generation"],
+                snapshot_status=SnapshotStatus(row["snapshot_status"]),
+                schema_version=row["schema_version"],
+                hash_algorithm=row["hash_algorithm"],
+                manifest_relpath=row["manifest_relpath"],
+                envelope_sha256=row["envelope_sha256"],
+                envelope_byte_length=row["envelope_byte_length"],
+                published_at_utc=_parse_timestamp(row["published_at_utc"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise RunDatabaseError("publication row violates the v1 schema") from error
 
     @staticmethod
     def _active_from_row(row: sqlite3.Row) -> ActiveSnapshotV1:
-        return ActiveSnapshotV1(
-            book_id=row["book_id"],
-            snapshot_id=row["snapshot_id"],
-            book_generation=row["book_generation"],
-            pointer_version=row["pointer_version"],
-            updated_at_utc=_parse_timestamp(row["updated_at_utc"]),
-        )
+        try:
+            return ActiveSnapshotV1(
+                book_id=row["book_id"],
+                snapshot_id=row["snapshot_id"],
+                book_generation=row["book_generation"],
+                pointer_version=row["pointer_version"],
+                updated_at_utc=_parse_timestamp(row["updated_at_utc"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise RunDatabaseError("active snapshot row violates the v1 schema") from error
 
     @staticmethod
     def _recovery_event_from_row(row: sqlite3.Row) -> RecoveryEventV1:
-        return RecoveryEventV1(
-            event_sequence=row["event_sequence"],
-            book_id=row["book_id"],
-            rejected_snapshot_id=row["rejected_snapshot_id"],
-            expected_pointer_version=row["expected_pointer_version"],
-            resolution_action=ActiveRecoveryDecision(row["resolution_action"]),
-            selected_snapshot_id=row["selected_snapshot_id"],
-            detail_json=row["detail_json"],
-            recorded_at_utc=_parse_timestamp(row["recorded_at_utc"]),
-        )
+        try:
+            return RecoveryEventV1(
+                event_sequence=row["event_sequence"],
+                book_id=row["book_id"],
+                rejected_snapshot_id=row["rejected_snapshot_id"],
+                expected_pointer_version=row["expected_pointer_version"],
+                resolution_action=ActiveRecoveryDecision(row["resolution_action"]),
+                selected_snapshot_id=row["selected_snapshot_id"],
+                detail_json=row["detail_json"],
+                recorded_at_utc=_parse_timestamp(row["recorded_at_utc"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise RunDatabaseError("recovery event row violates the v1 schema") from error
 
     def advance_book_head(
         self,
@@ -599,6 +1188,8 @@ class RunRepository:
                 )
             else:
                 current = self._book_head_from_row(row)
+                if now_text < row["updated_at_utc"]:
+                    raise ValueError("book-head update time cannot move backward")
                 if generation < current.generation or (
                     generation == current.generation
                     and canonical_book_ref != current.canonical_book_ref
@@ -632,12 +1223,14 @@ class RunRepository:
 
     @staticmethod
     def _idempotency_identity(
-        request: NewRunV1, captured_generation: int | None
+        request: NewRunV1,
+        captured_generation: int | None,
+        client_key_digest: str | None,
     ) -> str:
         payload = {
             "book_id": request.book_id,
             "captured_generation": captured_generation,
-            "client_idempotency_key": request.client_idempotency_key,
+            "client_idempotency_key_digest": client_key_digest,
             "request_fingerprint": request.request_fingerprint,
             "run_kind": request.run_kind,
             "target_cut_utc": request.target_cut_utc,
@@ -667,6 +1260,11 @@ class RunRepository:
                         f"canonical book head is missing for {request.book_id}"
                     )
                 captured_generation = int(head["generation"])
+                if now_text < connection.execute(
+                    "SELECT updated_at_utc FROM book_heads WHERE book_id = ?",
+                    (request.book_id,),
+                ).fetchone()["updated_at_utc"]:
+                    raise ValueError("run request cannot precede its canonical book head")
                 active = connection.execute(
                     "SELECT snapshot_id, pointer_version FROM active_snapshots WHERE book_id = ?",
                     (request.book_id,),
@@ -675,7 +1273,16 @@ class RunRepository:
                     expected_active_snapshot_id = active["snapshot_id"]
                     expected_active_pointer_version = int(active["pointer_version"])
 
-            identity = self._idempotency_identity(request, captured_generation)
+            client_key_digest = (
+                None
+                if request.client_idempotency_key is None
+                else hashlib.sha256(
+                    request.client_idempotency_key.encode("utf-8")
+                ).hexdigest()
+            )
+            identity = self._idempotency_identity(
+                request, captured_generation, client_key_digest
+            )
             compatible = connection.execute(
                 """
                 SELECT * FROM snapshot_runs
@@ -708,7 +1315,7 @@ class RunRepository:
                     """
                     INSERT INTO snapshot_runs (
                         run_id, run_kind, idempotency_identity, request_fingerprint,
-                        client_idempotency_key, book_id, captured_generation,
+                        client_idempotency_key_digest, book_id, captured_generation,
                         expected_active_snapshot_id, expected_active_pointer_version,
                         target_cut_utc, requested_at_utc, started_at_utc, updated_at_utc,
                         finished_at_utc, run_stage, run_outcome,
@@ -724,7 +1331,7 @@ class RunRepository:
                         request.run_kind,
                         identity,
                         request.request_fingerprint,
-                        request.client_idempotency_key,
+                        client_key_digest,
                         request.book_id,
                         captured_generation,
                         expected_active_snapshot_id,
@@ -799,9 +1406,11 @@ class RunRepository:
         expected_version: int,
         now: datetime,
     ) -> RunRecordV1:
+        expected_version = _require_expected_version(expected_version)
         now_text = _timestamp_text(now, "run start time")
         with self._write_transaction() as connection:
             row = self._running_row(connection, run_id, expected_version)
+            _require_monotonic_update(row, now_text)
             if RunStage(row["run_stage"]) is not RunStage.QUEUED:
                 raise IllegalRunTransitionError("only QUEUED runs may be claimed")
             connection.execute(
@@ -829,9 +1438,11 @@ class RunRepository:
     ) -> RunRecordV1:
         if not isinstance(stage, RunStage):
             raise TypeError("stage must be a RunStage")
+        expected_version = _require_expected_version(expected_version)
         now_text = _timestamp_text(now, "stage update time")
         with self._write_transaction() as connection:
             row = self._running_row(connection, run_id, expected_version)
+            _require_monotonic_update(row, now_text)
             current = RunStage(row["run_stage"])
             current_index = _STAGE_ORDER.index(current)
             if current_index + 1 >= len(_STAGE_ORDER) or _STAGE_ORDER[
@@ -858,6 +1469,7 @@ class RunRepository:
         now_text = _timestamp_text(now, "cancel request time")
         with self._write_transaction() as connection:
             row = self._running_row(connection, run_id, None)
+            _require_monotonic_update(row, now_text)
             if row["cancel_requested_at_utc"] is not None:
                 return self._run_from_row(row)
             connection.execute(
@@ -881,9 +1493,11 @@ class RunRepository:
         expected_version: int,
         now: datetime,
     ) -> RunRecordV1:
+        expected_version = _require_expected_version(expected_version)
         now_text = _timestamp_text(now, "cancellation time")
         with self._write_transaction() as connection:
             row = self._running_row(connection, run_id, expected_version)
+            _require_monotonic_update(row, now_text)
             if row["cancel_requested_at_utc"] is None:
                 raise IllegalRunTransitionError(
                     "cancellation requires prior durable intent"
@@ -892,7 +1506,7 @@ class RunRepository:
                 """
                 UPDATE snapshot_runs
                 SET run_outcome = 'CANCELLED', error_code = 'CANCELLED_BY_USER',
-                    error_message = NULL, finished_at_utc = ?, updated_at_utc = ?,
+                    error_message = 'cancelled by user', finished_at_utc = ?, updated_at_utc = ?,
                     version = version + 1
                 WHERE run_id = ?
                 """,
@@ -913,9 +1527,11 @@ class RunRepository:
         now: datetime,
     ) -> RunRecordV1:
         snapshot_id = _require_digest(snapshot_id, "candidate snapshot ID")
+        expected_version = _require_expected_version(expected_version)
         now_text = _timestamp_text(now, "candidate attachment time")
         with self._write_transaction() as connection:
             row = self._running_row(connection, run_id, expected_version)
+            _require_monotonic_update(row, now_text)
             if RunStage(row["run_stage"]) is not RunStage.PUBLISHING:
                 raise IllegalRunTransitionError(
                     "candidate identity may be attached only at PUBLISHING"
@@ -953,9 +1569,11 @@ class RunRepository:
         failure = RunFailureV1.model_validate(
             failure.model_dump(mode="python", warnings=False)
         )
+        expected_version = _require_expected_version(expected_version, optional=True)
         now_text = _timestamp_text(now, "failure time")
         with self._write_transaction() as connection:
-            self._running_row(connection, run_id, expected_version)
+            row = self._running_row(connection, run_id, expected_version)
+            _require_monotonic_update(row, now_text)
             connection.execute(
                 """
                 UPDATE snapshot_runs
@@ -963,7 +1581,13 @@ class RunRepository:
                     finished_at_utc = ?, updated_at_utc = ?, version = version + 1
                 WHERE run_id = ?
                 """,
-                (failure.code.value, failure.message, now_text, now_text, run_id),
+                (
+                    failure.code.value,
+                    _ERROR_MESSAGES[failure.code],
+                    now_text,
+                    now_text,
+                    run_id,
+                ),
             )
             return self._run_from_row(
                 connection.execute(
@@ -974,15 +1598,23 @@ class RunRepository:
     def complete_nonpublishing(
         self,
         run_id: str,
-        result_json: str,
+        result: RunResultV1,
         *,
         expected_version: int | None,
         now: datetime,
     ) -> RunRecordV1:
-        result_json = _validate_canonical_json_text(result_json)
+        if not isinstance(result, RunResultV1):
+            raise TypeError("result must be RunResultV1; use adapt_legacy_result explicitly")
+        result = RunResultV1.model_validate(
+            result.model_dump(mode="python", warnings=False)
+        )
+        result_json = canonical_json_bytes(result).decode("utf-8")
+        _validate_canonical_json_text(result_json, maximum_bytes=_MAX_RESULT_BYTES)
+        expected_version = _require_expected_version(expected_version, optional=True)
         now_text = _timestamp_text(now, "completion time")
         with self._write_transaction() as connection:
             row = self._running_row(connection, run_id, expected_version)
+            _require_monotonic_update(row, now_text)
             if row["book_id"] is not None:
                 raise IllegalRunTransitionError(
                     "snapshot runs succeed only through atomic publication"
@@ -1075,7 +1707,6 @@ class RunRepository:
         *,
         run_id: str,
         code: RunErrorCode,
-        message: str,
         now_text: str,
     ) -> None:
         outcome = (
@@ -1093,7 +1724,7 @@ class RunRepository:
             (
                 outcome.value,
                 code.value,
-                None if outcome is RunOutcome.CANCELLED else _safe_message(message),
+                _ERROR_MESSAGES[code],
                 now_text,
                 now_text,
                 run_id,
@@ -1113,6 +1744,7 @@ class RunRepository:
         publication = ManifestPublicationV1.model_validate(
             publication.model_dump(mode="python", warnings=False)
         )
+        expected_version = _require_expected_version(expected_version)
         now_text = _timestamp_text(now, "publication time")
         connection: sqlite3.Connection | None = None
         committed = False
@@ -1152,6 +1784,22 @@ class RunRepository:
                 )
             if outcome is not RunOutcome.RUNNING:
                 raise TerminalRunMutationError("terminal run records are immutable")
+            _require_monotonic_update(row, now_text)
+            if row["cancel_requested_at_utc"] is not None:
+                self._terminalize_publication_rejection(
+                    connection,
+                    run_id=run_id,
+                    code=RunErrorCode.CANCELLED_BY_USER,
+                    now_text=now_text,
+                )
+                connection.commit()
+                committed = True
+                return self._publication_result_from_connection(
+                    connection,
+                    run_id,
+                    already_published=False,
+                    rejection_code=RunErrorCode.CANCELLED_BY_USER,
+                )
             if row["version"] != expected_version:
                 raise StaleRunVersionError("run version does not match durable state")
             if RunStage(row["run_stage"]) is not RunStage.PUBLISHING:
@@ -1167,23 +1815,6 @@ class RunRepository:
                     "publication metadata does not match the durable run candidate"
                 )
 
-            if row["cancel_requested_at_utc"] is not None:
-                self._terminalize_publication_rejection(
-                    connection,
-                    run_id=run_id,
-                    code=RunErrorCode.CANCELLED_BY_USER,
-                    message="cancelled",
-                    now_text=now_text,
-                )
-                connection.commit()
-                committed = True
-                return self._publication_result_from_connection(
-                    connection,
-                    run_id,
-                    already_published=False,
-                    rejection_code=RunErrorCode.CANCELLED_BY_USER,
-                )
-
             head = connection.execute(
                 "SELECT generation FROM book_heads WHERE book_id = ?",
                 (row["book_id"],),
@@ -1193,7 +1824,6 @@ class RunRepository:
                     connection,
                     run_id=run_id,
                     code=RunErrorCode.STALE_BOOK_GENERATION,
-                    message="canonical book generation changed before publication",
                     now_text=now_text,
                 )
                 connection.commit()
@@ -1206,6 +1836,8 @@ class RunRepository:
                 )
 
             active_row = self._active_row(connection, publication.book_id)
+            if active_row is not None and now_text < active_row["updated_at_utc"]:
+                raise ValueError("publication time cannot precede the active pointer update")
             expected_active_id = row["expected_active_snapshot_id"]
             expected_pointer_version = row["expected_active_pointer_version"]
             pointer_matches = (
@@ -1222,7 +1854,6 @@ class RunRepository:
                     connection,
                     run_id=run_id,
                     code=RunErrorCode.STALE_ACTIVE_POINTER,
-                    message="active snapshot pointer changed before publication",
                     now_text=now_text,
                 )
                 connection.commit()
@@ -1341,13 +1972,7 @@ class RunRepository:
             ):
                 raise RunDatabaseError("publication sequence was not durably bound")
             return result
-        except (
-            RunNotFoundError,
-            IllegalRunTransitionError,
-            StaleRunVersionError,
-            TerminalRunMutationError,
-            PublicationConflictError,
-        ):
+        except RunRepositoryError:
             if connection is not None and not committed:
                 connection.rollback()
             raise
@@ -1410,19 +2035,65 @@ class RunRepository:
 
     @staticmethod
     def _recovery_detail_json(resolution) -> str:
-        # Filesystem errors may contain paths or payload fragments. The durable catalog keeps
-        # only typed codes and full immutable IDs; operational detail stays in scoped logs.
+        retained = resolution.failures[:_MAX_RECOVERY_FAILURES]
         detail = {
             "failures": [
                 {
-                    "error_code": failure.error_code,
+                    "error_code": _SELECTOR_REJECTION_CODES.get(
+                        failure.error_code,
+                        RecoveryRejectionCode.VERIFICATION_FAILED,
+                    ).value,
                     "snapshot_id": failure.snapshot_id,
                 }
-                for failure in resolution.failures
-            ]
+                for failure in retained
+            ],
+            "omitted_count": len(resolution.failures) - len(retained),
         }
         value = canonical_json_bytes(detail).decode("utf-8")
-        return _validate_canonical_json_text(value)
+        _validate_canonical_json_text(
+            value, maximum_bytes=_MAX_RECOVERY_JSON_BYTES
+        )
+        return value
+
+    @staticmethod
+    def _closed_verifier(verify: SnapshotVerifier) -> SnapshotVerifier:
+        def strict_verify(snapshot_id: str) -> VerifiedSnapshotV1:
+            try:
+                candidate = verify(snapshot_id)
+            except ArtifactNotFoundError as error:
+                raise _RecoveryNotFound from error
+            except (ManifestIdentityError, ManifestFilenameMismatchError) as error:
+                raise _RecoveryIdentityMismatch from error
+            except (
+                ArtifactDigestMismatchError,
+                ArtifactLengthMismatchError,
+                NonRegularSnapshotFileError,
+                SnapshotVerificationError,
+            ) as error:
+                raise _RecoveryIntegrityFailure from error
+            except ManifestError as error:
+                raise _RecoveryInvalidManifest from error
+            except Exception as error:
+                raise _RecoveryVerificationFailed from error
+
+            try:
+                if not isinstance(candidate, VerifiedSnapshotV1):
+                    raise TypeError("verifier returned the wrong contract type")
+                validated = VerifiedSnapshotV1.model_validate(
+                    candidate.model_dump(mode="python", warnings=False)
+                )
+                verify_manifest(validated.manifest)
+                if validated.snapshot_id != snapshot_id:
+                    raise ValueError("verifier returned a different snapshot ID")
+                if validated.snapshot_id != validated.manifest.snapshot_id:
+                    raise ValueError("verified wrapper and manifest IDs disagree")
+                if validated.status is not validated.manifest.body.snapshot_status:
+                    raise ValueError("verified wrapper and manifest statuses disagree")
+                return validated
+            except Exception as error:
+                raise _RecoveryInvalidVerifierResult from error
+
+        return strict_verify
 
     def recover_active(
         self,
@@ -1443,13 +2114,17 @@ class RunRepository:
                 active=None,
                 event=None,
             )
+        if now_text < _timestamp_text(
+            previous_active.updated_at_utc, "active pointer update time"
+        ):
+            raise ValueError("active recovery time cannot move backward")
         fallbacks = self.list_blessed_fallbacks(
             book_id, excluding=previous_active.snapshot_id
         )
         resolution = select_last_good(
             previous_active.snapshot_id,
             tuple(record.snapshot_id for record in fallbacks),
-            verify,
+            self._closed_verifier(verify),
         )
         if resolution.resolved_snapshot_id == previous_active.snapshot_id:
             return ActiveRecoveryResultV1(
@@ -1553,11 +2228,13 @@ class RunRepository:
         with self._write_transaction() as connection:
             rows = connection.execute(
                 """
-                SELECT run_id FROM snapshot_runs
+                SELECT run_id, requested_at_utc, updated_at_utc FROM snapshot_runs
                 WHERE run_outcome = 'RUNNING'
                 ORDER BY requested_at_utc, run_id
                 """
             ).fetchall()
+            for row in rows:
+                _require_monotonic_update(row, now_text)
             run_ids = tuple(row["run_id"] for row in rows)
             if run_ids:
                 connection.execute(
@@ -1589,6 +2266,7 @@ __all__ = [
     "PublicationConflictError",
     "PublicationResultV1",
     "RecoveryEventV1",
+    "RecoveryRejectionCode",
     "RepositoryFaultInjector",
     "RunDatabaseError",
     "RunErrorCode",
@@ -1597,6 +2275,9 @@ __all__ = [
     "RunRecordV1",
     "RunRepository",
     "RunRepositoryError",
+    "RunResultCode",
+    "RunResultV1",
     "StaleRunVersionError",
     "TerminalRunMutationError",
+    "adapt_legacy_result",
 ]

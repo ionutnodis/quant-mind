@@ -1,11 +1,15 @@
 CREATE TABLE book_heads (
-    book_id TEXT PRIMARY KEY,
+    book_id TEXT PRIMARY KEY CHECK (length(book_id) BETWEEN 1 AND 256),
     generation INTEGER NOT NULL CHECK (generation >= 0),
     canonical_book_ref TEXT NOT NULL CHECK (
         length(canonical_book_ref) = 64
         AND canonical_book_ref NOT GLOB '*[^0-9a-f]*'
     ),
-    updated_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL CHECK (
+        length(updated_at_utc) = 27
+        AND updated_at_utc GLOB
+            '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+    ),
     version INTEGER NOT NULL CHECK (version >= 1)
 );
 
@@ -20,7 +24,13 @@ CREATE TABLE snapshot_runs (
         length(request_fingerprint) = 64
         AND request_fingerprint NOT GLOB '*[^0-9a-f]*'
     ),
-    client_idempotency_key TEXT,
+    client_idempotency_key_digest TEXT CHECK (
+        client_idempotency_key_digest IS NULL
+        OR (
+            length(client_idempotency_key_digest) = 64
+            AND client_idempotency_key_digest NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
     book_id TEXT REFERENCES book_heads(book_id),
     captured_generation INTEGER CHECK (captured_generation >= 0),
     expected_active_snapshot_id TEXT CHECK (
@@ -33,18 +43,54 @@ CREATE TABLE snapshot_runs (
     expected_active_pointer_version INTEGER NOT NULL CHECK (
         expected_active_pointer_version >= 0
     ),
-    target_cut_utc TEXT,
-    requested_at_utc TEXT NOT NULL,
-    started_at_utc TEXT,
-    updated_at_utc TEXT NOT NULL,
-    finished_at_utc TEXT,
+    target_cut_utc TEXT CHECK (
+        target_cut_utc IS NULL
+        OR (
+            length(target_cut_utc) = 27
+            AND target_cut_utc GLOB
+                '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+        )
+    ),
+    requested_at_utc TEXT NOT NULL CHECK (
+        length(requested_at_utc) = 27
+        AND requested_at_utc GLOB
+            '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+    ),
+    started_at_utc TEXT CHECK (
+        started_at_utc IS NULL
+        OR (
+            length(started_at_utc) = 27
+            AND started_at_utc GLOB
+                '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+        )
+    ),
+    updated_at_utc TEXT NOT NULL CHECK (
+        length(updated_at_utc) = 27
+        AND updated_at_utc GLOB
+            '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+    ),
+    finished_at_utc TEXT CHECK (
+        finished_at_utc IS NULL
+        OR (
+            length(finished_at_utc) = 27
+            AND finished_at_utc GLOB
+                '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+        )
+    ),
     run_stage TEXT NOT NULL CHECK (run_stage IN (
         'QUEUED', 'INGESTING', 'RECONCILING', 'VALIDATING', 'MODELING', 'PUBLISHING'
     )),
     run_outcome TEXT NOT NULL CHECK (run_outcome IN (
         'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED'
     )),
-    cancel_requested_at_utc TEXT,
+    cancel_requested_at_utc TEXT CHECK (
+        cancel_requested_at_utc IS NULL
+        OR (
+            length(cancel_requested_at_utc) = 27
+            AND cancel_requested_at_utc GLOB
+                '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+        )
+    ),
     candidate_snapshot_id TEXT CHECK (
         candidate_snapshot_id IS NULL
         OR (
@@ -60,11 +106,38 @@ CREATE TABLE snapshot_runs (
         )
     ),
     result_json TEXT CHECK (
-        result_json IS NULL OR length(CAST(result_json AS BLOB)) <= 65536
+        result_json IS NULL
+        OR (
+            length(CAST(result_json AS BLOB)) <= 1024
+            AND json_valid(result_json)
+            AND json_extract(result_json, '$.schema_version') = 'durable_run_result_v1'
+            AND json_extract(result_json, '$.result_code') IN (
+                'EMPTY', 'BOOLEAN', 'INTEGER', 'SYNC_COMPLETED', 'ARTIFACT_REFERENCE'
+            )
+        )
     ),
-    error_code TEXT,
+    error_code TEXT CHECK (
+        error_code IS NULL OR error_code IN (
+            'SUBMISSION_FAILED', 'WORKER_FAILED', 'SERIALIZATION_FAILED',
+            'BROKEN_PROCESS_POOL', 'DISK_WRITE_FAILED', 'DATABASE_FAILED',
+            'CANCELLED_BY_USER', 'INTERRUPTED', 'STALE_BOOK_GENERATION',
+            'STALE_ACTIVE_POINTER', 'HARD_GATE_FAILED', 'SHUTDOWN_INTERRUPTED'
+        )
+    ),
     error_message TEXT CHECK (
-        error_message IS NULL OR length(CAST(error_message AS BLOB)) <= 1024
+        (error_code IS NULL AND error_message IS NULL)
+        OR (error_code = 'SUBMISSION_FAILED' AND error_message = 'executor submission failed')
+        OR (error_code = 'WORKER_FAILED' AND error_message = 'worker execution failed')
+        OR (error_code = 'SERIALIZATION_FAILED' AND error_message = 'result serialization failed')
+        OR (error_code = 'BROKEN_PROCESS_POOL' AND error_message = 'worker pool unavailable')
+        OR (error_code = 'DISK_WRITE_FAILED' AND error_message = 'durable artifact write failed')
+        OR (error_code = 'DATABASE_FAILED' AND error_message = 'durable catalog operation failed')
+        OR (error_code = 'CANCELLED_BY_USER' AND error_message = 'cancelled by user')
+        OR (error_code = 'INTERRUPTED' AND error_message = 'run interrupted by process restart')
+        OR (error_code = 'STALE_BOOK_GENERATION' AND error_message = 'canonical book generation changed before publication')
+        OR (error_code = 'STALE_ACTIVE_POINTER' AND error_message = 'active snapshot pointer changed before publication')
+        OR (error_code = 'HARD_GATE_FAILED' AND error_message = 'analytical hard gate failed')
+        OR (error_code = 'SHUTDOWN_INTERRUPTED' AND error_message = 'run interrupted by shutdown')
     ),
     version INTEGER NOT NULL CHECK (version >= 1),
     CHECK (
@@ -75,12 +148,31 @@ CREATE TABLE snapshot_runs (
         (expected_active_snapshot_id IS NULL AND expected_active_pointer_version = 0)
         OR (expected_active_snapshot_id IS NOT NULL AND expected_active_pointer_version >= 1)
     ),
+    CHECK (updated_at_utc >= requested_at_utc),
+    CHECK (started_at_utc IS NULL OR (
+        started_at_utc >= requested_at_utc AND started_at_utc <= updated_at_utc
+    )),
+    CHECK (cancel_requested_at_utc IS NULL OR (
+        cancel_requested_at_utc >= requested_at_utc
+        AND cancel_requested_at_utc <= updated_at_utc
+    )),
+    CHECK (finished_at_utc IS NULL OR (
+        finished_at_utc >= requested_at_utc AND finished_at_utc <= updated_at_utc
+    )),
     CHECK (
         (run_outcome = 'RUNNING' AND finished_at_utc IS NULL)
         OR (run_outcome <> 'RUNNING' AND finished_at_utc IS NOT NULL)
     ),
-    CHECK (run_outcome <> 'FAILED' OR error_code IS NOT NULL),
-    CHECK (run_outcome <> 'CANCELLED' OR error_code = 'CANCELLED_BY_USER'),
+    CHECK (
+        (run_outcome IN ('RUNNING', 'SUCCEEDED') AND error_code IS NULL)
+        OR (run_outcome = 'FAILED' AND error_code IS NOT NULL AND error_code <> 'CANCELLED_BY_USER')
+        OR (
+            run_outcome = 'CANCELLED'
+            AND error_code = 'CANCELLED_BY_USER'
+            AND cancel_requested_at_utc IS NOT NULL
+        )
+    ),
+    CHECK (result_json IS NULL OR (run_outcome = 'SUCCEEDED' AND book_id IS NULL)),
     CHECK (published_snapshot_id IS NULL OR run_outcome = 'SUCCEEDED')
 );
 
@@ -104,17 +196,25 @@ CREATE TABLE snapshot_manifests (
     book_id TEXT NOT NULL REFERENCES book_heads(book_id),
     book_generation INTEGER NOT NULL CHECK (book_generation >= 0),
     snapshot_status TEXT NOT NULL CHECK (snapshot_status IN ('BLESSED', 'DEGRADED')),
-    schema_version TEXT NOT NULL,
+    schema_version TEXT NOT NULL CHECK (
+        schema_version = 'analytical_snapshot_manifest_v1'
+    ),
     hash_algorithm TEXT NOT NULL CHECK (hash_algorithm = 'sha256'),
     manifest_relpath TEXT NOT NULL CHECK (
-        length(manifest_relpath) BETWEEN 1 AND 512
-        AND substr(manifest_relpath, 1, 1) <> '/'
+        length(manifest_relpath) <= 512
+        AND manifest_relpath =
+            'snapshots/manifests/analytical_snapshot_manifest_v1/'
+            || substr(snapshot_id, 1, 2) || '/' || snapshot_id || '.json'
     ),
     envelope_sha256 TEXT NOT NULL CHECK (
         length(envelope_sha256) = 64 AND envelope_sha256 NOT GLOB '*[^0-9a-f]*'
     ),
     envelope_byte_length INTEGER NOT NULL CHECK (envelope_byte_length >= 0),
-    published_at_utc TEXT NOT NULL
+    published_at_utc TEXT NOT NULL CHECK (
+        length(published_at_utc) = 27
+        AND published_at_utc GLOB
+            '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+    )
 );
 
 CREATE INDEX blessed_manifest_fallback
@@ -126,7 +226,11 @@ CREATE TABLE active_snapshots (
     snapshot_id TEXT NOT NULL REFERENCES snapshot_manifests(snapshot_id),
     book_generation INTEGER NOT NULL CHECK (book_generation >= 0),
     pointer_version INTEGER NOT NULL CHECK (pointer_version >= 1),
-    updated_at_utc TEXT NOT NULL
+    updated_at_utc TEXT NOT NULL CHECK (
+        length(updated_at_utc) = 27
+        AND updated_at_utc GLOB
+            '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+    )
 );
 
 CREATE TABLE snapshot_recovery_events (
@@ -141,8 +245,17 @@ CREATE TABLE snapshot_recovery_events (
         resolution_action IN ('REPOINTED', 'REMOVED', 'CAS_LOST')
     ),
     selected_snapshot_id TEXT REFERENCES snapshot_manifests(snapshot_id),
-    detail_json TEXT NOT NULL CHECK (length(CAST(detail_json AS BLOB)) <= 65536),
-    recorded_at_utc TEXT NOT NULL,
+    detail_json TEXT NOT NULL CHECK (
+        length(CAST(detail_json AS BLOB)) <= 65536
+        AND json_valid(detail_json)
+        AND json_type(detail_json, '$.failures') = 'array'
+        AND json_type(detail_json, '$.omitted_count') = 'integer'
+    ),
+    recorded_at_utc TEXT NOT NULL CHECK (
+        length(recorded_at_utc) = 27
+        AND recorded_at_utc GLOB
+            '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+    ),
     CHECK (
         (resolution_action = 'REPOINTED' AND selected_snapshot_id IS NOT NULL)
         OR (resolution_action IN ('REMOVED', 'CAS_LOST'))

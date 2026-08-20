@@ -2,13 +2,32 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
+import sys
 import threading
+import unicodedata
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from quantmind.snapshots.contracts import RunOutcome, RunStage, SnapshotStatus
+from quantmind.snapshots.contracts import (
+    GateEvidenceV1,
+    GateStatus,
+    RecoveryClass,
+    RunOutcome,
+    RunStage,
+    SnapshotStatus,
+    ValuationCutV1,
+)
+from quantmind.snapshots.input_artifacts import ArtifactRefV1
+from quantmind.snapshots.manifest import (
+    AnalyticalSnapshotManifestBodyV1,
+    ManifestPolicyEvidenceV1,
+    OutputArtifactBindingV1,
+    create_manifest,
+)
 from quantmind.snapshots.run_repository import (
     ActiveRecoveryDecision,
     GenerationRegressionError,
@@ -17,13 +36,17 @@ from quantmind.snapshots.run_repository import (
     ManifestPublicationV1,
     NewRunV1,
     PublicationConflictError,
+    RecoveryRejectionCode,
     RunDatabaseError,
     RunErrorCode,
     RunFailureV1,
     RunNotFoundError,
     RunRepository,
+    RunResultCode,
+    RunResultV1,
     StaleRunVersionError,
     TerminalRunMutationError,
+    adapt_legacy_result,
 )
 from quantmind.snapshots.store import VerifiedSnapshotV1
 
@@ -32,11 +55,105 @@ T0 = datetime(2026, 8, 20, 8, 0, tzinfo=UTC)
 T1 = datetime(2026, 8, 20, 8, 1, tzinfo=UTC)
 T2 = datetime(2026, 8, 20, 8, 2, tzinfo=UTC)
 T3 = datetime(2026, 8, 20, 8, 3, tzinfo=UTC)
+T4 = datetime(2026, 8, 20, 8, 4, tzinfo=UTC)
+T5 = datetime(2026, 8, 20, 8, 5, tzinfo=UTC)
+T6 = datetime(2026, 8, 20, 8, 6, tzinfo=UTC)
 BOOK_REF_1 = "1" * 64
 BOOK_REF_2 = "2" * 64
-SNAPSHOT_A = "a" * 64
-SNAPSHOT_B = "b" * 64
-SNAPSHOT_C = "c" * 64
+
+
+def _verified_fixture(label: str) -> VerifiedSnapshotV1:
+    book_ref = ArtifactRefV1(
+        hash_algorithm="sha256",
+        digest="f" * 64,
+        byte_length=1,
+        media_type="application/json",
+        schema_version="canonical_book_v1",
+    )
+    output_ref = ArtifactRefV1(
+        hash_algorithm="sha256",
+        digest=label * 64,
+        byte_length=1,
+        media_type="application/json",
+        schema_version="xray_v1",
+    )
+    body = AnalyticalSnapshotManifestBodyV1(
+        schema_version="analytical_snapshot_manifest_v1",
+        canonicalization_version="quantmind_canonical_json_v1",
+        hash_algorithm="sha256",
+        book_id="book-alpha",
+        book_generation=1,
+        legacy_book_ref=None,
+        valuation_cut=ValuationCutV1(
+            target_cut_utc=T0,
+            display_timezone="UTC",
+            capture_start_utc=T0,
+            capture_end_utc=T1,
+        ),
+        base_currency="USD",
+        normalized_nlv=Decimal("1000.00"),
+        included_account_ids=("account-a",),
+        canonical_book_ref=book_ref,
+        canonical_book_hash=book_ref.digest,
+        position_hash="9" * 64,
+        input_artifacts=(),
+        security_master_mapping_version="security-v1",
+        corporate_action_version=None,
+        calendar_version=None,
+        rights_manifest_versions=(),
+        factor_taxonomy_version="factor-v1",
+        return_series_version="returns-v1",
+        production_covariance_model_version="covariance-v1",
+        residual_model_version="residual-v1",
+        latent_factor_model_version=None,
+        option_pricer_version=None,
+        surface_model_version=None,
+        scenario_library_version=None,
+        analytical_config_hash="8" * 64,
+        application_commit="2a7f70a",
+        application_build_id=f"fixture-{label}",
+        snapshot_status=SnapshotStatus.BLESSED,
+        gates=(
+            GateEvidenceV1(
+                gate_code="OUTPUT_GATE",
+                status=GateStatus.PASSED,
+                recovery_class=RecoveryClass.MODEL_OWNER_UPDATE,
+                evidence=("synthetic verified fixture",),
+                recovery_action="none",
+            ),
+        ),
+        policy_evidence=(
+            ManifestPolicyEvidenceV1(
+                subject_kind="OUTPUT",
+                subject_id=f"xray-{label}",
+                gate_code="OUTPUT_GATE",
+            ),
+        ),
+        warnings=(),
+        refused_outputs=(),
+        outputs=(
+            OutputArtifactBindingV1(
+                logical_role="XRAY_READ_MODEL",
+                logical_id=f"xray-{label}",
+                object_ref=output_ref,
+                model_version="xray-v1",
+            ),
+        ),
+    )
+    manifest = create_manifest(body)
+    return VerifiedSnapshotV1(
+        snapshot_id=manifest.snapshot_id,
+        status=manifest.body.snapshot_status,
+        manifest=manifest,
+    )
+
+
+VERIFIED_A = _verified_fixture("a")
+VERIFIED_B = _verified_fixture("b")
+VERIFIED_C = _verified_fixture("c")
+SNAPSHOT_A = VERIFIED_A.snapshot_id
+SNAPSHOT_B = VERIFIED_B.snapshot_id
+SNAPSHOT_C = VERIFIED_C.snapshot_id
 
 
 def _repository(tmp_path: Path) -> RunRepository:
@@ -122,13 +239,11 @@ def _publication(
 
 
 def _verified(snapshot_id: str) -> VerifiedSnapshotV1:
-    # The immutable filesystem verifier is deliberately injected into T3A. T2 owns full
-    # manifest construction/validation; this typed test value represents its verified result.
-    return VerifiedSnapshotV1.model_construct(
-        snapshot_id=snapshot_id,
-        status=SnapshotStatus.BLESSED,
-        manifest=None,
-    )
+    return {
+        SNAPSHOT_A: VERIFIED_A,
+        SNAPSHOT_B: VERIFIED_B,
+        SNAPSHOT_C: VERIFIED_C,
+    }[snapshot_id]
 
 
 def test_initialize_migrates_empty_root_idempotently_and_reopens(tmp_path: Path) -> None:
@@ -202,6 +317,94 @@ def test_unexpected_sqlite_read_failure_is_mapped_to_typed_database_error(
 
     with pytest.raises(RunDatabaseError):
         repository.list_runs()
+
+
+def test_concurrent_thread_initializers_converge_on_one_complete_schema(
+    tmp_path: Path,
+) -> None:
+    # Break caught: callers reading user_version before the migration write lock and racing
+    # unconditional CREATE TABLE statements.
+    barrier = threading.Barrier(16)
+    failures: list[BaseException] = []
+
+    def initialize() -> None:
+        try:
+            barrier.wait()
+            RunRepository(tmp_path).initialize()
+        except BaseException as error:  # pragma: no cover - asserted below
+            failures.append(error)
+
+    threads = [threading.Thread(target=initialize) for _ in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert RunRepository(tmp_path).inspect_connection_pragmas().journal_mode == "wal"
+
+
+def test_concurrent_process_initializers_converge_on_one_complete_schema(
+    tmp_path: Path,
+) -> None:
+    # Break caught: first-start safety existing only inside one Python process.
+    code = (
+        "from pathlib import Path; "
+        "from quantmind.snapshots.run_repository import RunRepository; "
+        f"RunRepository(Path({str(tmp_path)!r})).initialize()"
+    )
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(6)
+    ]
+    completed = [process.communicate(timeout=20) for process in processes]
+
+    assert [process.returncode for process in processes] == [0] * len(processes), completed
+    RunRepository(tmp_path).initialize()
+
+
+@pytest.mark.parametrize("damage", ["version_only", "missing_index"])
+def test_claimed_v1_partial_or_malformed_schema_fails_typed(
+    tmp_path: Path, damage: str
+) -> None:
+    # Break caught: trusting user_version without validating catalog shape.
+    repository = RunRepository(tmp_path)
+    repository.database_path.parent.mkdir(parents=True)
+    if damage == "version_only":
+        with sqlite3.connect(repository.database_path) as connection:
+            connection.execute("PRAGMA user_version = 1")
+    else:
+        repository.initialize()
+        with sqlite3.connect(repository.database_path) as connection:
+            connection.execute("DROP INDEX one_live_snapshot_per_book_generation")
+
+    with pytest.raises(RunDatabaseError):
+        repository.initialize()
+
+
+def test_claimed_v1_with_weakened_table_constraint_is_rejected(tmp_path: Path) -> None:
+    # Break caught: matching PRAGMA shapes hiding a weakened v1 CHECK constraint.
+    repository = _repository(tmp_path)
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute("PRAGMA writable_schema = ON")
+        connection.execute(
+            """
+            UPDATE sqlite_master
+            SET sql = replace(sql, 'version >= 1', 'version >= 0')
+            WHERE type = 'table' AND name = 'book_heads'
+            """
+        )
+        schema_version = connection.execute("PRAGMA schema_version").fetchone()[0]
+        connection.execute(f"PRAGMA schema_version = {schema_version + 1}")
+        connection.execute("PRAGMA writable_schema = OFF")
+
+    with pytest.raises(RunDatabaseError):
+        RunRepository(tmp_path).initialize()
 
 
 def test_book_generation_is_monotonic_and_same_generation_is_immutable(
@@ -315,7 +518,7 @@ def test_terminal_retry_with_same_identity_creates_fresh_run(tmp_path: Path) -> 
     first = _allocated(repository)
     failed = repository.mark_failed(
         first.run_id,
-        RunFailureV1(code=RunErrorCode.WORKER_FAILED, message="worker failed"),
+        RunFailureV1(code=RunErrorCode.WORKER_FAILED),
         expected_version=first.version,
         now=T2,
     )
@@ -394,7 +597,7 @@ def test_stage_transition_rejects_stale_version(tmp_path: Path) -> None:
     repository = _repository(tmp_path)
     record = _allocated(repository)
     with pytest.raises(StaleRunVersionError):
-        repository.claim_start(record.run_id, expected_version=0, now=T2)
+        repository.claim_start(record.run_id, expected_version=2, now=T2)
 
 
 def test_cancel_intent_is_durable_idempotent_and_requires_acknowledgement(
@@ -445,26 +648,16 @@ def test_attach_candidate_requires_publishing_and_full_snapshot_id(tmp_path: Pat
 
 
 def test_nonpublishing_success_requires_canonical_bounded_json(tmp_path: Path) -> None:
-    # Break caught: duplicate-key, nonfinite, ambiguous, or oversized JSON entering the ledger.
+    # Break caught: any caller-supplied JSON bypassing the closed typed result contract.
     repository = _repository(tmp_path)
-    created = repository.create_or_join(
-        _new_run(book_id=None, client_idempotency_key="sync"), now=T0
-    ).record
-    result = '{"exit_code":0,"summary":"ok"}'
-
-    completed = repository.complete_nonpublishing(
-        created.run_id, result, expected_version=created.version, now=T1
-    )
-
-    assert completed.run_outcome is RunOutcome.SUCCEEDED
-    assert completed.result_json == result
     for hostile in (
+        '{"exit_code":0,"summary":"ok"}',
         '{"a":1,"a":2}',
         '{"value":NaN}',
         '{ "a": 1 }',
         json.dumps({"payload": "x" * 70_000}, separators=(",", ":")),
     ):
-        fresh = repository.create_or_join(
+        record = repository.create_or_join(
             _new_run(
                 run_id=f"run_{len(repository.list_runs()) + 1:026d}",
                 book_id=None,
@@ -473,10 +666,101 @@ def test_nonpublishing_success_requires_canonical_bounded_json(tmp_path: Path) -
             ),
             now=T2,
         ).record
-        with pytest.raises(ValueError):
+        with pytest.raises(TypeError):
             repository.complete_nonpublishing(
-                fresh.run_id, hostile, expected_version=fresh.version, now=T3
+                record.run_id, hostile, expected_version=record.version, now=T3
             )
+
+
+def test_legacy_result_adapter_is_closed_and_structural() -> None:
+    # Break caught: arbitrary executor objects/text becoming durable JSON payloads.
+    assert adapt_legacy_result(None).result_code is RunResultCode.EMPTY
+    assert adapt_legacy_result(True).boolean_value is True
+    assert adapt_legacy_result(42).integer_value == 42
+    synced = adapt_legacy_result("synced 3 symbols")
+    assert synced.result_code is RunResultCode.SYNC_COMPLETED
+    assert synced.integer_value == 3
+    for hostile in (
+        {"api_key": "TOPSECRET"},
+        "../../etc/passwd",
+        "VendorResponse(account='U123')",
+        object(),
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            adapt_legacy_result(hostile)
+
+
+def test_nonpublishing_success_persists_only_typed_allowlisted_result(
+    tmp_path: Path,
+) -> None:
+    # Break caught: canonical-but-sensitive arbitrary dictionaries entering result_json.
+    repository = _repository(tmp_path)
+    run = repository.create_or_join(
+        _new_run(book_id=None, client_idempotency_key="sync"), now=T0
+    ).record
+    typed = RunResultV1(
+        schema_version="durable_run_result_v1",
+        result_code=RunResultCode.SYNC_COMPLETED,
+        boolean_value=None,
+        integer_value=3,
+        artifact_digest=None,
+    )
+
+    completed = repository.complete_nonpublishing(
+        run.run_id, typed, expected_version=run.version, now=T1
+    )
+
+    assert completed.result == typed
+    assert not hasattr(completed, "result_json")
+    with sqlite3.connect(repository.database_path) as connection:
+        stored = connection.execute(
+            "SELECT result_json FROM snapshot_runs WHERE run_id = ?", (run.run_id,)
+        ).fetchone()[0]
+    assert stored == (
+        '{"artifact_digest":null,"boolean_value":null,"integer_value":3,'
+        '"result_code":"SYNC_COMPLETED","schema_version":"durable_run_result_v1"}'
+    )
+
+
+def test_public_pydantic_boundaries_revalidate_construct_and_copy_bypasses(
+    tmp_path: Path,
+) -> None:
+    # Break caught: trusted isinstance checks accepting invalid model_construct/model_copy data.
+    repository = _repository(tmp_path)
+    invalid_request = _new_run(book_id=None).model_copy(
+        update={"request_fingerprint": "short"}
+    )
+    with pytest.raises(ValueError):
+        repository.create_or_join(invalid_request, now=T0)
+
+    run = repository.create_or_join(
+        _new_run(book_id=None, client_idempotency_key="valid"), now=T0
+    ).record
+    invalid_result = RunResultV1.model_construct(
+        schema_version="durable_run_result_v1",
+        result_code=RunResultCode.ARTIFACT_REFERENCE,
+        boolean_value=None,
+        integer_value=None,
+        artifact_digest="short",
+    )
+    with pytest.raises(ValueError):
+        repository.complete_nonpublishing(
+            run.run_id,
+            invalid_result,
+            expected_version=run.version,
+            now=T1,
+        )
+
+    invalid_failure = RunFailureV1.model_construct(
+        code=RunErrorCode.CANCELLED_BY_USER
+    )
+    with pytest.raises(ValueError):
+        repository.mark_failed(
+            run.run_id,
+            invalid_failure,
+            expected_version=run.version,
+            now=T1,
+        )
 
 
 def test_all_run_error_codes_round_trip_and_messages_are_safe(tmp_path: Path) -> None:
@@ -493,14 +777,20 @@ def test_all_run_error_codes_round_trip_and_messages_are_safe(tmp_path: Path) ->
             ),
             now=T0,
         ).record
-        failed = repository.mark_failed(
-            run.run_id,
-            RunFailureV1(code=code, message=f"safe failure {index}"),
-            expected_version=run.version,
-            now=T1,
-        )
+        if code is RunErrorCode.CANCELLED_BY_USER:
+            requested = repository.request_cancel(run.run_id, now=T1)
+            failed = repository.acknowledge_cancel(
+                run.run_id, expected_version=requested.version, now=T2
+            )
+        else:
+            failed = repository.mark_failed(
+                run.run_id,
+                RunFailureV1(code=code),
+                expected_version=run.version,
+                now=T1,
+            )
         assert repository.get(run.run_id).error_code is code
-        assert failed.error_message == f"safe failure {index}"
+        assert failed.error_message is not None
 
     for unsafe in (
         "line one\nline two",
@@ -512,13 +802,171 @@ def test_all_run_error_codes_round_trip_and_messages_are_safe(tmp_path: Path) ->
             RunFailureV1(code=RunErrorCode.WORKER_FAILED, message=unsafe)
 
 
+def test_client_idempotency_key_is_never_persisted_raw(tmp_path: Path) -> None:
+    # Break caught: transient client-controlled traversal/credential/bidi material reaching DB.
+    repository = _repository(tmp_path)
+    hostile_key = "../../etc/passwd bearer TOPSECRET \u202egpj"
+    record = repository.create_or_join(
+        _new_run(book_id=None, client_idempotency_key=hostile_key), now=T0
+    ).record
+
+    assert not hasattr(record, "client_idempotency_key")
+    assert len(record.client_idempotency_key_digest) == 64
+    assert hostile_key.encode("utf-8") not in repository.database_path.read_bytes()
+
+
+def test_failure_contract_refuses_repr_bidi_path_and_colon_secret_payload() -> None:
+    # Break caught: arbitrary exception reprs surviving weak regex-based sanitization.
+    hostile = (
+        "VendorResponse(account='U12345', client_secret: TOPSECRET, "
+        "file='/Users/alice/vendor.json') \u202egpj"
+    )
+    with pytest.raises(ValueError):
+        RunFailureV1(code=RunErrorCode.WORKER_FAILED, message=hostile)
+
+
+@pytest.mark.parametrize(
+    ("operation", "bad_version"),
+    [
+        ("claim", True),
+        ("advance", 2.0),
+        ("ack", 2.0),
+        ("attach", 6.0),
+        ("fail", True),
+        ("complete", 1.0),
+        ("publish", 7.0),
+    ],
+)
+def test_every_expected_version_boundary_rejects_bool_and_float_before_mutation(
+    tmp_path: Path, operation: str, bad_version: object
+) -> None:
+    # Break caught: Python True/1.0 equality bypassing optimistic CAS typing.
+    repository = _repository(tmp_path)
+    if operation in {"complete"}:
+        record = repository.create_or_join(
+            _new_run(book_id=None, client_idempotency_key=operation), now=T0
+        ).record
+    else:
+        repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+        record = repository.create_or_join(_new_run(), now=T1).record
+
+    with pytest.raises((TypeError, ValueError)):
+        if operation == "claim":
+            repository.claim_start(
+                record.run_id, expected_version=bad_version, now=T2
+            )
+        elif operation == "advance":
+            record = repository.claim_start(
+                record.run_id, expected_version=record.version, now=T2
+            )
+            repository.advance_stage(
+                record.run_id,
+                RunStage.RECONCILING,
+                expected_version=bad_version,
+                now=T3,
+            )
+        elif operation == "ack":
+            record = repository.request_cancel(record.run_id, now=T2)
+            repository.acknowledge_cancel(
+                record.run_id, expected_version=bad_version, now=T3
+            )
+        elif operation == "attach":
+            record = repository.claim_start(
+                record.run_id, expected_version=record.version, now=T2
+            )
+            for stage in (
+                RunStage.RECONCILING,
+                RunStage.VALIDATING,
+                RunStage.MODELING,
+                RunStage.PUBLISHING,
+            ):
+                record = repository.advance_stage(
+                    record.run_id,
+                    stage,
+                    expected_version=record.version,
+                    now=T2,
+                )
+            repository.attach_candidate(
+                record.run_id,
+                SNAPSHOT_A,
+                expected_version=bad_version,
+                now=T3,
+            )
+        elif operation == "fail":
+            repository.mark_failed(
+                record.run_id,
+                RunFailureV1(
+                    code=RunErrorCode.WORKER_FAILED,
+                ),
+                expected_version=bad_version,
+                now=T2,
+            )
+        elif operation == "complete":
+            repository.complete_nonpublishing(
+                record.run_id,
+                '{"ok":true}',
+                expected_version=bad_version,
+                now=T2,
+            )
+        else:
+            record = _publishing_run(repository)
+            repository.commit_publication(
+                record.run_id,
+                _publication(SNAPSHOT_A, generation=1),
+                expected_version=bad_version,
+                now=T3,
+            )
+
+
+def test_nfc_equivalent_book_run_kind_and_client_key_share_stored_identity(
+    tmp_path: Path,
+) -> None:
+    # Break caught: hashing NFC while partitioning SQLite uniqueness by raw NFD strings.
+    repository = _repository(tmp_path)
+    nfc_book = "caf\u00e9"
+    nfd_book = unicodedata.normalize("NFD", nfc_book)
+    first_head = repository.advance_book_head(nfc_book, 1, BOOK_REF_1, now=T0)
+    second_head = repository.advance_book_head(nfd_book, 1, BOOK_REF_1, now=T1)
+    assert second_head == first_head
+
+    nfc_kind = "R\u00c9SUM\u00c9"
+    nfd_kind = unicodedata.normalize("NFD", nfc_kind)
+    nfc_key = "cl\u00e9"
+    nfd_key = unicodedata.normalize("NFD", nfc_key)
+    first = repository.create_or_join(
+        NewRunV1(
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6N1A",
+            run_kind=nfc_kind,
+            request_fingerprint="7" * 64,
+            client_idempotency_key=nfc_key,
+            book_id=None,
+            target_cut_utc=None,
+        ),
+        now=T1,
+    )
+    joined = repository.create_or_join(
+        NewRunV1(
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6N1B",
+            run_kind=nfd_kind,
+            request_fingerprint="7" * 64,
+            client_idempotency_key=nfd_key,
+            book_id=None,
+            target_cut_utc=None,
+        ),
+        now=T2,
+    )
+    assert joined.created is False
+    assert joined.record.run_id == first.record.run_id
+    assert joined.record.run_kind == nfc_kind
+
+
 def test_terminal_rows_reject_every_later_mutation(tmp_path: Path) -> None:
     # Break caught: late callbacks changing immutable terminal evidence.
     repository = _repository(tmp_path)
     record = _allocated(repository)
     terminal = repository.mark_failed(
         record.run_id,
-        RunFailureV1(code=RunErrorCode.WORKER_FAILED, message="failed"),
+        RunFailureV1(code=RunErrorCode.WORKER_FAILED),
         expected_version=record.version,
         now=T2,
     )
@@ -577,12 +1025,15 @@ def test_startup_recovery_leaves_terminal_rows_byte_for_byte_unchanged(
     ).record
     if outcome is RunOutcome.SUCCEEDED:
         terminal = repository.complete_nonpublishing(
-            record.run_id, '{"ok":true}', expected_version=record.version, now=T1
+            record.run_id,
+            adapt_legacy_result(True),
+            expected_version=record.version,
+            now=T1,
         )
     elif outcome is RunOutcome.FAILED:
         terminal = repository.mark_failed(
             record.run_id,
-            RunFailureV1(code=RunErrorCode.WORKER_FAILED, message="failed"),
+            RunFailureV1(code=RunErrorCode.WORKER_FAILED),
             expected_version=record.version,
             now=T1,
         )
@@ -608,6 +1059,175 @@ def test_repository_rejects_non_utc_timestamps_and_unknown_runs(tmp_path: Path) 
         )
     with pytest.raises(RunNotFoundError):
         repository.get("run_01J5X5S8J5J8P7KQ4Y0T3N6M9Z")
+
+
+def test_public_lifecycle_mutations_reject_time_travel(tmp_path: Path) -> None:
+    # Break caught: updated/finished timestamps preceding durable request/update history.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    record = repository.create_or_join(_new_run(), now=T2).record
+
+    with pytest.raises(ValueError):
+        repository.claim_start(
+            record.run_id, expected_version=record.version, now=T1
+        )
+    with pytest.raises(ValueError):
+        repository.mark_failed(
+            record.run_id,
+            RunFailureV1(
+                code=RunErrorCode.WORKER_FAILED,
+            ),
+            expected_version=record.version,
+            now=T1,
+        )
+
+
+def test_sql_rejects_unknown_error_invalid_time_schema_and_manifest_path(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a claimed-v1 catalog accepting values its typed reader cannot decode.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    record = _publishing_run(repository)
+    repository.commit_publication(
+        record.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=record.version,
+        now=T3,
+    )
+
+    with sqlite3.connect(repository.database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE snapshot_runs SET error_code = 'TOTALLY_UNKNOWN' WHERE run_id = ?",
+                (record.run_id,),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE snapshot_runs SET updated_at_utc = '2026-01-01' WHERE run_id = ?",
+                (record.run_id,),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                UPDATE snapshot_runs
+                SET finished_at_utc = '2026-08-20T07:59:00.000000Z'
+                WHERE run_id = ?
+                """,
+                (record.run_id,),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                UPDATE snapshot_manifests SET schema_version = 'other_v1'
+                WHERE snapshot_id = ?
+                """,
+                (SNAPSHOT_A,),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                UPDATE snapshot_manifests SET manifest_relpath = '../../outside.json'
+                WHERE snapshot_id = ?
+                """,
+                (SNAPSHOT_A,),
+            )
+
+
+@pytest.mark.parametrize(
+    ("column", "malformed"),
+    [
+        ("error_code", "TOTALLY_UNKNOWN"),
+        ("updated_at_utc", "2026-01-01"),
+    ],
+)
+def test_hostile_durable_run_rows_fail_as_typed_database_error(
+    tmp_path: Path, column: str, malformed: str
+) -> None:
+    # Break caught: raw Enum/datetime/Pydantic ValueError escaping a corrupted catalog read.
+    repository = _repository(tmp_path)
+    record = repository.create_or_join(
+        _new_run(book_id=None, client_idempotency_key=column), now=T0
+    ).record
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            f"UPDATE snapshot_runs SET {column} = ? WHERE run_id = ?",
+            (malformed, record.run_id),
+        )
+
+    with pytest.raises(RunDatabaseError):
+        repository.get(record.run_id)
+
+
+def test_hostile_durable_publication_and_result_rows_fail_typed(tmp_path: Path) -> None:
+    # Break caught: direct catalog corruption escaping strict record invariants on read.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    publishing = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        publishing.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=publishing.version,
+        now=T3,
+    )
+    result_run = repository.create_or_join(
+        _new_run(
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6R1A",
+            book_id=None,
+            client_idempotency_key="result-corruption",
+        ),
+        now=T0,
+    ).record
+    repository.complete_nonpublishing(
+        result_run.run_id,
+        adapt_legacy_result(1),
+        expected_version=result_run.version,
+        now=T1,
+    )
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            """
+            UPDATE snapshot_manifests SET manifest_relpath = '../../outside.json'
+            WHERE snapshot_id = ?
+            """,
+            (SNAPSHOT_A,),
+        )
+        connection.execute(
+            """
+            UPDATE snapshot_runs
+            SET result_json = '{"api_key":"TOPSECRET","schema_version":"durable_run_result_v1"}'
+            WHERE run_id = ?
+            """,
+            (result_run.run_id,),
+        )
+
+    with pytest.raises(RunDatabaseError):
+        repository.list_publications("book-alpha")
+    with pytest.raises(RunDatabaseError):
+        repository.get(result_run.run_id)
+
+
+def test_hostile_durable_running_row_cannot_carry_a_valid_result(tmp_path: Path) -> None:
+    # Break caught: constraint bypass leaving a typed result attached to a live run.
+    repository = _repository(tmp_path)
+    run = repository.create_or_join(
+        _new_run(book_id=None, client_idempotency_key="live-result-corruption"), now=T0
+    ).record
+    result_json = (
+        '{"artifact_digest":null,"boolean_value":null,"integer_value":1,'
+        '"result_code":"INTEGER","schema_version":"durable_run_result_v1"}'
+    )
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            "UPDATE snapshot_runs SET result_json = ? WHERE run_id = ?",
+            (result_json, run.run_id),
+        )
+
+    with pytest.raises(RunDatabaseError):
+        repository.get(run.run_id)
 
 
 def test_atomic_publication_commits_manifest_run_and_active_pointer_on_reopen(
@@ -689,7 +1309,7 @@ def test_same_generation_pointer_conflict_terminalizes_without_publication(
         first.run_id,
         _publication(SNAPSHOT_A, generation=1),
         expected_version=first.version,
-        now=T1,
+        now=T3,
     )
     second = _publishing_run(
         repository,
@@ -700,7 +1320,7 @@ def test_same_generation_pointer_conflict_terminalizes_without_publication(
         second.run_id,
         _publication(SNAPSHOT_B, generation=1),
         expected_version=second.version,
-        now=T2,
+        now=T4,
     )
     stale = _publishing_run(
         repository,
@@ -713,12 +1333,12 @@ def test_same_generation_pointer_conflict_terminalizes_without_publication(
             raise ValueError("active became corrupt")
         return _verified(snapshot_id)
 
-    repository.recover_active("book-alpha", verify=verify, now=T2)
+    repository.recover_active("book-alpha", verify=verify, now=T5)
     rejected = repository.commit_publication(
         stale.run_id,
         _publication(SNAPSHOT_C, generation=1),
         expected_version=stale.version,
-        now=T3,
+        now=T6,
     )
 
     assert rejected.published is False
@@ -773,6 +1393,61 @@ def test_cancel_at_publication_terminalizes_cancelled_without_manifest(
     assert repository.get(run.run_id).run_outcome is RunOutcome.CANCELLED
     assert repository.list_publications("book-alpha") == ()
     assert repository.get_active("book-alpha") is None
+
+
+def test_cancel_intent_wins_publication_with_pre_cancel_expected_version(
+    tmp_path: Path,
+) -> None:
+    # Break caught: stale-version rejection leaving a durably cancelled publisher RUNNING.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    run = _publishing_run(repository)
+    repository.request_cancel(run.run_id, now=T2)
+
+    result = repository.commit_publication(
+        run.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=run.version,
+        now=T3,
+    )
+
+    assert result.rejection_code is RunErrorCode.CANCELLED_BY_USER
+    assert result.run.run_outcome is RunOutcome.CANCELLED
+    assert repository.list_publications("book-alpha") == ()
+
+
+def test_generic_failure_refuses_cancelled_by_user_code_and_sql_requires_intent(
+    tmp_path: Path,
+) -> None:
+    # Break caught: impossible FAILED/CANCELLED_BY_USER rows without durable cancel intent.
+    repository = _repository(tmp_path)
+    record = _allocated(repository)
+    with pytest.raises(ValueError):
+        repository.mark_failed(
+            record.run_id,
+            RunFailureV1(
+                code=RunErrorCode.CANCELLED_BY_USER,
+            ),
+            expected_version=record.version,
+            now=T2,
+        )
+
+    with sqlite3.connect(repository.database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                UPDATE snapshot_runs
+                SET run_outcome = 'CANCELLED', error_code = 'CANCELLED_BY_USER',
+                    error_message = 'cancelled by user',
+                    finished_at_utc = ?, updated_at_utc = ?
+                WHERE run_id = ?
+                """,
+                (
+                    T2.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+                )
+                * 2
+                + (record.run_id,),
+            )
 
 
 def test_repeated_publication_is_idempotent_without_pointer_or_sequence_advance(
@@ -861,6 +1536,31 @@ def test_after_commit_fault_rereads_durable_success(tmp_path: Path) -> None:
     assert RunRepository(tmp_path).get_active("book-alpha").snapshot_id == SNAPSHOT_A
 
 
+def test_publication_preserves_existing_typed_repository_error(tmp_path: Path) -> None:
+    # Break caught: catch-all wrapping RunDatabaseError inside another RunDatabaseError.
+    marker = RunDatabaseError("typed marker")
+    armed = False
+
+    def fail(stage: str) -> None:
+        if armed and stage == "db.after_manifest_insert":
+            raise marker
+
+    repository = RunRepository(tmp_path, fault_injector=fail)
+    repository.initialize()
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    run = _publishing_run(repository)
+    armed = True
+
+    with pytest.raises(RunDatabaseError) as captured:
+        repository.commit_publication(
+            run.run_id,
+            _publication(SNAPSHOT_A, generation=1),
+            expected_version=run.version,
+            now=T3,
+        )
+    assert captured.value is marker
+
+
 @pytest.mark.parametrize(
     "invalid_relpath",
     [
@@ -920,7 +1620,7 @@ def test_blessed_fallback_history_uses_publication_sequence_not_time(
             SNAPSHOT_B, generation=1, status=SnapshotStatus.DEGRADED
         ),
         expected_version=degraded.version,
-        now=T1,
+        now=T3,
     )
     latest = _publishing_run(
         repository,
@@ -931,7 +1631,7 @@ def test_blessed_fallback_history_uses_publication_sequence_not_time(
         latest.run_id,
         _publication(SNAPSHOT_C, generation=1),
         expected_version=latest.version,
-        now=T0,
+        now=T3,
     )
 
     fallbacks = repository.list_blessed_fallbacks(
@@ -952,7 +1652,7 @@ def test_corrupt_active_repoints_to_newest_verified_blessed_and_records_evidence
         first.run_id,
         _publication(SNAPSHOT_A, generation=1),
         expected_version=first.version,
-        now=T1,
+        now=T3,
     )
     repository.advance_book_head("book-alpha", 2, BOOK_REF_2, now=T1)
     second = _publishing_run(
@@ -964,7 +1664,7 @@ def test_corrupt_active_repoints_to_newest_verified_blessed_and_records_evidence
         second.run_id,
         _publication(SNAPSHOT_B, generation=2),
         expected_version=second.version,
-        now=T2,
+        now=T4,
     )
 
     def verify(snapshot_id: str) -> VerifiedSnapshotV1:
@@ -972,7 +1672,7 @@ def test_corrupt_active_repoints_to_newest_verified_blessed_and_records_evidence
             raise ValueError("corrupt active")
         return _verified(snapshot_id)
 
-    recovered = repository.recover_active("book-alpha", verify=verify, now=T3)
+    recovered = repository.recover_active("book-alpha", verify=verify, now=T5)
 
     assert recovered.decision is ActiveRecoveryDecision.REPOINTED
     assert recovered.active.snapshot_id == SNAPSHOT_A
@@ -983,8 +1683,9 @@ def test_corrupt_active_repoints_to_newest_verified_blessed_and_records_evidence
     assert events[0].selected_snapshot_id == SNAPSHOT_A
     assert json.loads(events[0].detail_json) == {
         "failures": [
-            {"error_code": "ValueError", "snapshot_id": SNAPSHOT_B}
-        ]
+            {"error_code": "VERIFICATION_FAILED", "snapshot_id": SNAPSHOT_B}
+        ],
+        "omitted_count": 0,
     }
 
 
@@ -999,13 +1700,13 @@ def test_no_verified_fallback_removes_active_pointer_and_records_decision(
         run.run_id,
         _publication(SNAPSHOT_A, generation=1),
         expected_version=run.version,
-        now=T1,
+        now=T3,
     )
 
     recovered = repository.recover_active(
         "book-alpha",
         verify=lambda snapshot_id: (_ for _ in ()).throw(ValueError("corrupt")),
-        now=T2,
+        now=T4,
     )
 
     assert recovered.decision is ActiveRecoveryDecision.REMOVED
@@ -1023,16 +1724,212 @@ def test_verified_active_is_unchanged_and_creates_no_recovery_event(tmp_path: Pa
         run.run_id,
         _publication(SNAPSHOT_A, generation=1),
         expected_version=run.version,
-        now=T1,
+        now=T3,
     )
 
     recovered = repository.recover_active(
-        "book-alpha", verify=_verified, now=T2
+        "book-alpha", verify=_verified, now=T4
     )
 
     assert recovered.decision is ActiveRecoveryDecision.UNCHANGED
     assert recovered.active.pointer_version == 1
     assert repository.list_recovery_events("book-alpha") == ()
+
+
+@pytest.mark.parametrize("bypass", ["missing_manifest", "status_mismatch"])
+def test_recovery_revalidates_verifier_output_and_embedded_manifest(
+    tmp_path: Path, bypass: str
+) -> None:
+    # Break caught: isinstance accepting model_construct output or wrapper/manifest mismatch.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    second = _publishing_run(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6M9B",
+        snapshot_id=SNAPSHOT_B,
+    )
+    repository.commit_publication(
+        second.run_id,
+        _publication(SNAPSHOT_B, generation=1),
+        expected_version=second.version,
+        now=T4,
+    )
+
+    def verify(snapshot_id: str) -> VerifiedSnapshotV1:
+        if snapshot_id == SNAPSHOT_B:
+            raise ValueError("corrupt active")
+        if bypass == "missing_manifest":
+            return VerifiedSnapshotV1.model_construct(
+                snapshot_id=SNAPSHOT_A,
+                status=SnapshotStatus.BLESSED,
+                manifest=None,
+            )
+        return VerifiedSnapshotV1.model_construct(
+            snapshot_id=SNAPSHOT_A,
+            status=SnapshotStatus.DEGRADED,
+            manifest=VERIFIED_A.manifest,
+        )
+
+    recovered = repository.recover_active(
+        "book-alpha", verify=verify, now=T5
+    )
+
+    assert recovered.decision is ActiveRecoveryDecision.REMOVED
+    assert recovered.active is None
+    detail = json.loads(recovered.event.detail_json)
+    assert detail["failures"][-1] == {
+        "error_code": RecoveryRejectionCode.INVALID_VERIFIER_RESULT.value,
+        "snapshot_id": SNAPSHOT_A,
+    }
+
+
+def test_recovery_does_not_swallow_process_control_exceptions(tmp_path: Path) -> None:
+    # Break caught: a verifier KeyboardInterrupt being converted into durable rejection data.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    run = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        run.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=run.version,
+        now=T3,
+    )
+
+    def interrupted(_snapshot_id: str) -> VerifiedSnapshotV1:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        repository.recover_active("book-alpha", verify=interrupted, now=T4)
+
+    assert repository.get_active("book-alpha").snapshot_id == SNAPSHOT_A
+    assert repository.list_recovery_events("book-alpha") == ()
+
+
+def test_recovery_maps_hostile_dynamic_exception_name_to_closed_code(
+    tmp_path: Path,
+) -> None:
+    # Break caught: arbitrary exception class names becoming durable error-code text.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    run = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        run.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=run.version,
+        now=T3,
+    )
+    hostile_type = type(
+        "authorization: bearer /Users/alice/secret\n\u202e",
+        (Exception,),
+        {},
+    )
+
+    recovered = repository.recover_active(
+        "book-alpha",
+        verify=lambda snapshot_id: (_ for _ in ()).throw(hostile_type("secret")),
+        now=T4,
+    )
+
+    detail = json.loads(recovered.event.detail_json)
+    assert detail == {
+        "failures": [
+            {
+                "error_code": RecoveryRejectionCode.VERIFICATION_FAILED.value,
+                "snapshot_id": SNAPSHOT_A,
+            }
+        ],
+        "omitted_count": 0,
+    }
+
+
+def test_recovery_caps_700_candidate_failures_and_still_removes_active(
+    tmp_path: Path,
+) -> None:
+    # Break caught: oversized evidence raising before corrupt-pointer removal/audit commit.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    timestamp = T0.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    snapshot_ids = [f"{index + 1_000:064x}" for index in range(701)]
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        for index, snapshot_id in enumerate(snapshot_ids):
+            run_id = f"run_seed_{index:08d}"
+            identity = f"{index + 1:064x}"
+            connection.execute(
+                """
+                INSERT INTO snapshot_runs (
+                    run_id, run_kind, idempotency_identity, request_fingerprint,
+                    client_idempotency_key_digest, book_id, captured_generation,
+                    expected_active_snapshot_id, expected_active_pointer_version,
+                    target_cut_utc, requested_at_utc, started_at_utc, updated_at_utc,
+                    finished_at_utc, run_stage, run_outcome,
+                    cancel_requested_at_utc, candidate_snapshot_id,
+                    published_snapshot_id, result_json, error_code, error_message, version
+                ) VALUES (
+                    ?, 'ANALYTICAL_SNAPSHOT', ?, ?, NULL, 'book-alpha', 1,
+                    NULL, 0, ?, ?, ?, ?, ?, 'PUBLISHING', 'SUCCEEDED',
+                    NULL, ?, ?, NULL, NULL, NULL, 1
+                )
+                """,
+                (
+                    run_id,
+                    identity,
+                    identity,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    snapshot_id,
+                    snapshot_id,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO snapshot_manifests (
+                    snapshot_id, run_id, book_id, book_generation, snapshot_status,
+                    schema_version, hash_algorithm, manifest_relpath, envelope_sha256,
+                    envelope_byte_length, published_at_utc
+                ) VALUES (?, ?, 'book-alpha', 1, 'BLESSED',
+                    'analytical_snapshot_manifest_v1', 'sha256', ?, ?, 1, ?)
+                """,
+                (
+                    snapshot_id,
+                    run_id,
+                    "snapshots/manifests/analytical_snapshot_manifest_v1/"
+                    f"{snapshot_id[:2]}/{snapshot_id}.json",
+                    f"{index + 10_000:064x}",
+                    timestamp,
+                ),
+            )
+        connection.execute(
+            """
+            INSERT INTO active_snapshots (
+                book_id, snapshot_id, book_generation, pointer_version, updated_at_utc
+            ) VALUES ('book-alpha', ?, 1, 1, ?)
+            """,
+            (snapshot_ids[-1], timestamp),
+        )
+
+    recovered = repository.recover_active(
+        "book-alpha",
+        verify=lambda snapshot_id: (_ for _ in ()).throw(ValueError("corrupt")),
+        now=T1,
+    )
+
+    assert recovered.decision is ActiveRecoveryDecision.REMOVED
+    assert repository.get_active("book-alpha") is None
+    detail = json.loads(recovered.event.detail_json)
+    assert len(detail["failures"]) == 128
+    assert detail["omitted_count"] == 573
+    assert len(recovered.event.detail_json.encode("utf-8")) < 65_536
 
 
 def test_concurrent_recovery_cas_loser_cannot_overwrite_and_is_audited(
@@ -1053,7 +1950,7 @@ def test_concurrent_recovery_cas_loser_cannot_overwrite_and_is_audited(
         first.run_id,
         _publication(SNAPSHOT_A, generation=1),
         expected_version=first.version,
-        now=T1,
+        now=T3,
     )
     repository.advance_book_head("book-alpha", 2, BOOK_REF_2, now=T1)
     second = _publishing_run(
@@ -1065,7 +1962,7 @@ def test_concurrent_recovery_cas_loser_cannot_overwrite_and_is_audited(
         second.run_id,
         _publication(SNAPSHOT_B, generation=2),
         expected_version=second.version,
-        now=T2,
+        now=T4,
     )
 
     def verify(snapshot_id: str) -> VerifiedSnapshotV1:
@@ -1077,7 +1974,7 @@ def test_concurrent_recovery_cas_loser_cannot_overwrite_and_is_audited(
     threads = [
         threading.Thread(
             target=lambda: results.append(
-                repository.recover_active("book-alpha", verify=verify, now=T3)
+                repository.recover_active("book-alpha", verify=verify, now=T5)
             )
         )
         for _ in range(2)
