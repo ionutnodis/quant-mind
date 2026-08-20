@@ -12,7 +12,7 @@
 //
 // Book builder (wave-3 Task A1's book-flow spine): the shared BookBuilder
 // component (this page's own row builder was its base) adds "Load current
-// book" (GET /api/book/current) and book_ref submission — see WhatIf.tsx's
+// book" (explicit POST /api/book/pin) and book_ref submission — see WhatIf.tsx's
 // identical pattern.
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";

@@ -21,8 +21,22 @@ export interface BookSnapshotOut {
   positions: BookPositionOut[];
 }
 
-export function getCurrentBook(): Promise<BookSnapshotOut> {
-  return request<BookSnapshotOut>("/api/book/current");
+export interface CurrentBookOut {
+  valuation_ts: string;
+  base_currency: string;
+  positions: BookPositionOut[];
+}
+
+export function getCurrentBook(): Promise<CurrentBookOut> {
+  return request<CurrentBookOut>("/api/book/current");
+}
+
+/** Explicitly persist the live broker book and return its reusable book_ref. */
+export function pinCurrentBook(): Promise<BookSnapshotOut> {
+  return request<BookSnapshotOut>("/api/book/pin", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }
 
 export function getBook(snapshotId: string): Promise<BookSnapshotOut> {

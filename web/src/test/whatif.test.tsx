@@ -192,7 +192,7 @@ test("scenario save/load round-trip through localStorage", async () => {
 });
 
 // --- book_ref (wave-3 Task A1's book-flow spine): "Load current book" ---
-// Generous findBy timeout below: resolving GET /api/book/current through
+// Generous findBy timeout below: resolving POST /api/book/pin through
 // MSW's fetch interceptor can take longer than testing-library's 1000ms
 // default in this environment, unlike a same-tick state update.
 const BOOK_FETCH_TIMEOUT = { timeout: 5000 };
@@ -206,7 +206,10 @@ const CURRENT_BOOK = {
 
 test("load current book populates rows and computes by book_ref", async () => {
   server.use(
-    http.get("/api/book/current", () => HttpResponse.json(CURRENT_BOOK)),
+    http.post("/api/book/pin", async ({ request }) => {
+      expect(await request.json()).toEqual({});
+      return HttpResponse.json(CURRENT_BOOK);
+    }),
     http.post("/api/whatif", async ({ request }) => {
       const body = (await request.json()) as { book_ref?: string; positions?: unknown };
       expect(body.book_ref).toBe("snap-abc123");
@@ -218,7 +221,7 @@ test("load current book populates rows and computes by book_ref", async () => {
 
   fireEvent.click(await screen.findByRole("button", { name: /load current book/i }));
   // Replaced the default row (qty 100) with the loaded book's own qty (25),
-  // proving the row came from GET /api/book/current, not the page default.
+  // proving the row came from the explicit pin command, not the page default.
   await screen.findByDisplayValue("25", {}, BOOK_FETCH_TIMEOUT);
 
   fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
@@ -227,7 +230,10 @@ test("load current book populates rows and computes by book_ref", async () => {
 
 test("editing a row after loading the current book reverts to inline positions", async () => {
   server.use(
-    http.get("/api/book/current", () => HttpResponse.json(CURRENT_BOOK)),
+    http.post("/api/book/pin", async ({ request }) => {
+      expect(await request.json()).toEqual({});
+      return HttpResponse.json(CURRENT_BOOK);
+    }),
     http.post("/api/whatif", async ({ request }) => {
       const body = (await request.json()) as {
         book_ref?: string;

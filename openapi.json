@@ -1033,6 +1033,33 @@
         "title": "CrisisResponse",
         "type": "object"
       },
+      "CurrentBookOut": {
+        "description": "A live broker preview. It is deliberately not a persisted snapshot.",
+        "properties": {
+          "base_currency": {
+            "title": "Base Currency",
+            "type": "string"
+          },
+          "positions": {
+            "items": {
+              "$ref": "#/components/schemas/BookPositionOut"
+            },
+            "title": "Positions",
+            "type": "array"
+          },
+          "valuation_ts": {
+            "title": "Valuation Ts",
+            "type": "string"
+          }
+        },
+        "required": [
+          "valuation_ts",
+          "base_currency",
+          "positions"
+        ],
+        "title": "CurrentBookOut",
+        "type": "object"
+      },
       "ExpiryBucketsOut": {
         "description": "Requirement 5: option legs bucketed by days-to-expiry. Only legs that\nresolved to a priceable BookLeg (matching cached-chain IV) are bucketed \u2014\nan unpriceable OPT position has no known expiry to bucket by.",
         "properties": {
@@ -4481,7 +4508,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BookSnapshotOut"
+                  "$ref": "#/components/schemas/CurrentBookOut"
                 }
               }
             },
