@@ -205,6 +205,49 @@ def test_whatif_book_ref_resolves_to_the_same_result_as_inline_positions(client)
     assert r_ref.json() == r_inline.json()
 
 
+def test_whatif_refuses_inline_option_legs_until_contract_repricing_exists(client):
+    r = client.post(
+        "/api/whatif",
+        json={
+            "positions": [
+                {
+                    "symbol": "SPY",
+                    "qty": 1,
+                    "strike": 100,
+                    "expiry": "20260918",
+                    "right": "C",
+                    "multiplier": 100,
+                }
+            ],
+            "years": 1,
+        },
+    )
+    assert r.status_code == 422
+    assert "cannot value option" in r.json()["detail"].lower()
+
+
+def test_whatif_refuses_option_legs_resolved_from_book_ref(client):
+    pinned = client.post(
+        "/api/book/pin",
+        json={
+            "positions": [
+                {
+                    "symbol": "SPY",
+                    "qty": 1,
+                    "strike": 100,
+                    "expiry": "20260918",
+                    "right": "P",
+                    "multiplier": 100,
+                }
+            ]
+        },
+    ).json()
+
+    r = client.post("/api/whatif", json={"book_ref": pinned["snapshot_id"], "years": 1})
+    assert r.status_code == 422
+    assert "cannot value option" in r.json()["detail"].lower()
+
+
 def test_whatif_unknown_book_ref_is_422(client):
     r = client.post("/api/whatif", json={"book_ref": "does-not-exist", "years": 1})
     assert r.status_code == 422
