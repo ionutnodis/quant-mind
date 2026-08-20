@@ -193,6 +193,9 @@ class AnalyticalSnapshotManifestBodyV1(FrozenContractBase):
     def _manifest_is_publishable_and_stably_ordered(
         self,
     ) -> "AnalyticalSnapshotManifestBodyV1":
+        if self.canonical_book_hash != self.canonical_book_ref.digest:
+            raise ValueError("canonical book hash must match its immutable object reference")
+
         def binding_key(binding) -> tuple[str, str]:
             return binding.logical_role, binding.logical_id
 
@@ -201,6 +204,14 @@ class AnalyticalSnapshotManifestBodyV1(FrozenContractBase):
             raise ValueError("input artifact role/ID pairs must be unique")
         if input_keys != tuple(sorted(input_keys)):
             raise ValueError("input artifacts must be sorted by logical role and ID")
+        binding_rights_versions = {
+            binding.rights_manifest_version for binding in self.input_artifacts
+        }
+        undeclared_rights = binding_rights_versions - set(self.rights_manifest_versions)
+        if undeclared_rights:
+            raise ValueError(
+                "input binding rights manifest version is absent from the manifest body"
+            )
 
         output_keys = tuple(binding_key(binding) for binding in self.outputs)
         if len(output_keys) != len(set(output_keys)):

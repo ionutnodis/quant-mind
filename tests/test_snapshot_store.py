@@ -1,0 +1,472 @@
+from __future__ import annotations
+
+import errno
+import os
+import stat
+import subprocess
+import sys
+from datetime import UTC, datetime
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from quantmind.snapshots.contracts import (
+    GateEvidenceV1,
+    GateStatus,
+    RecoveryClass,
+    SnapshotStatus,
+    ValuationCutV1,
+)
+from quantmind.snapshots.input_artifacts import (
+    ArtifactRightsMode,
+    InputRepresentation,
+    ReproducibilityClass,
+    bind_input_artifact,
+)
+from quantmind.snapshots.manifest import (
+    AnalyticalSnapshotManifestBodyV1,
+    ArtifactRefV1,
+    DuplicateJSONKeyError,
+    OutputArtifactBindingV1,
+    UnsupportedManifestSchemaError,
+    create_manifest,
+)
+from quantmind.snapshots.store import (
+    ArtifactDigestMismatchError,
+    ArtifactLengthMismatchError,
+    ArtifactNotFoundError,
+    ManifestFilenameMismatchError,
+    NoClobberPublicationError,
+    NonRegularSnapshotFileError,
+    SnapshotStore,
+    SnapshotVerificationError,
+)
+
+
+def _fake_ref(digest: str = "f" * 64, *, byte_length: int = 7) -> ArtifactRefV1:
+    return ArtifactRefV1(
+        hash_algorithm="sha256",
+        digest=digest,
+        byte_length=byte_length,
+        media_type="application/json",
+        schema_version="synthetic_v1",
+    )
+
+
+def _manifest(
+    *,
+    canonical_book_ref: ArtifactRefV1,
+    input_ref: ArtifactRefV1,
+    output_ref: ArtifactRefV1,
+    status: SnapshotStatus = SnapshotStatus.BLESSED,
+) -> object:
+    input_binding = bind_input_artifact(
+        logical_role="NORMALIZED_MARKS",
+        logical_id="marks",
+        representation=InputRepresentation.NORMALIZED_INPUT,
+        object_ref=input_ref,
+        source="synthetic",
+        provider="quantmind",
+        rights_mode=ArtifactRightsMode.RAW_ALLOWED,
+        rights_manifest_version="synthetic-rights-v1",
+        reproducibility_class=ReproducibilityClass.NORMALIZED_ONLY,
+    )
+    output_binding = OutputArtifactBindingV1(
+        logical_role="XRAY_READ_MODEL",
+        logical_id="xray",
+        object_ref=output_ref,
+        model_version="xray-v1",
+    )
+    body = AnalyticalSnapshotManifestBodyV1(
+        schema_version="analytical_snapshot_manifest_v1",
+        canonicalization_version="quantmind_canonical_json_v1",
+        hash_algorithm="sha256",
+        book_id="synthetic-book",
+        book_generation=1,
+        legacy_book_ref="abcdef012345",
+        valuation_cut=ValuationCutV1(
+            target_cut_utc=datetime(2026, 7, 24, 20, 15, tzinfo=UTC),
+            display_timezone="America/New_York",
+            capture_start_utc=datetime(2026, 7, 24, 20, 15, tzinfo=UTC),
+            capture_end_utc=datetime(2026, 7, 24, 20, 20, tzinfo=UTC),
+        ),
+        base_currency="USD",
+        normalized_nlv=Decimal("1000.00"),
+        included_account_ids=("account-a",),
+        canonical_book_ref=canonical_book_ref,
+        canonical_book_hash=canonical_book_ref.digest,
+        position_hash="1" * 64,
+        input_artifacts=(input_binding,),
+        security_master_mapping_version="security-master-v1",
+        rights_manifest_versions=("synthetic-rights-v1",),
+        factor_taxonomy_version="factor-taxonomy-v1",
+        return_series_version="returns-v1",
+        production_covariance_model_version="covariance-v1",
+        residual_model_version="residual-v1",
+        latent_factor_model_version=None,
+        option_pricer_version=None,
+        surface_model_version=None,
+        scenario_library_version=None,
+        analytical_config_hash="2" * 64,
+        application_commit="1d2b187",
+        application_build_id="test-build",
+        snapshot_status=status,
+        gates=(
+            GateEvidenceV1(
+                gate_code="BOOK_RECONCILIATION",
+                status=GateStatus.PASSED,
+                recovery_class=RecoveryClass.USER_RESOLVABLE,
+                evidence=("book reconciles",),
+                recovery_action="Resolve the book mismatch",
+            ),
+        ),
+        warnings=(),
+        refused_outputs=() if status is SnapshotStatus.BLESSED else ("TAIL",),
+        outputs=(output_binding,),
+    )
+    return create_manifest(body)
+
+
+def _complete_manifest(store: SnapshotStore):
+    book = store.put_bytes(
+        b'{"schema_version":"canonical_book_v1"}',
+        media_type="application/json",
+        schema_version="canonical_book_v1",
+    )
+    input_ref = store.put_bytes(
+        b'{"marks":"synthetic"}',
+        media_type="application/json",
+        schema_version="normalized_marks_v1",
+    )
+    output = store.put_bytes(
+        b'{"xray":"synthetic"}',
+        media_type="application/json",
+        schema_version="xray_read_model_v1",
+    )
+    return _manifest(
+        canonical_book_ref=book,
+        input_ref=input_ref,
+        output_ref=output,
+    )
+
+
+def _object_path(root: Path, digest: str) -> Path:
+    return root / "snapshots" / "objects" / "sha256" / digest[:2] / digest
+
+
+def _manifest_path(root: Path, snapshot_id: str) -> Path:
+    return (
+        root
+        / "snapshots"
+        / "manifests"
+        / "analytical_snapshot_manifest_v1"
+        / snapshot_id[:2]
+        / f"{snapshot_id}.json"
+    )
+
+
+def test_bytes_and_canonical_contract_roundtrip_at_exact_full_digest_paths(tmp_path):
+    store = SnapshotStore(tmp_path)
+    payload = b"opaque\x00artifact"
+    ref = store.put_bytes(
+        payload,
+        media_type="application/octet-stream",
+        schema_version="opaque_v1",
+    )
+    assert ref.digest == "ad24f8366d2e13ad7f3cc8c2bbe05a235184caefd2e5f31c3bbd1edeacfd264e"
+    assert ref.byte_length == len(payload)
+    assert _object_path(tmp_path, ref.digest).read_bytes() == payload
+    assert stat.S_IMODE(_object_path(tmp_path, ref.digest).stat().st_mode) == 0o600
+    assert store.read_verified_artifact(ref) == payload
+    assert store.put_bytes(
+        payload,
+        media_type="application/octet-stream",
+        schema_version="opaque_v1",
+    ) == ref
+
+    cut = ValuationCutV1(
+        target_cut_utc=datetime(2026, 7, 24, 20, 15, tzinfo=UTC),
+        display_timezone="America/New_York",
+        capture_start_utc=datetime(2026, 7, 24, 20, 15, tzinfo=UTC),
+        capture_end_utc=datetime(2026, 7, 24, 20, 20, tzinfo=UTC),
+    )
+    canonical_ref = store.put_canonical(cut, media_type="application/json")
+    assert store.read_verified_artifact(canonical_ref) == (
+        b'{"capture_end_utc":"2026-07-24T20:20:00Z",'
+        b'"capture_start_utc":"2026-07-24T20:15:00Z",'
+        b'"display_timezone":"America/New_York",'
+        b'"target_cut_utc":"2026-07-24T20:15:00Z"}'
+    )
+
+
+def test_store_reads_accept_only_full_lowercase_ids_and_ignore_temp_names(tmp_path):
+    store = SnapshotStore(tmp_path)
+    with pytest.raises(ValueError, match="64 lowercase"):
+        store.read_verified_manifest("abcdef012345")
+    with pytest.raises(ValueError, match="64 lowercase"):
+        store.read_verified_manifest("A" * 64)
+
+    full_id = "a" * 64
+    temp = _manifest_path(tmp_path, full_id).with_name(f".{full_id}.abandoned.tmp")
+    temp.parent.mkdir(parents=True)
+    temp.write_bytes(b"complete-looking but unpublished")
+    with pytest.raises(ArtifactNotFoundError):
+        store.read_verified_manifest(full_id)
+
+
+def test_reader_rejects_missing_truncated_tampered_symlink_and_nonregular_objects(tmp_path):
+    store = SnapshotStore(tmp_path)
+    missing = _fake_ref()
+    with pytest.raises(ArtifactNotFoundError):
+        store.read_verified_artifact(missing)
+
+    ref = store.put_bytes(
+        b"verified artifact",
+        media_type="application/octet-stream",
+        schema_version="opaque_v1",
+    )
+    path = _object_path(tmp_path, ref.digest)
+    path.write_bytes(b"short")
+    with pytest.raises(ArtifactLengthMismatchError):
+        store.read_verified_artifact(ref)
+
+    path.write_bytes(b"x" * ref.byte_length)
+    with pytest.raises(ArtifactDigestMismatchError):
+        store.read_verified_artifact(ref)
+
+    path.unlink()
+    target = tmp_path / "symlink-target"
+    target.write_bytes(b"verified artifact")
+    path.symlink_to(target)
+    with pytest.raises(NonRegularSnapshotFileError):
+        store.read_verified_artifact(ref)
+
+    path.unlink()
+    path.mkdir()
+    with pytest.raises(NonRegularSnapshotFileError):
+        store.read_verified_artifact(ref)
+
+
+def test_put_never_overwrites_a_corrupt_existing_content_address(tmp_path):
+    store = SnapshotStore(tmp_path)
+    payload = b"immutable bytes"
+    ref = store.put_bytes(
+        payload,
+        media_type="application/octet-stream",
+        schema_version="opaque_v1",
+    )
+    path = _object_path(tmp_path, ref.digest)
+    path.write_bytes(b"corrupt content")
+
+    with pytest.raises((ArtifactLengthMismatchError, ArtifactDigestMismatchError)):
+        store.put_bytes(
+            payload,
+            media_type="application/octet-stream",
+            schema_version="opaque_v1",
+        )
+    assert path.read_bytes() == b"corrupt content"
+
+
+def test_eexist_race_verifies_the_winner_instead_of_replacing_it(tmp_path):
+    payload = b"same concurrent payload"
+    target_created = False
+
+    def create_winner(stage: str, path: Path) -> None:
+        nonlocal target_created
+        if stage == "before_link" and not target_created:
+            path.write_bytes(payload)
+            os.chmod(path, 0o600)
+            target_created = True
+
+    store = SnapshotStore(tmp_path, fault_injector=create_winner)
+    ref = store.put_bytes(
+        payload,
+        media_type="application/octet-stream",
+        schema_version="opaque_v1",
+    )
+    assert target_created
+    assert store.read_verified_artifact(ref) == payload
+    assert not tuple(_object_path(tmp_path, ref.digest).parent.glob("*.tmp"))
+
+
+def test_unsupported_no_clobber_primitive_fails_closed(tmp_path, monkeypatch):
+    store = SnapshotStore(tmp_path)
+
+    def unsupported(_source: Path, _target: Path) -> None:
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    monkeypatch.setattr(store, "_link_no_clobber", unsupported)
+    with pytest.raises(NoClobberPublicationError):
+        store.put_bytes(
+            b"cannot publish",
+            media_type="application/octet-stream",
+            schema_version="opaque_v1",
+        )
+
+
+@pytest.mark.parametrize(
+    ("fault_stage", "final_should_exist"),
+    [
+        ("before_write", False),
+        ("after_write_chunk", False),
+        ("before_file_fsync", False),
+        ("before_reread", False),
+        ("before_link", False),
+        ("before_directory_fsync", True),
+    ],
+)
+def test_faults_never_make_an_incomplete_final_object_verifiable(
+    tmp_path, fault_stage, final_should_exist
+):
+    payload = b"x" * (128 * 1024)
+    injected = False
+
+    def fail_once(stage: str, _path: Path) -> None:
+        nonlocal injected
+        if stage == fault_stage and not injected:
+            injected = True
+            raise RuntimeError(f"injected {stage}")
+
+    store = SnapshotStore(tmp_path, fault_injector=fail_once)
+    with pytest.raises(RuntimeError, match=fault_stage):
+        store.put_bytes(
+            payload,
+            media_type="application/octet-stream",
+            schema_version="opaque_v1",
+        )
+    assert injected
+
+    digest = "15601535eca4a38b7e31ad6494861121cb9f84ccf55d4beb6a707d4f7a87813d"
+    path = _object_path(tmp_path, digest)
+    assert path.exists() is final_should_exist
+    if final_should_exist:
+        ref = ArtifactRefV1(
+            hash_algorithm="sha256",
+            digest=digest,
+            byte_length=len(payload),
+            media_type="application/octet-stream",
+            schema_version="opaque_v1",
+        )
+        assert SnapshotStore(tmp_path).read_verified_artifact(ref) == payload
+    assert not tuple(path.parent.glob("*.tmp"))
+
+
+def test_two_processes_converge_on_one_object_without_shared_temp_names(tmp_path):
+    code = """
+import sys
+from pathlib import Path
+from quantmind.snapshots.store import SnapshotStore
+root = Path(sys.argv[1])
+ref = SnapshotStore(root).put_bytes(
+    b'concurrent object',
+    media_type='application/octet-stream',
+    schema_version='opaque_v1',
+)
+print(ref.digest)
+"""
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", code, str(tmp_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    results = [process.communicate(timeout=20) for process in processes]
+    assert [process.returncode for process in processes] == [0, 0], results
+    digests = [stdout.strip() for stdout, _stderr in results]
+    assert digests[0] == digests[1]
+    parent = _object_path(tmp_path, digests[0]).parent
+    assert [path.name for path in parent.iterdir()] == [digests[0]]
+
+
+def test_put_manifest_verifies_all_required_refs_before_durable_orphan_storage(tmp_path):
+    store = SnapshotStore(tmp_path)
+    manifest = _complete_manifest(store)
+    path = store.put_manifest(manifest)
+    assert path == _manifest_path(tmp_path, manifest.snapshot_id)
+    assert store.read_verified_manifest(manifest.snapshot_id) == manifest
+    verified = store.verify_snapshot(
+        manifest.snapshot_id, required_output_roles=("XRAY_READ_MODEL",)
+    )
+    assert verified.snapshot_id == manifest.snapshot_id
+    assert verified.status is SnapshotStatus.BLESSED
+    assert not (tmp_path / "snapshots" / "active.json").exists()
+
+    with pytest.raises(SnapshotVerificationError, match="required output role"):
+        store.verify_snapshot(manifest.snapshot_id, required_output_roles=("TAIL",))
+
+
+def test_read_verified_manifest_fails_when_a_required_artifact_later_disappears(tmp_path):
+    store = SnapshotStore(tmp_path)
+    manifest = _complete_manifest(store)
+    store.put_manifest(manifest)
+    output_ref = manifest.body.outputs[0].object_ref
+    _object_path(tmp_path, output_ref.digest).unlink()
+
+    with pytest.raises(ArtifactNotFoundError):
+        store.read_verified_manifest(manifest.snapshot_id)
+
+
+def test_put_manifest_refuses_missing_or_corrupt_referenced_objects(tmp_path):
+    store = SnapshotStore(tmp_path)
+    book = store.put_bytes(
+        b"book", media_type="application/json", schema_version="canonical_book_v1"
+    )
+    output = store.put_bytes(
+        b"output", media_type="application/json", schema_version="xray_v1"
+    )
+    missing_manifest = _manifest(
+        canonical_book_ref=book,
+        input_ref=_fake_ref(),
+        output_ref=output,
+    )
+    with pytest.raises(ArtifactNotFoundError):
+        store.put_manifest(missing_manifest)
+    assert not _manifest_path(tmp_path, missing_manifest.snapshot_id).exists()
+
+    input_ref = store.put_bytes(
+        b"input", media_type="application/json", schema_version="input_v1"
+    )
+    corrupt_manifest = _manifest(
+        canonical_book_ref=book,
+        input_ref=input_ref,
+        output_ref=output,
+    )
+    _object_path(tmp_path, output.digest).write_bytes(b"damage")
+    with pytest.raises((ArtifactLengthMismatchError, ArtifactDigestMismatchError)):
+        store.put_manifest(corrupt_manifest)
+    assert not _manifest_path(tmp_path, corrupt_manifest.snapshot_id).exists()
+
+
+@pytest.mark.parametrize("corruption", ["duplicate", "unknown_schema", "embedded_id"])
+def test_manifest_reader_rejects_ambiguous_schema_or_filename_identity(tmp_path, corruption):
+    store = SnapshotStore(tmp_path)
+    manifest = _complete_manifest(store)
+    path = _manifest_path(tmp_path, manifest.snapshot_id)
+    path.parent.mkdir(parents=True)
+    canonical = __import__(
+        "quantmind.snapshots.contracts", fromlist=["canonical_json_bytes"]
+    ).canonical_json_bytes(manifest)
+    if corruption == "duplicate":
+        payload = b'{"snapshot_id":"' + b"0" * 64 + b'",' + canonical[1:]
+        expected = DuplicateJSONKeyError
+    elif corruption == "unknown_schema":
+        payload = canonical.replace(
+            b'"schema_version":"analytical_snapshot_manifest_v1"',
+            b'"schema_version":"analytical_snapshot_manifest_v2"',
+        )
+        expected = UnsupportedManifestSchemaError
+    else:
+        other_id = "e" * 64
+        other_path = _manifest_path(tmp_path, other_id)
+        other_path.parent.mkdir(parents=True)
+        other_path.write_bytes(canonical)
+        with pytest.raises(ManifestFilenameMismatchError):
+            store.read_verified_manifest(other_id)
+        return
+    path.write_bytes(payload)
+    with pytest.raises(expected):
+        store.read_verified_manifest(manifest.snapshot_id)

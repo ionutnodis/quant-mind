@@ -228,7 +228,12 @@ def test_manifest_identity_is_mapping_order_stable_and_identity_field_sensitive(
     mutations = (
         {"book_generation": 8},
         {"included_account_ids": ("account-b", "account-a")},
-        {"canonical_book_hash": "6" * 64},
+        {
+            "canonical_book_ref": body.canonical_book_ref.model_copy(
+                update={"digest": "6" * 64}
+            ),
+            "canonical_book_hash": "6" * 64,
+        },
         {"position_hash": "6" * 64},
         {"analytical_config_hash": "6" * 64},
         {"application_commit": "different-commit"},
@@ -323,6 +328,14 @@ def test_manifest_schema_algorithm_collections_and_status_are_strict():
     ):
         with pytest.raises(ValueError):
             _body(**change)
+
+
+def test_manifest_binds_the_exact_canonical_book_object_and_all_input_rights_versions():
+    with pytest.raises(ValueError, match="canonical book hash"):
+        _body(canonical_book_hash="6" * 64)
+
+    with pytest.raises(ValueError, match="rights manifest"):
+        _body(rights_manifest_versions=("different-rights-v1",))
 
 
 def test_display_prefix_is_pure_and_never_accepted_as_identity():
