@@ -288,7 +288,9 @@ def _reject_nonfinite_constant(value: str) -> None:
     raise NonFiniteJSONConstantError(f"non-finite JSON constant: {value}")
 
 
-def _load_unambiguous_json(payload: bytes) -> Any:
+def load_unambiguous_json_bytes(payload: bytes) -> Any:
+    """Load UTF-8 JSON while refusing duplicate keys and non-finite constants."""
+
     if not isinstance(payload, bytes):
         raise TypeError("manifest payload must be bytes")
     try:
@@ -308,7 +310,7 @@ def _load_unambiguous_json(payload: bytes) -> Any:
 
 
 def parse_manifest(payload: bytes) -> AnalyticalSnapshotManifestV1:
-    parsed = _load_unambiguous_json(payload)
+    parsed = load_unambiguous_json_bytes(payload)
     body = parsed.get("body") if isinstance(parsed, dict) else None
     schema = body.get("schema_version") if isinstance(body, dict) else None
     if schema is None:
@@ -338,6 +340,7 @@ __all__ = [
     "OutputArtifactBindingV1",
     "UnsupportedManifestSchemaError",
     "create_manifest",
+    "load_unambiguous_json_bytes",
     "parse_manifest",
     "snapshot_display_prefix",
     "verify_manifest",

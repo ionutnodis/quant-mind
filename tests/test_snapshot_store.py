@@ -33,6 +33,7 @@ from quantmind.snapshots.manifest import (
     create_manifest,
 )
 from quantmind.snapshots.store import (
+    ActiveSnapshotResolutionV1,
     ArtifactDigestMismatchError,
     ArtifactLengthMismatchError,
     ArtifactNotFoundError,
@@ -41,6 +42,7 @@ from quantmind.snapshots.store import (
     NonRegularSnapshotFileError,
     SnapshotStore,
     SnapshotVerificationError,
+    select_last_good,
 )
 
 
@@ -60,6 +62,7 @@ def _manifest(
     input_ref: ArtifactRefV1,
     output_ref: ArtifactRefV1,
     status: SnapshotStatus = SnapshotStatus.BLESSED,
+    generation: int = 1,
 ) -> object:
     input_binding = bind_input_artifact(
         logical_role="NORMALIZED_MARKS",
@@ -83,7 +86,7 @@ def _manifest(
         canonicalization_version="quantmind_canonical_json_v1",
         hash_algorithm="sha256",
         book_id="synthetic-book",
-        book_generation=1,
+        book_generation=generation,
         legacy_book_ref="abcdef012345",
         valuation_cut=ValuationCutV1(
             target_cut_utc=datetime(2026, 7, 24, 20, 15, tzinfo=UTC),
@@ -128,7 +131,12 @@ def _manifest(
     return create_manifest(body)
 
 
-def _complete_manifest(store: SnapshotStore):
+def _complete_manifest(
+    store: SnapshotStore,
+    *,
+    status: SnapshotStatus = SnapshotStatus.BLESSED,
+    generation: int = 1,
+):
     book = store.put_bytes(
         b'{"schema_version":"canonical_book_v1"}',
         media_type="application/json",
@@ -148,6 +156,8 @@ def _complete_manifest(store: SnapshotStore):
         canonical_book_ref=book,
         input_ref=input_ref,
         output_ref=output,
+        status=status,
+        generation=generation,
     )
 
 
@@ -470,3 +480,154 @@ def test_manifest_reader_rejects_ambiguous_schema_or_filename_identity(tmp_path,
     path.write_bytes(payload)
     with pytest.raises(expected):
         store.read_verified_manifest(manifest.snapshot_id)
+
+
+def test_select_last_good_keeps_a_verified_active_blessed_or_degraded_snapshot(tmp_path):
+    store = SnapshotStore(tmp_path)
+    blessed = _complete_manifest(store, generation=10)
+    degraded = _complete_manifest(
+        store, status=SnapshotStatus.DEGRADED, generation=11
+    )
+    store.put_manifest(blessed)
+    store.put_manifest(degraded)
+    calls: list[str] = []
+
+    def verify(snapshot_id: str):
+        calls.append(snapshot_id)
+        return store.verify_snapshot(snapshot_id)
+
+    for active in (blessed, degraded):
+        calls.clear()
+        resolution = select_last_good(
+            active.snapshot_id,
+            ("f" * 64,),
+            verify,
+        )
+        assert isinstance(resolution, ActiveSnapshotResolutionV1)
+        assert resolution.requested_snapshot_id == active.snapshot_id
+        assert resolution.resolved_snapshot_id == active.snapshot_id
+        assert resolution.resolved_status is active.body.snapshot_status
+        assert resolution.fallback_used is False
+        assert resolution.failures == ()
+        assert calls == [active.snapshot_id]
+
+
+def test_select_last_good_uses_only_caller_ordered_verified_prior_blessed_ids(tmp_path):
+    store = SnapshotStore(tmp_path)
+    active = _complete_manifest(store, generation=20)
+    corrupt_prior = _complete_manifest(store, generation=19)
+    degraded_prior = _complete_manifest(
+        store, status=SnapshotStatus.DEGRADED, generation=18
+    )
+    valid_prior = _complete_manifest(store, generation=17)
+    orphan_not_supplied = _complete_manifest(store, generation=16)
+    for manifest in (
+        active,
+        corrupt_prior,
+        degraded_prior,
+        valid_prior,
+        orphan_not_supplied,
+    ):
+        store.put_manifest(manifest)
+
+    _object_path(tmp_path, active.body.outputs[0].object_ref.digest).unlink()
+    # The manifests share their synthetic outputs, so republish distinct output objects and
+    # manifests for each fallback candidate before corrupting only the immediate prior.
+    prior_output = store.put_bytes(
+        b"prior-output",
+        media_type="application/json",
+        schema_version="xray_v1",
+    )
+    corrupt_prior = _manifest(
+        canonical_book_ref=corrupt_prior.body.canonical_book_ref,
+        input_ref=corrupt_prior.body.input_artifacts[0].object_ref,
+        output_ref=prior_output,
+        generation=19,
+    )
+    store.put_manifest(corrupt_prior)
+    valid_output = store.put_bytes(
+        b"valid-prior-output",
+        media_type="application/json",
+        schema_version="xray_v1",
+    )
+    valid_prior = _manifest(
+        canonical_book_ref=valid_prior.body.canonical_book_ref,
+        input_ref=valid_prior.body.input_artifacts[0].object_ref,
+        output_ref=valid_output,
+        generation=17,
+    )
+    store.put_manifest(valid_prior)
+    degraded_output = store.put_bytes(
+        b"degraded-prior-output",
+        media_type="application/json",
+        schema_version="xray_v1",
+    )
+    degraded_prior = _manifest(
+        canonical_book_ref=degraded_prior.body.canonical_book_ref,
+        input_ref=degraded_prior.body.input_artifacts[0].object_ref,
+        output_ref=degraded_output,
+        status=SnapshotStatus.DEGRADED,
+        generation=18,
+    )
+    store.put_manifest(degraded_prior)
+    _object_path(tmp_path, prior_output.digest).write_bytes(b"corrupt-prior")
+
+    calls: list[str] = []
+
+    def verify(snapshot_id: str):
+        calls.append(snapshot_id)
+        return store.verify_snapshot(snapshot_id)
+
+    files_before = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_file())
+    resolution = select_last_good(
+        active.snapshot_id,
+        (
+            corrupt_prior.snapshot_id,
+            degraded_prior.snapshot_id,
+            valid_prior.snapshot_id,
+        ),
+        verify,
+    )
+    files_after = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_file())
+
+    assert resolution.resolved_snapshot_id == valid_prior.snapshot_id
+    assert resolution.resolved_status is SnapshotStatus.BLESSED
+    assert resolution.fallback_used is True
+    assert [failure.snapshot_id for failure in resolution.failures] == [
+        active.snapshot_id,
+        corrupt_prior.snapshot_id,
+        degraded_prior.snapshot_id,
+    ]
+    assert resolution.failures[-1].error_code == "NOT_BLESSED"
+    assert calls == [
+        active.snapshot_id,
+        corrupt_prior.snapshot_id,
+        degraded_prior.snapshot_id,
+        valid_prior.snapshot_id,
+    ]
+    assert orphan_not_supplied.snapshot_id not in calls
+    assert files_after == files_before
+
+
+def test_select_last_good_records_malformed_ids_and_returns_no_readable_snapshot():
+    calls: list[str] = []
+
+    def verify(snapshot_id: str):
+        calls.append(snapshot_id)
+        raise ArtifactNotFoundError(f"missing {snapshot_id}")
+
+    resolution = select_last_good(
+        "bad-active-prefix",
+        ("a" * 64, "b" * 64),
+        verify,
+    )
+    assert resolution.requested_snapshot_id == "bad-active-prefix"
+    assert resolution.resolved_snapshot_id is None
+    assert resolution.resolved_status is None
+    assert resolution.fallback_used is False
+    assert [failure.error_code for failure in resolution.failures] == [
+        "ArtifactNotFoundError",
+        "ArtifactNotFoundError",
+        "ArtifactNotFoundError",
+    ]
+    assert calls == ["bad-active-prefix", "a" * 64, "b" * 64]

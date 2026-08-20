@@ -8,7 +8,7 @@ import os
 import re
 import stat
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -67,7 +67,22 @@ class VerifiedSnapshotV1(FrozenContractBase):
     manifest: AnalyticalSnapshotManifestV1
 
 
+class SnapshotRejectionV1(FrozenContractBase):
+    snapshot_id: str
+    error_code: str
+    detail: str
+
+
+class ActiveSnapshotResolutionV1(FrozenContractBase):
+    requested_snapshot_id: str | None
+    resolved_snapshot_id: str | None
+    resolved_status: SnapshotStatus | None
+    fallback_used: bool
+    failures: tuple[SnapshotRejectionV1, ...]
+
+
 FaultInjector = Callable[[str, Path], None]
+SnapshotVerifier = Callable[[str], VerifiedSnapshotV1]
 
 
 def _require_full_digest(value: str, label: str) -> str:
@@ -403,7 +418,81 @@ class SnapshotStore:
         )
 
 
+def select_last_good(
+    active_snapshot_id: str | None,
+    prior_blessed_snapshot_ids: Sequence[str],
+    verify: SnapshotVerifier,
+) -> ActiveSnapshotResolutionV1:
+    """Select from caller-owned publication order without walking or mutating storage."""
+
+    failures: list[SnapshotRejectionV1] = []
+
+    def attempt(snapshot_id: str) -> VerifiedSnapshotV1 | None:
+        try:
+            verified = verify(snapshot_id)
+            if not isinstance(verified, VerifiedSnapshotV1):
+                raise TypeError("verifier must return VerifiedSnapshotV1")
+            if verified.snapshot_id != snapshot_id:
+                raise SnapshotVerificationError(
+                    "verifier returned a different snapshot identity"
+                )
+            return verified
+        except Exception as error:
+            failures.append(
+                SnapshotRejectionV1(
+                    snapshot_id=snapshot_id,
+                    error_code=type(error).__name__,
+                    detail=str(error) or type(error).__name__,
+                )
+            )
+            return None
+
+    if active_snapshot_id is not None:
+        active = attempt(active_snapshot_id)
+        if active is not None and active.status in {
+            SnapshotStatus.BLESSED,
+            SnapshotStatus.DEGRADED,
+        }:
+            return ActiveSnapshotResolutionV1(
+                requested_snapshot_id=active_snapshot_id,
+                resolved_snapshot_id=active.snapshot_id,
+                resolved_status=active.status,
+                fallback_used=False,
+                failures=tuple(failures),
+            )
+
+    for candidate_id in prior_blessed_snapshot_ids:
+        candidate = attempt(candidate_id)
+        if candidate is None:
+            continue
+        if candidate.status is not SnapshotStatus.BLESSED:
+            failures.append(
+                SnapshotRejectionV1(
+                    snapshot_id=candidate_id,
+                    error_code="NOT_BLESSED",
+                    detail="fallback candidates must be published BLESSED snapshots",
+                )
+            )
+            continue
+        return ActiveSnapshotResolutionV1(
+            requested_snapshot_id=active_snapshot_id,
+            resolved_snapshot_id=candidate.snapshot_id,
+            resolved_status=candidate.status,
+            fallback_used=True,
+            failures=tuple(failures),
+        )
+
+    return ActiveSnapshotResolutionV1(
+        requested_snapshot_id=active_snapshot_id,
+        resolved_snapshot_id=None,
+        resolved_status=None,
+        fallback_used=False,
+        failures=tuple(failures),
+    )
+
+
 __all__ = [
+    "ActiveSnapshotResolutionV1",
     "ArtifactDigestMismatchError",
     "ArtifactLengthMismatchError",
     "ArtifactNotFoundError",
@@ -414,5 +503,7 @@ __all__ = [
     "SnapshotStore",
     "SnapshotStoreError",
     "SnapshotVerificationError",
+    "SnapshotRejectionV1",
     "VerifiedSnapshotV1",
+    "select_last_good",
 ]
