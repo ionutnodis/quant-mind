@@ -436,6 +436,33 @@ def test_claimed_v1_rejects_unexpected_noninternal_sqlite_objects(
         RunRepository(tmp_path).initialize()
 
 
+@pytest.mark.parametrize(
+    "object_ddl",
+    [
+        "CREATE TABLE sqliteXhostile_table (value TEXT)",
+        "CREATE INDEX sqliteXhostile_index ON book_heads(generation)",
+        """
+        CREATE TRIGGER sqliteXhostile_trigger
+        AFTER UPDATE ON snapshot_runs
+        BEGIN
+            DELETE FROM book_heads;
+        END
+        """,
+        "CREATE VIEW sqliteXhostile_view AS SELECT run_id FROM snapshot_runs",
+    ],
+)
+def test_claimed_v1_rejects_sqlite_like_disguised_persistent_objects(
+    tmp_path: Path, object_ddl: str
+) -> None:
+    # Break caught: SQL LIKE treating the underscore in sqlite_ as a wildcard.
+    repository = _repository(tmp_path)
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute(object_ddl)
+
+    with pytest.raises(RunDatabaseError):
+        RunRepository(tmp_path).initialize()
+
+
 def test_book_generation_is_monotonic_and_same_generation_is_immutable(
     tmp_path: Path,
 ) -> None:
@@ -1375,6 +1402,62 @@ def test_constraint_bypassed_run_lifecycle_corruption_fails_typed(
         repository.get(run.run_id)
 
 
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "book_only",
+        "generation_only",
+        "cut_only",
+        "book_and_generation",
+        "book_and_cut",
+        "generation_and_cut",
+        "negative_generation",
+        "missing_expected_snapshot",
+        "zero_expected_pointer",
+    ],
+)
+def test_constraint_bypassed_run_identity_tuples_fail_typed(
+    tmp_path: Path, corruption: str
+) -> None:
+    # Break caught: RunRecordV1 accepting tuple states forbidden by the v1 migration.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    run = repository.create_or_join(
+        _new_run(book_id=None, client_idempotency_key=corruption), now=T0
+    ).record
+    target_cut = "2026-08-20T08:00:00.000000Z"
+    assignments = {
+        "book_only": "book_id = 'book-alpha'",
+        "generation_only": "captured_generation = 1",
+        "cut_only": f"target_cut_utc = '{target_cut}'",
+        "book_and_generation": "book_id = 'book-alpha', captured_generation = 1",
+        "book_and_cut": (
+            f"book_id = 'book-alpha', target_cut_utc = '{target_cut}'"
+        ),
+        "generation_and_cut": (
+            f"captured_generation = 1, target_cut_utc = '{target_cut}'"
+        ),
+        "negative_generation": (
+            "book_id = 'book-alpha', captured_generation = -1, "
+            f"target_cut_utc = '{target_cut}'"
+        ),
+        "missing_expected_snapshot": "expected_active_pointer_version = 1",
+        "zero_expected_pointer": (
+            f"expected_active_snapshot_id = '{SNAPSHOT_A}', "
+            "expected_active_pointer_version = 0"
+        ),
+    }[corruption]
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            f"UPDATE snapshot_runs SET {assignments} WHERE run_id = ?",
+            (run.run_id,),
+        )
+
+    with pytest.raises(RunDatabaseError):
+        repository.get(run.run_id)
+
+
 def test_atomic_publication_commits_manifest_run_and_active_pointer_on_reopen(
     tmp_path: Path,
 ) -> None:
@@ -1621,6 +1704,73 @@ def test_cancel_intent_wins_publication_with_pre_cancel_expected_version(
     assert result.rejection_code is RunErrorCode.CANCELLED_BY_USER
     assert result.run.run_outcome is RunOutcome.CANCELLED
     assert repository.list_publications("book-alpha") == ()
+
+
+def test_cancel_intent_wins_when_publisher_clock_precedes_durable_cancel(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a T3 publisher clock sampled before cancellation committed at T4.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T2,
+    )
+    cancelled = _publishing_run(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6C1K",
+        snapshot_id=SNAPSHOT_B,
+    )
+    repository.request_cancel(cancelled.run_id, now=T4)
+
+    result = repository.commit_publication(
+        cancelled.run_id,
+        _publication(SNAPSHOT_B, generation=1),
+        expected_version=cancelled.version,
+        now=T3,
+    )
+
+    assert result.published is False
+    assert result.rejection_code is RunErrorCode.CANCELLED_BY_USER
+    assert result.run.run_outcome is RunOutcome.CANCELLED
+    assert result.run.cancel_requested_at_utc == T4
+    assert result.run.finished_at_utc == T4
+    assert result.run.updated_at_utc == T4
+    assert repository.get_active("book-alpha").snapshot_id == SNAPSHOT_A
+    assert [row.snapshot_id for row in repository.list_publications("book-alpha")] == [
+        SNAPSHOT_A
+    ]
+
+    reopened = RunRepository(tmp_path)
+    assert reopened.get(cancelled.run_id) == result.run
+    assert reopened.get_active("book-alpha").snapshot_id == SNAPSHOT_A
+    assert [row.snapshot_id for row in reopened.list_publications("book-alpha")] == [
+        SNAPSHOT_A
+    ]
+
+
+def test_non_cancelled_publication_still_rejects_stale_caller_clock(
+    tmp_path: Path,
+) -> None:
+    # Break caught: cancellation clock handling weakening ordinary publication monotonicity.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    run = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+
+    with pytest.raises(RunDatabaseError):
+        repository.commit_publication(
+            run.run_id,
+            _publication(SNAPSHOT_A, generation=1),
+            expected_version=run.version,
+            now=T1,
+        )
+
+    assert repository.get(run.run_id) == run
+    assert repository.list_publications("book-alpha") == ()
+    assert repository.get_active("book-alpha") is None
 
 
 def test_generic_failure_refuses_cancelled_by_user_code_and_sql_requires_intent(

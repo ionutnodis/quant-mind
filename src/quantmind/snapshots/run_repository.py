@@ -513,7 +513,7 @@ class RunRecordV1(FrozenContractBase):
     request_fingerprint: str
     client_idempotency_key_digest: str | None
     book_id: str | None
-    captured_generation: int | None
+    captured_generation: int | None = Field(ge=0)
     expected_active_snapshot_id: str | None
     expected_active_pointer_version: int = Field(ge=0)
     target_cut_utc: datetime | None
@@ -562,6 +562,18 @@ class RunRecordV1(FrozenContractBase):
 
     @model_validator(mode="after")
     def _lifecycle_is_coherent(self) -> "RunRecordV1":
+        book_fields_present = (
+            self.book_id is not None,
+            self.captured_generation is not None,
+            self.target_cut_utc is not None,
+        )
+        if any(book_fields_present) and not all(book_fields_present):
+            raise ValueError("durable book identity tuple is incomplete")
+        if self.expected_active_snapshot_id is None:
+            if self.expected_active_pointer_version != 0:
+                raise ValueError("missing active snapshot requires pointer version zero")
+        elif self.expected_active_pointer_version < 1:
+            raise ValueError("expected active snapshot requires a positive pointer version")
         if self.updated_at_utc < self.requested_at_utc:
             raise ValueError("run update cannot precede its request")
         for value in (
@@ -958,7 +970,7 @@ class RunRepository:
                 """
                 SELECT type, name, tbl_name, sql
                 FROM sqlite_master
-                WHERE name NOT LIKE 'sqlite_%'
+                WHERE lower(substr(name, 1, 7)) <> 'sqlite_'
                 ORDER BY type, name
                 """
             ).fetchall()
@@ -988,7 +1000,8 @@ class RunRepository:
             for row in connection.execute(
                 """
                 SELECT name FROM sqlite_master
-                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                WHERE type = 'table'
+                  AND lower(substr(name, 1, 7)) <> 'sqlite_'
                 """
             ).fetchall()
         }
@@ -1809,13 +1822,17 @@ class RunRepository:
                 )
             if outcome is not RunOutcome.RUNNING:
                 raise TerminalRunMutationError("terminal run records are immutable")
-            _require_monotonic_update(row, now_text)
             if row["cancel_requested_at_utc"] is not None:
+                terminal_time_text = max(
+                    now_text,
+                    row["updated_at_utc"],
+                    row["cancel_requested_at_utc"],
+                )
                 self._terminalize_publication_rejection(
                     connection,
                     run_id=run_id,
                     code=RunErrorCode.CANCELLED_BY_USER,
-                    now_text=now_text,
+                    now_text=terminal_time_text,
                 )
                 connection.commit()
                 committed = True
@@ -1825,6 +1842,7 @@ class RunRepository:
                     already_published=False,
                     rejection_code=RunErrorCode.CANCELLED_BY_USER,
                 )
+            _require_monotonic_update(row, now_text)
             if row["version"] != expected_version:
                 raise StaleRunVersionError("run version does not match durable state")
             if RunStage(row["run_stage"]) is not RunStage.PUBLISHING:
