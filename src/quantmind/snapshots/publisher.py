@@ -570,17 +570,52 @@ class SnapshotPublisher:
                 )
 
     @staticmethod
-    def _catalog_result(result: PublicationResultV1) -> SnapshotPublisherResultV1:
+    def _revalidate_publication_result(
+        result: PublicationResultV1,
+    ) -> PublicationResultV1:
         if not isinstance(result, PublicationResultV1):
             raise TypeError("repository must return PublicationResultV1")
-        result = PublicationResultV1.model_validate(
+        return PublicationResultV1.model_validate(
             result.model_dump(mode="python", warnings=False)
         )
+
+    @staticmethod
+    def _catalog_result(result: PublicationResultV1) -> SnapshotPublisherResultV1:
+        result = SnapshotPublisher._revalidate_publication_result(result)
         return SnapshotPublisherResultV1(
             result_code=PublisherResultCode.CATALOG_RESULT,
             run=result.run,
             publication_result=result,
         )
+
+    def _resolve_publication_result(
+        self,
+        run_id: str,
+        *,
+        already_published: bool,
+    ) -> PublicationResultV1:
+        injected = self._revalidate_publication_result(
+            self._repository.resolve_publication_result(
+                run_id,
+                already_published=already_published,
+            )
+        )
+        resolver = getattr(type(self._repository), "resolve_publication_result")
+        if resolver is RunRepository.resolve_publication_result:
+            return injected
+
+        base = self._revalidate_publication_result(
+            RunRepository.resolve_publication_result(
+                self._repository,
+                run_id,
+                already_published=already_published,
+            )
+        )
+        if injected != base:
+            raise RunDatabaseError(
+                "overridden resolver differs from base durable truth and verified manifest"
+            )
+        return base
 
     def _terminalize_failure(
         self,
@@ -759,7 +794,7 @@ class SnapshotPublisher:
             )
         self._inspect_existing_candidate(expected_manifest)
         return self._catalog_result(
-            self._repository.resolve_publication_result(
+            self._resolve_publication_result(
                 run.run_id,
                 already_published=False,
             )
@@ -810,17 +845,16 @@ class SnapshotPublisher:
         expected_version: int,
     ) -> SnapshotPublisherResultV1:
         before_commit = self._repository.get(run_id)
-        already_published = before_commit.run_outcome is RunOutcome.SUCCEEDED
         commit_time = max(self._now(), before_commit.updated_at_utc)
         self._inject(PublisherFaultStage.BEFORE_REPOSITORY_COMMIT)
         try:
-            # The mutation return is deliberately not a trust boundary. Resolve the
-            # committed attempt independently from one durable read transaction below.
-            self._repository.commit_publication(
-                run_id,
-                publication,
-                expected_version=expected_version,
-                now=commit_time,
+            committed = self._revalidate_publication_result(
+                self._repository.commit_publication(
+                    run_id,
+                    publication,
+                    expected_version=expected_version,
+                    now=commit_time,
+                )
             )
         except TerminalRunMutationError:
             durable = self._repository.get(run_id)
@@ -831,9 +865,9 @@ class SnapshotPublisher:
                 return self._terminal_result(durable)
             raise
         self._inject(PublisherFaultStage.AFTER_REPOSITORY_COMMIT)
-        result = self._repository.resolve_publication_result(
+        result = self._resolve_publication_result(
             run_id,
-            already_published=already_published,
+            already_published=committed.already_published,
         )
         if result.publication is not None and (
             self._publication_projection(result.publication) != publication

@@ -1416,6 +1416,115 @@ def test_resolve_publication_result_is_one_bounded_read_without_history_scan(
         reopened.resolve_publication_result(candidate.run_id, already_published=1)
 
 
+def test_publication_result_resolution_has_constant_valid_chain_work(
+    tmp_path: Path,
+) -> None:
+    costs: dict[int, tuple[int, int]] = {}
+    for publication_count in (10, 100, 1_000):
+        repository = _TracingVmRunRepository(
+            tmp_path / f"chain-{publication_count}"
+        )
+        repository.initialize()
+        _snapshot_ids, run_ids = _seed_publication_chain(
+            repository, publication_count
+        )
+        repository.statements.clear()
+        repository.reset_vm_callbacks()
+
+        result = repository.resolve_publication_result(
+            run_ids[-1], already_published=True
+        )
+
+        selects = tuple(
+            statement
+            for statement in repository.statements
+            if statement.lstrip().upper().startswith("SELECT")
+        )
+        assert result.run.run_id == run_ids[-1]
+        costs[publication_count] = (repository.vm_callbacks, len(selects))
+
+    vm_callbacks = tuple(cost[0] for cost in costs.values())
+    query_counts = tuple(cost[1] for cost in costs.values())
+    assert query_counts == (15, 15, 15)
+    assert max(vm_callbacks) <= 2
+    assert max(vm_callbacks) <= min(vm_callbacks) + 1
+
+
+@pytest.mark.parametrize(
+    "reserved_code",
+    [
+        RunErrorCode.CANCELLED_BY_USER,
+        RunErrorCode.STALE_BOOK_GENERATION,
+        RunErrorCode.STALE_ACTIVE_POINTER,
+    ],
+)
+def test_generic_failure_api_cannot_mint_publication_owned_evidence(
+    tmp_path: Path,
+    reserved_code: RunErrorCode,
+) -> None:
+    repository = _repository(tmp_path)
+    run = repository.create_or_join(
+        _new_run(book_id=None, client_idempotency_key=reserved_code.value),
+        now=T0,
+    ).record
+
+    with pytest.raises(ValueError, match="publication|cancellation"):
+        RunFailureV1(code=reserved_code)
+    forged = RunFailureV1.model_construct(code=reserved_code)
+    with pytest.raises(ValueError, match="publication|cancellation"):
+        repository.mark_failed(
+            run.run_id,
+            forged,
+            expected_version=run.version,
+            now=T1,
+        )
+
+
+@pytest.mark.parametrize("head_advanced", [False, True])
+def test_stale_generation_resolution_requires_a_newer_current_head(
+    tmp_path: Path,
+    head_advanced: bool,
+) -> None:
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    run = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    terminal = repository.mark_failed(
+        run.run_id,
+        RunFailureV1(code=RunErrorCode.WORKER_FAILED),
+        expected_version=run.version,
+        now=T3,
+    )
+    _execute_without_named_triggers(
+        repository,
+        _TERMINAL_RUN_UPDATE_BYPASS,
+        "UPDATE snapshot_runs SET error_code = ?, error_message = ? WHERE run_id = ?",
+        (
+            RunErrorCode.STALE_BOOK_GENERATION.value,
+            "canonical book generation changed before publication",
+            terminal.run_id,
+        ),
+    )
+    if head_advanced:
+        repository.advance_book_head("book-alpha", 2, BOOK_REF_2, now=T4)
+
+    if head_advanced:
+        assert (
+            repository.get(run.run_id).error_code
+            is RunErrorCode.STALE_BOOK_GENERATION
+        )
+        resolved = repository.resolve_publication_result(
+            run.run_id, already_published=False
+        )
+        assert resolved.rejection_code is RunErrorCode.STALE_BOOK_GENERATION
+    else:
+        with pytest.raises(RunDatabaseError, match="generation"):
+            repository.get(run.run_id)
+        with pytest.raises(RunDatabaseError, match="generation"):
+            repository.resolve_publication_result(
+                run.run_id, already_published=False
+            )
+
+
 def test_resolve_publication_result_refuses_a_non_catalog_run_with_typed_error(
     tmp_path: Path,
 ) -> None:
@@ -2008,6 +2117,12 @@ def test_all_run_error_codes_round_trip_and_messages_are_safe(tmp_path: Path) ->
     repository = _repository(tmp_path)
 
     for index, code in enumerate(RunErrorCode):
+        if code in {
+            RunErrorCode.STALE_BOOK_GENERATION,
+            RunErrorCode.STALE_ACTIVE_POINTER,
+        }:
+            # Atomic commit_publication rejection tests own these two codes.
+            continue
         run = repository.create_or_join(
             _new_run(
                 run_id=f"run_{index:026d}",
@@ -3622,6 +3737,43 @@ def test_repeated_publication_is_idempotent_without_pointer_or_sequence_advance(
     assert repeated.already_published is True
     assert len(repository.list_publications("book-alpha")) == 1
     assert repository.get_active("book-alpha").pointer_version == 1
+
+
+def test_concurrent_publication_returns_one_commit_and_one_idempotent_flag(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    run = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    publication = _publication(SNAPSHOT_A, generation=1)
+    barrier = threading.Barrier(2)
+    results: list[PublicationResultV1] = []
+    errors: list[BaseException] = []
+
+    def commit() -> None:
+        try:
+            barrier.wait()
+            results.append(
+                repository.commit_publication(
+                    run.run_id,
+                    publication,
+                    expected_version=run.version,
+                    now=T3,
+                )
+            )
+        except BaseException as error:  # pragma: no cover - asserted below
+            errors.append(error)
+
+    threads = [threading.Thread(target=commit) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert sorted(result.already_published for result in results) == [False, True]
+    assert all(result.published for result in results)
+    assert len(repository.list_publications("book-alpha")) == 1
 
 
 @pytest.mark.parametrize(

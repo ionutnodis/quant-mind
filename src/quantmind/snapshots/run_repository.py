@@ -543,11 +543,17 @@ class RunFailureV1(FrozenContractBase):
 
     @field_validator("code")
     @classmethod
-    def _generic_failure_cannot_claim_cancellation(
+    def _generic_failure_cannot_claim_reserved_catalog_evidence(
         cls, value: RunErrorCode
     ) -> RunErrorCode:
-        if value is RunErrorCode.CANCELLED_BY_USER:
-            raise ValueError("CANCELLED_BY_USER requires durable cancellation acknowledgement")
+        if value in _PUBLICATION_REJECTION_CODES:
+            if value is RunErrorCode.CANCELLED_BY_USER:
+                raise ValueError(
+                    "CANCELLED_BY_USER requires durable cancellation acknowledgement"
+                )
+            raise ValueError(
+                f"{value.value} is reserved for atomic publication rejection"
+            )
         return value
 
 
@@ -2286,6 +2292,13 @@ class RunRepository:
                 record.captured_generation > head.generation
             ):
                 raise RunDatabaseError("durable run generation exceeds its book head")
+            if (
+                record.error_code is RunErrorCode.STALE_BOOK_GENERATION
+                and head.generation <= record.captured_generation
+            ):
+                raise RunDatabaseError(
+                    "stale book generation lacks a newer canonical head"
+                )
 
     @staticmethod
     def _expected_publication_for_run(
@@ -3196,6 +3209,120 @@ class RunRepository:
             "SELECT * FROM snapshot_manifests WHERE run_id = ?", (run_id,)
         ).fetchone()
 
+    @staticmethod
+    def _validate_publication_result_neighborhood(
+        connection: sqlite3.Connection,
+        run: RunRecordV1,
+        publication: ManifestPublicationRecordV1 | None,
+        pointer: _ActivePointerRegisterV1,
+    ) -> None:
+        """Validate the fixed indexed neighborhood needed by one result read.
+
+        Full publication ancestry remains an audit/startup concern. This boundary
+        proves the target owner tuple, its captured predecessor edge, any stale
+        invalidating edge, and the current pointer tail without walking history.
+        """
+
+        if run.book_id is None or run.captured_generation is None:
+            raise RunDatabaseError("publication result has no durable book identity")
+        head_row = connection.execute(
+            "SELECT * FROM book_heads WHERE book_id = ?", (run.book_id,)
+        ).fetchone()
+        if head_row is None:
+            raise RunDatabaseError("durable run has no canonical book head")
+        head = RunRepository._book_head_from_row(head_row)
+        if run.captured_generation > head.generation:
+            raise RunDatabaseError("durable run generation exceeds its book head")
+        if (
+            run.error_code is RunErrorCode.STALE_BOOK_GENERATION
+            and head.generation <= run.captured_generation
+        ):
+            raise RunDatabaseError(
+                "stale book generation lacks a newer canonical head"
+            )
+
+        if run.run_outcome is RunOutcome.SUCCEEDED:
+            if publication is None:
+                raise RunDatabaseError("successful book run has no publication")
+            RunRepository._validate_publication_owner_tuple(publication, run)
+        elif publication is not None:
+            raise RunDatabaseError("non-successful run unexpectedly owns a publication")
+
+        expected_publication: ManifestPublicationRecordV1 | None = None
+        if run.expected_active_snapshot_id is not None:
+            expected_row = connection.execute(
+                """
+                SELECT * FROM snapshot_manifests
+                WHERE book_id = ? AND snapshot_id = ?
+                """,
+                (run.book_id, run.expected_active_snapshot_id),
+            ).fetchone()
+            if expected_row is None:
+                raise RunDatabaseError("expected active publication is missing")
+            expected_publication = RunRepository._publication_from_row(expected_row)
+            owner_row = connection.execute(
+                "SELECT * FROM snapshot_runs WHERE run_id = ?",
+                (expected_publication.run_id,),
+            ).fetchone()
+            if owner_row is None:
+                raise RunDatabaseError("publication owner run is missing")
+            expected_owner = RunRepository._run_from_row(owner_row)
+            if (
+                expected_owner.book_id != run.book_id
+                or expected_owner.captured_generation is None
+                or expected_owner.captured_generation > head.generation
+            ):
+                raise RunDatabaseError("expected publication owner is outside the book")
+            RunRepository._validate_publication_owner_tuple(
+                expected_publication, expected_owner
+            )
+            if (
+                expected_publication.book_generation > run.captured_generation
+                or expected_publication.published_at_utc > run.requested_at_utc
+            ):
+                raise RunDatabaseError("expected active publication postdates its run")
+            if (
+                publication is not None
+                and expected_publication.publication_sequence
+                >= publication.publication_sequence
+            ):
+                raise RunDatabaseError(
+                    "expected-active publication sequence is not historical"
+                )
+
+        expected_version = run.expected_active_pointer_version
+        if expected_version == 0:
+            if run.expected_active_snapshot_id is not None:
+                raise RunDatabaseError("virgin pointer capture is malformed")
+        else:
+            captured_pointer = RunRepository._pointer_transition_at_version(
+                connection,
+                run.book_id,
+                expected_version,
+            )
+            if (
+                captured_pointer.selected_snapshot_id
+                != run.expected_active_snapshot_id
+                or captured_pointer.transitioned_at_utc > run.requested_at_utc
+            ):
+                raise RunDatabaseError("run pointer capture is not causal")
+
+        if run.error_code is RunErrorCode.STALE_ACTIVE_POINTER:
+            invalidating = RunRepository._pointer_transition_at_version(
+                connection,
+                run.book_id,
+                expected_version + 1,
+            )
+            if (
+                invalidating.previous_snapshot_id
+                != run.expected_active_snapshot_id
+                or run.finished_at_utc is None
+                or run.finished_at_utc < invalidating.transitioned_at_utc
+            ):
+                raise RunDatabaseError("stale pointer terminal evidence is not causal")
+
+        RunRepository._validate_pointer_register_relations(connection, pointer)
+
     def _publication_result_from_connection(
         self,
         connection: sqlite3.Connection,
@@ -3215,24 +3342,24 @@ class RunRepository:
             if pointer_row is None:
                 raise RunDatabaseError("book head has no active pointer register")
         run = self._run_from_row(run_row)
-        self._validate_run_relations(connection, run)
         publication_record = (
             None
             if publication_row is None
             else self._publication_from_row(publication_row)
         )
-        if publication_record is not None:
-            self._validate_publication_relations(connection, publication_record)
         pointer = (
             None
             if pointer_row is None
             else self._pointer_register_from_row(pointer_row)
         )
         if pointer is not None:
-            self._validate_pointer_register_relations(connection, pointer)
+            self._validate_publication_result_neighborhood(
+                connection,
+                run,
+                publication_record,
+                pointer,
+            )
         active = None if pointer is None else pointer.active_snapshot()
-        if active is not None:
-            self._validate_active_relations(connection, active)
         rejection_code = (
             run.error_code if run.error_code in _PUBLICATION_REJECTION_CODES else None
         )
@@ -3264,7 +3391,8 @@ class RunRepository:
         if type(already_published) is not bool:
             raise TypeError("already_published must be a boolean")
         with self._read_connection() as connection:
-            return self._publication_result_from_connection(
+            return RunRepository._publication_result_from_connection(
+                self,
                 connection,
                 run_id,
                 already_published=already_published,
