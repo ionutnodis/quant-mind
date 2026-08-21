@@ -877,6 +877,15 @@ class SnapshotPublisher:
             )
         except (TypeError, ValueError):
             return self._terminalize_failure(run_id, RunErrorCode.SERIALIZATION_FAILED)
+        if (
+            stored.snapshot_id != manifest.snapshot_id
+            or stored.manifest != manifest
+            or stored.status is not manifest.body.snapshot_status
+        ):
+            return self._terminalize_failure(
+                run_id,
+                RunErrorCode.SERIALIZATION_FAILED,
+            )
 
         self._inject(PublisherFaultStage.AFTER_MANIFEST_DURABLE)
         try:
@@ -892,9 +901,9 @@ class SnapshotPublisher:
         except (TypeError, ValueError):
             return self._terminalize_failure(run_id, RunErrorCode.SERIALIZATION_FAILED)
         if (
-            verified.snapshot_id != stored.snapshot_id
-            or verified.status is not stored.status
-            or verified.manifest != stored.manifest
+            verified.snapshot_id != manifest.snapshot_id
+            or verified.status is not manifest.body.snapshot_status
+            or verified.manifest != manifest
         ):
             return self._terminalize_failure(
                 run_id,

@@ -581,6 +581,52 @@ def test_publisher_revalidates_store_results_before_catalog_mutation(
     assert repository.get_active("book-alpha") is None
 
 
+def test_publisher_refuses_valid_manifest_substitution_from_store(
+    tmp_path: Path,
+) -> None:
+    # Break caught: trusting an internally valid StoredManifest returned for a different
+    # manifest than the publisher's locally created candidate identity.
+    substituted_manifest = None
+
+    class ValidManifestSubstitutingStore(SnapshotStore):
+        def put_verified_manifest(self, manifest):
+            nonlocal substituted_manifest
+            substituted_manifest = create_manifest(
+                manifest.body.model_copy(
+                    update={"application_build_id": "hostile-store-substitution"}
+                )
+            )
+            assert substituted_manifest.snapshot_id != manifest.snapshot_id
+            return super().put_verified_manifest(substituted_manifest)
+
+    module, repository, _store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B4A",
+    )
+    local_manifest = create_manifest(candidate.manifest_body)
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=ValidManifestSubstitutingStore(tmp_path),
+        clock=lambda: T3,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert substituted_manifest is not None
+    assert SnapshotStore(tmp_path).verify_snapshot(
+        substituted_manifest.snapshot_id
+    ).manifest == substituted_manifest
+    assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
+    assert result.publication_result is None
+    assert result.run.run_outcome is RunOutcome.FAILED
+    assert result.run.error_code is RunErrorCode.SERIALIZATION_FAILED
+    assert result.run.candidate_snapshot_id is None
+    assert result.run.published_snapshot_id is None
+    assert result.run.candidate_snapshot_id != local_manifest.snapshot_id
+    assert repository.get(run.run_id) == result.run
+    assert repository.list_publications("book-alpha") == ()
+    assert repository.get_active("book-alpha") is None
+
+
 @pytest.mark.parametrize("forgery", ["request_fingerprint", "analytical_config"])
 def test_publisher_binds_controller_request_and_config_identity(
     tmp_path: Path,
