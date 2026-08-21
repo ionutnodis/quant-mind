@@ -143,8 +143,27 @@ class SnapshotStore:
         *,
         fault_injector: FaultInjector | None = None,
     ) -> None:
-        self.root = Path(root)
+        configured_root = Path(root).resolve(strict=False)
+        self._configured_root = configured_root
+        self._configured_fault_injector = fault_injector
+        self.root = configured_root
         self._fault_injector = fault_injector
+
+    @staticmethod
+    def _trusted_construction_config(
+        store: SnapshotStore,
+    ) -> tuple[Path, FaultInjector | None]:
+        """Read base-constructor inputs without subclass dispatch."""
+
+        try:
+            state = object.__getattribute__(store, "__dict__")
+            root = Path(state["_configured_root"]).resolve(strict=False)
+            fault_injector = state["_configured_fault_injector"]
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(
+                "store is missing trusted construction configuration"
+            ) from error
+        return root, fault_injector
 
     def _inject(self, stage: str, path: Path) -> None:
         if self._fault_injector is not None:

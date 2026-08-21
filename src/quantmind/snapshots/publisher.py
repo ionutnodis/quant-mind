@@ -436,15 +436,22 @@ class SnapshotPublisher:
             raise TypeError("store must be SnapshotStore")
         if not callable(clock):
             raise TypeError("clock must be callable")
-        self._repository = repository
-        self._catalog_repository = RunRepository(
-            repository.root,
-            fault_injector=RunRepository.fault_injector.__get__(
-                repository,
-                RunRepository,
-            ),
+        repository_root, repository_fault_injector = (
+            RunRepository._trusted_construction_config(repository)
         )
-        self._store = store
+        store_root, store_fault_injector = SnapshotStore._trusted_construction_config(
+            store
+        )
+        if repository_root != store_root:
+            raise ValueError("repository and store roots must match")
+        self._repository = RunRepository(
+            repository_root,
+            fault_injector=repository_fault_injector,
+        )
+        self._store = SnapshotStore(
+            store_root,
+            fault_injector=store_fault_injector,
+        )
         self._clock = clock
         self._fault_injector = fault_injector
 
@@ -603,7 +610,7 @@ class SnapshotPublisher:
     ) -> PublicationResultV1:
         return self._revalidate_publication_result(
             RunRepository.resolve_publication_result(
-                self._catalog_repository,
+                self._repository,
                 run_id,
                 already_published=already_published,
             )
@@ -836,13 +843,13 @@ class SnapshotPublisher:
         publication: ManifestPublicationV1,
         expected_version: int,
     ) -> SnapshotPublisherResultV1:
-        before_commit = RunRepository.get(self._catalog_repository, run_id)
+        before_commit = RunRepository.get(self._repository, run_id)
         commit_time = max(self._now(), before_commit.updated_at_utc)
         self._inject(PublisherFaultStage.BEFORE_REPOSITORY_COMMIT)
         try:
             committed = self._revalidate_publication_result(
                 RunRepository.commit_publication(
-                    self._catalog_repository,
+                    self._repository,
                     run_id,
                     publication,
                     expected_version=expected_version,
@@ -850,7 +857,7 @@ class SnapshotPublisher:
                 )
             )
         except TerminalRunMutationError:
-            durable = RunRepository.get(self._catalog_repository, run_id)
+            durable = RunRepository.get(self._repository, run_id)
             if durable.run_outcome in {
                 RunOutcome.FAILED,
                 RunOutcome.CANCELLED,

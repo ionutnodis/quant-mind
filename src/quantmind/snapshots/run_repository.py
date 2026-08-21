@@ -1186,15 +1186,34 @@ class RunRepository:
         *,
         fault_injector: RepositoryFaultInjector | None = None,
     ) -> None:
-        self.root = Path(root)
-        self.database_path = self.root / "snapshots" / "runs.sqlite3"
+        configured_root = Path(root).resolve(strict=False)
+        self._configured_root = configured_root
+        self._configured_fault_injector = fault_injector
+        self.root = configured_root
+        self.database_path = configured_root / "snapshots" / "runs.sqlite3"
         self._fault_injector = fault_injector
 
-    @property
-    def fault_injector(self) -> RepositoryFaultInjector | None:
-        """Expose the construction-time fault seam without permitting reassignment."""
+    @staticmethod
+    def _trusted_construction_config(
+        repository: RunRepository,
+    ) -> tuple[Path, RepositoryFaultInjector | None]:
+        """Read base-constructor inputs without subclass dispatch."""
 
-        return self._fault_injector
+        try:
+            state = object.__getattribute__(repository, "__dict__")
+            root = Path(state["_configured_root"]).resolve(strict=False)
+            database_path = Path(state["database_path"]).resolve(strict=False)
+            fault_injector = state["_configured_fault_injector"]
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(
+                "repository is missing trusted construction configuration"
+            ) from error
+        expected_database_path = root / "snapshots" / "runs.sqlite3"
+        if database_path != expected_database_path:
+            raise ValueError(
+                "repository database path differs from its configured root"
+            )
+        return root, fault_injector
 
     def _inject(self, stage: str) -> None:
         if self._fault_injector is not None:
@@ -2034,6 +2053,7 @@ class RunRepository:
         recovery_version_clause = (
             "" if pointer_version is None else " AND event.expected_pointer_version = ?"
         )
+        limit_clause = "" if pointer_version is None else " LIMIT 2"
         parameters: tuple[object, ...]
         if pointer_version is None:
             parameters = (book_id, book_id)
@@ -2066,6 +2086,7 @@ class RunRepository:
                 WHERE event.book_id = ?
                   AND event.resolution_action IN ('REPOINTED', 'REMOVED')
                   {recovery_version_clause}
+                {limit_clause}
                 """,
                 parameters,
             ).fetchall()
@@ -2300,13 +2321,47 @@ class RunRepository:
                 record.captured_generation > head.generation
             ):
                 raise RunDatabaseError("durable run generation exceeds its book head")
-            if (
-                record.error_code is RunErrorCode.STALE_BOOK_GENERATION
-                and head.generation <= record.captured_generation
-            ):
-                raise RunDatabaseError(
-                    "stale book generation lacks a newer canonical head"
-                )
+            RunRepository._validate_stale_generation_causality(record, head)
+
+    @staticmethod
+    def _validate_stale_generation_causality(
+        record: RunRecordV1,
+        head: BookHeadV1,
+    ) -> None:
+        """Validate stale-generation evidence available in the v1 schema.
+
+        ``book_heads`` retains only the current head, not transition history. Its
+        timestamp therefore supplies only a necessary retained-head condition; v1
+        cannot attest the exact transition that first invalidated the run.
+        """
+
+        if record.error_code is not RunErrorCode.STALE_BOOK_GENERATION:
+            return
+        if (
+            record.captured_generation is None
+            or head.generation <= record.captured_generation
+        ):
+            raise RunDatabaseError(
+                "stale book generation lacks a newer canonical head"
+            )
+        if head.updated_at_utc < record.requested_at_utc:
+            raise RunDatabaseError(
+                "stale book generation head predates its run request"
+            )
+
+    @staticmethod
+    def _validate_stale_pointer_causality(
+        record: RunRecordV1,
+        invalidating: _PointerTransitionV1,
+    ) -> None:
+        if (
+            invalidating.previous_snapshot_id
+            != record.expected_active_snapshot_id
+            or invalidating.transitioned_at_utc < record.requested_at_utc
+            or record.finished_at_utc is None
+            or record.finished_at_utc < invalidating.transitioned_at_utc
+        ):
+            raise RunDatabaseError("stale pointer terminal evidence is not causal")
 
     @staticmethod
     def _expected_publication_for_run(
@@ -2419,13 +2474,10 @@ class RunRepository:
                     record.book_id,
                     expected_version + 1,
                 )
-                if (
-                    invalidating.previous_snapshot_id
-                    != record.expected_active_snapshot_id
-                    or record.finished_at_utc is None
-                    or record.finished_at_utc < invalidating.transitioned_at_utc
-                ):
-                    raise RunDatabaseError("stale pointer terminal evidence is not causal")
+                RunRepository._validate_stale_pointer_causality(
+                    record,
+                    invalidating,
+                )
 
     @staticmethod
     def _validate_publication_relations(
@@ -3241,13 +3293,7 @@ class RunRepository:
         head = RunRepository._book_head_from_row(head_row)
         if run.captured_generation > head.generation:
             raise RunDatabaseError("durable run generation exceeds its book head")
-        if (
-            run.error_code is RunErrorCode.STALE_BOOK_GENERATION
-            and head.generation <= run.captured_generation
-        ):
-            raise RunDatabaseError(
-                "stale book generation lacks a newer canonical head"
-            )
+        RunRepository._validate_stale_generation_causality(run, head)
 
         if run.run_outcome is RunOutcome.SUCCEEDED:
             if publication is None:
@@ -3360,13 +3406,7 @@ class RunRepository:
                 run.book_id,
                 expected_version + 1,
             )
-            if (
-                invalidating.previous_snapshot_id
-                != run.expected_active_snapshot_id
-                or run.finished_at_utc is None
-                or run.finished_at_utc < invalidating.transitioned_at_utc
-            ):
-                raise RunDatabaseError("stale pointer terminal evidence is not causal")
+            RunRepository._validate_stale_pointer_causality(run, invalidating)
 
         RunRepository._validate_pointer_register_relations(connection, pointer)
 

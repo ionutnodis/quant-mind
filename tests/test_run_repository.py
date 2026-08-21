@@ -575,6 +575,161 @@ def _seed_publication_chain(
     return snapshot_ids, run_ids
 
 
+def _publishing_run_with_identity_at(
+    repository: RunRepository,
+    *,
+    run_id: str,
+    snapshot_id: str,
+    request_fingerprint: str,
+    client_idempotency_key: str,
+    now: datetime,
+):
+    allocated = repository.create_or_join(
+        _new_run(
+            run_id=run_id,
+            request_fingerprint=request_fingerprint,
+            client_idempotency_key=client_idempotency_key,
+        ),
+        now=now,
+    ).record
+    return _publishing_run_at(
+        repository,
+        run_id=allocated.run_id,
+        snapshot_id=snapshot_id,
+        now=now,
+        record=allocated,
+    )
+
+
+def _stale_pointer_temporal_case(
+    repository: RunRepository,
+    *,
+    transition_kind: str,
+    requested_at: datetime,
+):
+    expected_version = {
+        "PUBLICATION": 0,
+        "REMOVED": 1,
+        "REPOINTED": 2,
+    }[transition_kind]
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    seed_snapshots = (SNAPSHOT_A, SNAPSHOT_B)[:expected_version]
+    for index, snapshot_id in enumerate(seed_snapshots):
+        seed = _publishing_run_with_identity_at(
+            repository,
+            run_id=f"run_01J5X5S8J5J8P7KQ4Y0T3C1{index}",
+            snapshot_id=snapshot_id,
+            request_fingerprint=f"{100 + index:064x}",
+            client_idempotency_key=f"temporal-seed-{index}",
+            now=T0,
+        )
+        repository.commit_publication(
+            seed.run_id,
+            _publication(snapshot_id, generation=1),
+            expected_version=seed.version,
+            now=T0,
+        )
+
+    if transition_kind == "PUBLICATION":
+        invalidator = _publishing_run_with_identity_at(
+            repository,
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3C1PA",
+            snapshot_id=SNAPSHOT_A,
+            request_fingerprint="c" * 64,
+            client_idempotency_key="temporal-invalidator",
+            now=T0,
+        )
+        repository.commit_publication(
+            invalidator.run_id,
+            _publication(SNAPSHOT_A, generation=1),
+            expected_version=invalidator.version,
+            now=T0,
+        )
+    elif transition_kind == "REMOVED":
+        recovered = repository.recover_active(
+            "book-alpha",
+            verify=lambda _snapshot_id: (_ for _ in ()).throw(
+                ValueError("corrupt")
+            ),
+            now=T0,
+        )
+        assert recovered.decision is ActiveRecoveryDecision.REMOVED
+    else:
+        def verify(snapshot_id: str) -> VerifiedSnapshotV1:
+            if snapshot_id == SNAPSHOT_B:
+                raise ValueError("corrupt active")
+            return _verified(snapshot_id)
+
+        recovered = repository.recover_active(
+            "book-alpha",
+            verify=verify,
+            now=T0,
+        )
+        assert recovered.decision is ActiveRecoveryDecision.REPOINTED
+
+    later_snapshot_id = "f" * 64
+    later = _publishing_run_with_identity_at(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3C1LT",
+        snapshot_id=later_snapshot_id,
+        request_fingerprint="e" * 64,
+        client_idempotency_key="temporal-later",
+        now=T2,
+    )
+    repository.commit_publication(
+        later.run_id,
+        _publication(later_snapshot_id, generation=1),
+        expected_version=later.version,
+        now=T2,
+    )
+
+    request_text = requested_at.isoformat(timespec="microseconds").replace(
+        "+00:00",
+        "Z",
+    )
+    stale_request = _new_run(
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3C1ST",
+        request_fingerprint="d" * 64,
+        client_idempotency_key=None,
+    )
+    stale_identity = RunRepository._idempotency_identity(
+        stale_request,
+        1,
+        None,
+    )
+    with sqlite3.connect(repository.database_path) as connection:
+        _insert_or_replace_run_from_existing(
+            connection,
+            later.run_id,
+            overrides={
+                "run_id": "run_01J5X5S8J5J8P7KQ4Y0T3C1ST",
+                "idempotency_identity": stale_identity,
+                "request_fingerprint": "d" * 64,
+                "client_idempotency_key_digest": None,
+                "expected_active_snapshot_id": {
+                    0: None,
+                    1: SNAPSHOT_A,
+                    2: SNAPSHOT_B,
+                }[expected_version],
+                "expected_active_pointer_version": expected_version,
+                "requested_at_utc": request_text,
+                "started_at_utc": request_text,
+                "updated_at_utc": "2026-08-20T08:03:00.000000Z",
+                "finished_at_utc": "2026-08-20T08:03:00.000000Z",
+                "run_stage": "PUBLISHING",
+                "run_outcome": "FAILED",
+                "cancel_requested_at_utc": None,
+                "candidate_snapshot_id": SNAPSHOT_C,
+                "published_snapshot_id": None,
+                "result_json": None,
+                "error_code": "STALE_ACTIVE_POINTER",
+                "error_message": "active snapshot pointer changed before publication",
+                "version": 1,
+            },
+        )
+    return "run_01J5X5S8J5J8P7KQ4Y0T3C1ST", expected_version
+
+
 def _publish_two_snapshot_chain(repository: RunRepository):
     repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
     first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
@@ -1495,6 +1650,175 @@ def test_publication_result_rejects_broken_captured_predecessor_edge(
             run_ids[3],
             already_published=True,
         )
+
+
+@pytest.mark.parametrize(
+    ("transition_kind", "expected_version"),
+    [
+        ("PUBLICATION", 0),
+        ("REMOVED", 1),
+        ("REPOINTED", 2),
+    ],
+)
+def test_stale_pointer_rejects_invalidation_before_run_request_across_boundaries(
+    tmp_path: Path,
+    transition_kind: str,
+    expected_version: int,
+) -> None:
+    # Break caught: a stale-pointer terminal claim whose alleged publication,
+    # removal, or repoint invalidation happened before the run captured its pointer.
+    repository = _repository(tmp_path)
+    run_id, captured_version = _stale_pointer_temporal_case(
+        repository,
+        transition_kind=transition_kind,
+        requested_at=T1,
+    )
+    assert captured_version == expected_version
+
+    with pytest.raises(RunDatabaseError, match="request|causal"):
+        repository.resolve_publication_result(
+            run_id,
+            already_published=False,
+        )
+    with pytest.raises(RunDatabaseError, match="request|causal"):
+        repository.get(run_id)
+    with pytest.raises(RunDatabaseError, match="request|causal"):
+        repository.audit_integrity()
+    with pytest.raises(RunDatabaseError, match="request|causal"):
+        RunRepository(tmp_path).initialize()
+
+
+@pytest.mark.parametrize("transition_kind", ["PUBLICATION", "REMOVED", "REPOINTED"])
+def test_stale_pointer_accepts_invalidation_equal_to_run_request(
+    tmp_path: Path,
+    transition_kind: str,
+) -> None:
+    # Protective boundary: an invalidating edge at the exact request timestamp is
+    # causal; only a strictly earlier edge is impossible.
+    repository = _repository(tmp_path)
+    run_id, _captured_version = _stale_pointer_temporal_case(
+        repository,
+        transition_kind=transition_kind,
+        requested_at=T0,
+    )
+
+    resolved = repository.resolve_publication_result(
+        run_id,
+        already_published=False,
+    )
+    assert resolved.rejection_code is RunErrorCode.STALE_ACTIVE_POINTER
+    assert repository.get(run_id) == resolved.run
+    repository.audit_integrity()
+    RunRepository(tmp_path).initialize()
+
+
+@pytest.mark.parametrize("head_time", [T0, T1])
+def test_stale_generation_head_clock_is_causal_across_all_boundaries(
+    tmp_path: Path,
+    head_time: datetime,
+) -> None:
+    # Break caught: current generation is the only retained head transition evidence,
+    # so a stale-generation claim cannot cite a newer head timestamped before request.
+    # Equality is valid; no head-transition history exists to prove an earlier edge.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    run = _publishing_run_at(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3C1GH",
+        snapshot_id=SNAPSHOT_A,
+        now=T1,
+    )
+    repository.advance_book_head("book-alpha", 2, BOOK_REF_2, now=T2)
+    rejected = repository.commit_publication(
+        run.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=run.version,
+        now=T3,
+    )
+    assert rejected.rejection_code is RunErrorCode.STALE_BOOK_GENERATION
+    head_time_text = head_time.isoformat(timespec="microseconds").replace(
+        "+00:00",
+        "Z",
+    )
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute(
+            """
+            UPDATE book_heads
+            SET updated_at_utc = ?
+            WHERE book_id = 'book-alpha' AND generation = 2
+            """,
+            (head_time_text,),
+        )
+
+    if head_time < rejected.run.requested_at_utc:
+        with pytest.raises(RunDatabaseError, match="head|request|causal"):
+            repository.resolve_publication_result(
+                rejected.run.run_id,
+                already_published=False,
+            )
+        with pytest.raises(RunDatabaseError, match="head|request|causal"):
+            repository.get(rejected.run.run_id)
+        with pytest.raises(RunDatabaseError, match="head|request|causal"):
+            repository.audit_integrity()
+        with pytest.raises(RunDatabaseError, match="head|request|causal"):
+            RunRepository(tmp_path).initialize()
+    else:
+        assert repository.resolve_publication_result(
+            rejected.run.run_id,
+            already_published=False,
+        ) == rejected
+        assert repository.get(rejected.run.run_id) == rejected.run
+        repository.audit_integrity()
+        RunRepository(tmp_path).initialize()
+
+
+def test_duplicate_transition_rejection_work_is_capped_across_corrupt_multiplicity(
+    tmp_path: Path,
+) -> None:
+    # Break caught: uniqueness validation materializing every duplicate transition row
+    # instead of stopping after the second row proves the version non-unique.
+    costs: dict[int, int] = {}
+    for duplicate_count in (10, 100, 1_000):
+        repository = _TracingVmRunRepository(
+            tmp_path / f"duplicate-transition-{duplicate_count}"
+        )
+        repository.initialize()
+        _snapshot_ids, run_ids = _seed_publication_chain(
+            repository,
+            duplicate_count + 6,
+        )
+        _execute_without_named_triggers(
+            repository,
+            _TERMINAL_RUN_ALLOCATION_UPDATE_BYPASS,
+            """
+            UPDATE snapshot_runs
+            SET expected_active_pointer_version = 3
+            WHERE expected_active_pointer_version >= 5
+            """,
+            (),
+        )
+        repository.reset_vm_callbacks()
+        repository.statements.clear()
+
+        with pytest.raises(
+            RunDatabaseError,
+            match="transition history is not unique",
+        ):
+            repository.resolve_publication_result(
+                run_ids[3],
+                already_published=True,
+            )
+        costs[duplicate_count] = repository.vm_callbacks
+        transition_queries = [
+            " ".join(statement.upper().split())
+            for statement in repository.statements
+            if "'PUBLICATION' AS TRANSITION_KIND" in statement.upper()
+            and "UNION ALL" in statement.upper()
+        ]
+        assert transition_queries
+        assert all("LIMIT 2" in statement for statement in transition_queries)
+
+    assert max(costs.values()) <= min(costs.values()) + 1, costs
 
 
 @pytest.mark.parametrize(
