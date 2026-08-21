@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import quantmind.snapshots.store as snapshot_store
 from quantmind.snapshots.contracts import (
     GateEvidenceV1,
     GateStatus,
@@ -452,6 +453,30 @@ def test_put_manifest_verifies_all_required_refs_before_durable_orphan_storage(t
 
     with pytest.raises(SnapshotVerificationError, match="required output role"):
         store.verify_snapshot(manifest.snapshot_id, required_output_roles=("TAIL",))
+
+
+def test_put_verified_manifest_returns_exact_durable_envelope_metadata(tmp_path):
+    # Break caught: the catalog publisher confusing the body-derived snapshot ID with
+    # the full canonical manifest-envelope digest, path, or byte length.
+    store = SnapshotStore(tmp_path)
+    manifest = _complete_manifest(store)
+    envelope = canonical_json_bytes(manifest)
+
+    stored = store.put_verified_manifest(manifest)
+
+    assert stored == snapshot_store.StoredManifestV1(
+        snapshot_id=manifest.snapshot_id,
+        manifest_relpath=(
+            "snapshots/manifests/analytical_snapshot_manifest_v1/"
+            f"{manifest.snapshot_id[:2]}/{manifest.snapshot_id}.json"
+        ),
+        envelope_sha256=hashlib.sha256(envelope).hexdigest(),
+        envelope_byte_length=len(envelope),
+        status=SnapshotStatus.BLESSED,
+        manifest=manifest,
+    )
+    assert stored.envelope_sha256 != stored.snapshot_id
+    assert store.read_verified_manifest(stored.snapshot_id) == stored.manifest
 
 
 def test_read_verified_manifest_fails_when_a_required_artifact_later_disappears(tmp_path):

@@ -12,6 +12,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final
 
+from pydantic import Field, model_validator
+
 from quantmind.snapshots.contracts import FrozenContractBase, SnapshotStatus, canonical_json_bytes
 from quantmind.snapshots.input_artifacts import (
     ArtifactRefV1,
@@ -70,6 +72,43 @@ class VerifiedSnapshotV1(FrozenContractBase):
     manifest: AnalyticalSnapshotManifestV1
 
 
+class StoredManifestV1(FrozenContractBase):
+    """Exact durable envelope metadata for the catalog publication boundary."""
+
+    snapshot_id: str
+    manifest_relpath: str
+    envelope_sha256: str
+    envelope_byte_length: int = Field(ge=0)
+    status: SnapshotStatus
+    manifest: AnalyticalSnapshotManifestV1
+
+    @model_validator(mode="after")
+    def _metadata_matches_canonical_envelope(self) -> "StoredManifestV1":
+        snapshot_id = _require_full_digest(self.snapshot_id, "snapshot ID")
+        envelope_digest = _require_full_digest(
+            self.envelope_sha256, "manifest envelope digest"
+        )
+        validated_manifest = parse_manifest(canonical_json_bytes(self.manifest))
+        expected_relpath = (
+            "snapshots/manifests/analytical_snapshot_manifest_v1/"
+            f"{snapshot_id[:2]}/{snapshot_id}.json"
+        )
+        envelope = canonical_json_bytes(validated_manifest)
+        if self.manifest_relpath != expected_relpath:
+            raise ValueError("manifest path does not bind the full snapshot identity")
+        if (
+            validated_manifest.snapshot_id != snapshot_id
+            or validated_manifest.body.snapshot_status is not self.status
+        ):
+            raise ValueError("stored manifest identity or status is inconsistent")
+        if (
+            hashlib.sha256(envelope).hexdigest() != envelope_digest
+            or len(envelope) != self.envelope_byte_length
+        ):
+            raise ValueError("stored manifest envelope metadata is inconsistent")
+        return self
+
+
 class SnapshotRejectionV1(FrozenContractBase):
     snapshot_id: str
     error_code: str
@@ -123,13 +162,17 @@ class SnapshotStore:
 
     def _manifest_path(self, snapshot_id: str) -> Path:
         snapshot_id = _require_full_digest(snapshot_id, "snapshot ID")
-        return (
-            self.root
-            / "snapshots"
-            / "manifests"
-            / "analytical_snapshot_manifest_v1"
-            / snapshot_id[:2]
-            / f"{snapshot_id}.json"
+        return self.root / self._manifest_relpath(snapshot_id)
+
+    @staticmethod
+    def _manifest_relpath(snapshot_id: str) -> Path:
+        snapshot_id = _require_full_digest(snapshot_id, "snapshot ID")
+        return Path(
+            "snapshots",
+            "manifests",
+            "analytical_snapshot_manifest_v1",
+            snapshot_id[:2],
+            f"{snapshot_id}.json",
         )
 
     @staticmethod
@@ -371,7 +414,9 @@ class SnapshotStore:
         for reference in self._all_references(manifest):
             self.read_verified_artifact(reference)
 
-    def put_manifest(self, manifest: AnalyticalSnapshotManifestV1) -> Path:
+    def put_verified_manifest(
+        self, manifest: AnalyticalSnapshotManifestV1
+    ) -> StoredManifestV1:
         if not isinstance(manifest, AnalyticalSnapshotManifestV1):
             raise TypeError("manifest must be AnalyticalSnapshotManifestV1")
         payload = canonical_json_bytes(manifest)
@@ -380,7 +425,27 @@ class SnapshotStore:
         envelope_digest = hashlib.sha256(payload).hexdigest()
         target = self._manifest_path(validated_manifest.snapshot_id)
         self._publish_immutable(target, payload, expected_digest=envelope_digest)
-        return target
+        durable_payload = self._read_verified_file(
+            target,
+            expected_digest=envelope_digest,
+            expected_length=len(payload),
+        )
+        durable_manifest = parse_manifest(durable_payload)
+        self._verify_manifest_references(durable_manifest)
+        return StoredManifestV1(
+            snapshot_id=durable_manifest.snapshot_id,
+            manifest_relpath=self._manifest_relpath(
+                durable_manifest.snapshot_id
+            ).as_posix(),
+            envelope_sha256=envelope_digest,
+            envelope_byte_length=len(durable_payload),
+            status=durable_manifest.body.snapshot_status,
+            manifest=durable_manifest,
+        )
+
+    def put_manifest(self, manifest: AnalyticalSnapshotManifestV1) -> Path:
+        stored = self.put_verified_manifest(manifest)
+        return self.root / stored.manifest_relpath
 
     def read_verified_manifest(
         self, snapshot_id: str
@@ -509,6 +574,7 @@ __all__ = [
     "SnapshotStoreError",
     "SnapshotVerificationError",
     "SnapshotRejectionV1",
+    "StoredManifestV1",
     "VerifiedSnapshotV1",
     "select_last_good",
 ]
