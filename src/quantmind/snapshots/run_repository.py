@@ -257,6 +257,10 @@ class PublicationConflictError(RunRepositoryError):
     pass
 
 
+class PublicationPrecommitValidationError(RunRepositoryError):
+    pass
+
+
 class RunDatabaseError(RunRepositoryError):
     pass
 
@@ -854,6 +858,9 @@ class ManifestPublicationV1(FrozenContractBase):
         return self
 
 
+_PublicationPrecommitValidator = Callable[[ManifestPublicationV1], None]
+
+
 class ManifestPublicationRecordV1(FrozenContractBase):
     publication_sequence: int = Field(ge=1)
     snapshot_id: str
@@ -1200,7 +1207,7 @@ class RunRepository:
         """Read base-constructor inputs without subclass dispatch."""
 
         try:
-            state = object.__getattribute__(repository, "__dict__")
+            state = RunRepository.__dict__["__dict__"].__get__(repository)
             root = Path(state["_configured_root"]).resolve(strict=False)
             database_path = Path(state["database_path"]).resolve(strict=False)
             fault_injector = state["_configured_fault_injector"]
@@ -3537,6 +3544,7 @@ class RunRepository:
         *,
         expected_version: int,
         now: datetime,
+        _precommit_validator: _PublicationPrecommitValidator | None = None,
     ) -> PublicationResultV1:
         if not isinstance(publication, ManifestPublicationV1):
             raise TypeError("publication metadata must be ManifestPublicationV1")
@@ -3545,6 +3553,23 @@ class RunRepository:
         )
         expected_version = _require_expected_version(expected_version)
         now_text = _timestamp_text(now, "publication time")
+        if _precommit_validator is not None and not callable(_precommit_validator):
+            raise TypeError("publication precommit validator must be callable")
+
+        def validate_precommit() -> None:
+            if _precommit_validator is None:
+                return
+            try:
+                validation_result = _precommit_validator(publication)
+            except Exception as error:
+                raise PublicationPrecommitValidationError(
+                    "publication precommit validation failed"
+                ) from error
+            if validation_result is not None:
+                raise PublicationPrecommitValidationError(
+                    "publication precommit validator must return None"
+                )
+
         connection: sqlite3.Connection | None = None
         committed = False
         try:
@@ -3579,6 +3604,7 @@ class RunRepository:
                         run_id,
                         already_published=True,
                     )
+                    validate_precommit()
                     connection.rollback()
                     return result
                 raise PublicationConflictError(
@@ -3760,6 +3786,7 @@ class RunRepository:
                 run_id,
                 already_published=False,
             )
+            validate_precommit()
             connection.commit()
             committed = True
             try:
@@ -4349,6 +4376,7 @@ __all__ = [
     "ManifestPublicationV1",
     "NewRunV1",
     "PublicationConflictError",
+    "PublicationPrecommitValidationError",
     "PublicationResultV1",
     "RecoveryEventV1",
     "RecoveryRejectionCode",

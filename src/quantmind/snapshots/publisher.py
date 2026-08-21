@@ -39,6 +39,7 @@ from quantmind.snapshots.run_repository import (
     IllegalRunTransitionError,
     ManifestPublicationRecordV1,
     ManifestPublicationV1,
+    PublicationPrecommitValidationError,
     PublicationResultV1,
     RunDatabaseError,
     RunErrorCode,
@@ -422,6 +423,9 @@ class _PublisherSerializationError(ValueError):
 
 
 class SnapshotPublisher:
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError("SnapshotPublisher does not support subclassing")
+
     def __init__(
         self,
         *,
@@ -776,6 +780,30 @@ class SnapshotPublisher:
         self._inject(PublisherFaultStage.AFTER_SNAPSHOT_VERIFIED)
         return stored
 
+    def _validate_publication_precommit(
+        self,
+        publication: ManifestPublicationV1,
+    ) -> None:
+        stored = SnapshotStore.inspect_verified_manifest(
+            self._store,
+            publication.snapshot_id,
+        )
+        exact_publication = ManifestPublicationV1(
+            snapshot_id=stored.snapshot_id,
+            book_id=stored.manifest.body.book_id,
+            book_generation=stored.manifest.body.book_generation,
+            snapshot_status=stored.status,
+            schema_version=stored.manifest.body.schema_version,
+            hash_algorithm=stored.manifest.body.hash_algorithm,
+            manifest_relpath=stored.manifest_relpath,
+            envelope_sha256=stored.envelope_sha256,
+            envelope_byte_length=stored.envelope_byte_length,
+        )
+        if exact_publication != publication:
+            raise SnapshotVerificationError(
+                "stored manifest differs from pending publication metadata"
+            )
+
     def _terminal_rejection_retry(
         self,
         *,
@@ -854,7 +882,26 @@ class SnapshotPublisher:
                     publication,
                     expected_version=expected_version,
                     now=commit_time,
+                    _precommit_validator=lambda pending: (
+                        SnapshotPublisher._validate_publication_precommit(
+                            self,
+                            pending,
+                        )
+                    ),
                 )
+            )
+        except PublicationPrecommitValidationError:
+            durable = RunRepository.get(self._repository, run_id)
+            if durable.run_outcome is RunOutcome.SUCCEEDED:
+                raise
+            if durable.run_outcome in {
+                RunOutcome.FAILED,
+                RunOutcome.CANCELLED,
+            }:
+                return self._terminal_result(durable)
+            return self._terminalize_failure(
+                run_id,
+                RunErrorCode.DISK_WRITE_FAILED,
             )
         except TerminalRunMutationError:
             durable = RunRepository.get(self._repository, run_id)

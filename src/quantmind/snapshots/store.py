@@ -156,7 +156,7 @@ class SnapshotStore:
         """Read base-constructor inputs without subclass dispatch."""
 
         try:
-            state = object.__getattribute__(store, "__dict__")
+            state = SnapshotStore.__dict__["__dict__"].__get__(store)
             root = Path(state["_configured_root"]).resolve(strict=False)
             fault_injector = state["_configured_fault_injector"]
         except (KeyError, TypeError, ValueError) as error:
