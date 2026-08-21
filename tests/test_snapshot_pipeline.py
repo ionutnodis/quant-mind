@@ -815,7 +815,18 @@ def test_publisher_public_contracts_pickle_round_trip(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "bypass",
-    ["model_copy", "model_construct", "nested_model_copy"],
+    [
+        "model_copy",
+        "model_construct",
+        "nested_model_copy",
+        "publication_run_id",
+        "publication_book_id",
+        "publication_generation",
+        "publication_snapshot_id",
+        "publication_published_at",
+        "active_book_id",
+        "active_snapshot_provenance",
+    ],
 )
 def test_publisher_result_rejects_bypassed_tag_payload_combinations(
     tmp_path: Path,
@@ -840,7 +851,7 @@ def test_publisher_result_rejects_bypassed_tag_payload_combinations(
             run=result.run,
             publication_result=None,
         )
-    else:
+    elif bypass == "nested_model_copy":
         invalid = result.model_copy(
             update={
                 "publication_result": result.publication_result.model_copy(
@@ -848,11 +859,183 @@ def test_publisher_result_rejects_bypassed_tag_payload_combinations(
                 )
             }
         )
+    elif bypass.startswith("publication_"):
+        publication = result.publication
+        assert publication is not None
+        if bypass == "publication_run_id":
+            update = {"run_id": "run_01J5X5S8J5J8P7KQ4Y0T3T3B9Z"}
+        elif bypass == "publication_book_id":
+            update = {"book_id": "book-beta"}
+        elif bypass == "publication_generation":
+            update = {"book_generation": publication.book_generation + 1}
+        elif bypass == "publication_snapshot_id":
+            substituted_id = "f" * 64
+            update = {
+                "snapshot_id": substituted_id,
+                "manifest_relpath": (
+                    "snapshots/manifests/analytical_snapshot_manifest_v1/"
+                    f"{substituted_id[:2]}/{substituted_id}.json"
+                ),
+            }
+        else:
+            update = {"published_at_utc": T4}
+        invalid = result.model_copy(
+            update={
+                "publication_result": result.publication_result.model_copy(
+                    update={"publication": publication.model_copy(update=update)}
+                )
+            }
+        )
+    else:
+        active = result.active
+        assert active is not None
+        if bypass == "active_book_id":
+            update = {"book_id": "book-beta"}
+        else:
+            update = {
+                "snapshot_id": "e" * 64,
+                "book_generation": active.book_generation + 1,
+            }
+        invalid = result.model_copy(
+            update={
+                "publication_result": result.publication_result.model_copy(
+                    update={"active": active.model_copy(update=update)}
+                )
+            }
+        )
 
-    with pytest.raises(ValueError, match="catalog|terminal"):
+    with pytest.raises(ValueError, match="catalog|terminal|publication|active|provenance"):
         module.SnapshotPublisherResultV1.model_validate(
             invalid.model_dump(mode="python", warnings=False)
         )
+
+
+@pytest.mark.parametrize(
+    "bypass",
+    ["publication_evidence", "already_published", "active_book_id"],
+)
+def test_publisher_rejection_result_refuses_incoherent_nested_evidence(
+    tmp_path: Path,
+    bypass: str,
+) -> None:
+    # Break caught: a valid-looking nested publication, idempotency claim, or active
+    # pointer from another book being grafted onto a durable catalog rejection.
+    module, repository, store, first_run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B4B",
+    )
+    first = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(first_run.run_id, candidate, authority=authority)
+    assert first.publication is not None
+    assert first.active is not None
+
+    rejected_run = _publishing_run(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B4C",
+        requested_at=T3,
+        stage_at=T3,
+    )
+
+    def cancel_before_commit(stage) -> None:
+        if stage is module.PublisherFaultStage.BEFORE_REPOSITORY_COMMIT:
+            repository.request_cancel(rejected_run.run_id, now=T3)
+
+    rejected = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+        fault_injector=cancel_before_commit,
+    ).publish(rejected_run.run_id, candidate, authority=authority)
+    assert rejected.rejection_code is RunErrorCode.CANCELLED_BY_USER
+    assert rejected.publication_result is not None
+    assert rejected.active is not None
+
+    if bypass == "publication_evidence":
+        update = {"publication": first.publication}
+    elif bypass == "already_published":
+        update = {"already_published": True}
+    else:
+        update = {
+            "active": rejected.active.model_copy(update={"book_id": "book-beta"})
+        }
+    invalid = rejected.model_copy(
+        update={"publication_result": rejected.publication_result.model_copy(update=update)}
+    )
+
+    with pytest.raises(ValueError, match="catalog|rejection|publication|active"):
+        module.SnapshotPublisherResultV1.model_validate(
+            invalid.model_dump(mode="python", warnings=False)
+        )
+
+
+def test_publisher_result_allows_active_pointer_that_advanced_after_publication(
+    tmp_path: Path,
+) -> None:
+    # Protective regression: an idempotent response for the first publication may carry
+    # the same-book active pointer advanced by a later valid publication.
+    module, repository, store, first_run, authority, first_candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B4D",
+    )
+    first = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(first_run.run_id, first_candidate, authority=authority)
+    assert first.publication is not None
+
+    replacement_payload = b'{"xray":"later-publication"}'
+    replacement_ref = _artifact_ref(
+        replacement_payload,
+        media_type="application/json",
+        schema_version="xray_read_model_v1",
+    )
+    replacement_candidate = module.SnapshotCandidateV1(
+        manifest_body=first_candidate.manifest_body.model_copy(
+            update={
+                "outputs": (
+                    first_candidate.manifest_body.outputs[0].model_copy(
+                        update={"object_ref": replacement_ref}
+                    ),
+                )
+            }
+        ),
+        outputs=(
+            first_candidate.outputs[0].model_copy(
+                update={"payload": replacement_payload}
+            ),
+        ),
+    )
+    second_run = _publishing_run(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B4E",
+        requested_at=T3,
+        stage_at=T3,
+    )
+    second = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T4,
+    ).publish(second_run.run_id, replacement_candidate, authority=authority)
+    assert second.publication is not None
+    assert second.active is not None
+
+    retried = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T4,
+    ).publish(first_run.run_id, first_candidate, authority=authority)
+
+    assert retried.already_published is True
+    assert retried.publication == first.publication
+    assert retried.active == second.active
+    assert retried.active.snapshot_id != retried.publication.snapshot_id
+    assert retried.active.pointer_version > (
+        retried.run.expected_active_pointer_version + 1
+    )
 
 
 def test_terminal_succeeded_publisher_retry_reverifies_and_skips_attachment(

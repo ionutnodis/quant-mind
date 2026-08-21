@@ -296,6 +296,13 @@ class SnapshotPublisherResultV1(FrozenContractBase):
                 raise ValueError(
                     "catalog idempotent result requires an existing publication"
                 )
+            active = publication_result.active
+            if active is not None and (
+                run.book_id is None or active.book_id != run.book_id
+            ):
+                raise ValueError(
+                    "catalog active evidence must belong to the durable run book"
+                )
             if publication_result.published != (
                 run.run_outcome is RunOutcome.SUCCEEDED
             ):
@@ -307,8 +314,49 @@ class SnapshotPublisherResultV1(FrozenContractBase):
                     raise ValueError(
                         "catalog terminal rejection requires an exact rejection code"
                     )
+                publication = publication_result.publication
+                if publication is None or (
+                    run.book_id is None
+                    or run.captured_generation is None
+                    or run.candidate_snapshot_id is None
+                    or run.published_snapshot_id is None
+                    or run.finished_at_utc is None
+                    or publication.run_id != run.run_id
+                    or publication.book_id != run.book_id
+                    or publication.book_generation != run.captured_generation
+                    or publication.snapshot_id != run.candidate_snapshot_id
+                    or publication.snapshot_id != run.published_snapshot_id
+                    or publication.published_at_utc != run.finished_at_utc
+                    or publication.published_at_utc != run.updated_at_utc
+                ):
+                    raise ValueError(
+                        "successful publication evidence differs from durable run provenance"
+                    )
+                if active is not None:
+                    publication_pointer_version = (
+                        run.expected_active_pointer_version + 1
+                    )
+                    if (
+                        active.pointer_version < publication_pointer_version
+                        or active.updated_at_utc < publication.published_at_utc
+                        or (
+                            active.snapshot_id == publication.snapshot_id
+                            and active.book_generation
+                            != publication.book_generation
+                        )
+                        or (
+                            active.snapshot_id != publication.snapshot_id
+                            and active.pointer_version
+                            <= publication_pointer_version
+                        )
+                    ):
+                        raise ValueError(
+                            "active snapshot lacks valid publication provenance"
+                        )
             elif (
                 publication_result.published
+                or publication_result.publication is not None
+                or publication_result.already_published
                 or run.error_code is not publication_result.rejection_code
             ):
                 raise ValueError(
