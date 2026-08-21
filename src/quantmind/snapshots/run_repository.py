@@ -1966,6 +1966,70 @@ class RunRepository:
         return transition
 
     @staticmethod
+    def _has_pointer_transition_after(
+        connection: sqlite3.Connection,
+        book_id: str,
+        pointer_version: int,
+    ) -> bool:
+        return connection.execute(
+            """
+            SELECT 1
+            FROM (
+                SELECT run.expected_active_pointer_version AS _sort_version
+                FROM snapshot_runs AS run
+                WHERE run.book_id = ?
+                  AND run.expected_active_pointer_version >= ?
+                  AND run.run_outcome = 'SUCCEEDED'
+                  AND run.published_snapshot_id IS NOT NULL
+                UNION ALL
+                SELECT event.expected_pointer_version AS _sort_version
+                FROM snapshot_recovery_events AS event
+                WHERE event.book_id = ?
+                  AND event.expected_pointer_version >= ?
+                  AND event.resolution_action IN ('REPOINTED', 'REMOVED')
+            )
+            LIMIT 1
+            """,
+            (book_id, pointer_version, book_id, pointer_version),
+        ).fetchone() is not None
+
+    @staticmethod
+    def _ordered_pointer_transition_rows(
+        connection: sqlite3.Connection,
+        book_id: str,
+    ) -> Iterator[sqlite3.Row]:
+        yield from connection.execute(
+            """
+            SELECT run.book_id AS book_id,
+                   run.expected_active_snapshot_id AS previous_snapshot_id,
+                   publication.snapshot_id AS selected_snapshot_id,
+                   run.expected_active_pointer_version + 1 AS pointer_version,
+                   publication.published_at_utc AS transitioned_at_utc,
+                   'PUBLICATION' AS transition_kind,
+                   run.expected_active_pointer_version AS _sort_version
+            FROM snapshot_runs AS run
+            JOIN snapshot_manifests AS publication
+              ON publication.run_id = run.run_id
+            WHERE run.book_id = ?
+              AND run.run_outcome = 'SUCCEEDED'
+              AND run.published_snapshot_id IS NOT NULL
+            UNION ALL
+            SELECT event.book_id AS book_id,
+                   event.rejected_snapshot_id AS previous_snapshot_id,
+                   event.selected_snapshot_id AS selected_snapshot_id,
+                   event.expected_pointer_version + 1 AS pointer_version,
+                   event.recorded_at_utc AS transitioned_at_utc,
+                   event.resolution_action AS transition_kind,
+                   event.expected_pointer_version AS _sort_version
+            FROM snapshot_recovery_events AS event
+            WHERE event.book_id = ?
+              AND event.resolution_action IN ('REPOINTED', 'REMOVED')
+            ORDER BY _sort_version
+            """,
+            (book_id, book_id),
+        )
+
+    @staticmethod
     def _validate_pointer_register_relations(
         connection: sqlite3.Connection,
         register: _ActivePointerRegisterV1,
@@ -1983,21 +2047,42 @@ class RunRepository:
             if active.book_generation > head.generation:
                 raise RunDatabaseError("book head is older than its active snapshot")
             RunRepository._validate_active_binding(connection, active)
+        if RunRepository._has_pointer_transition_after(
+            connection,
+            register.book_id,
+            register.pointer_version,
+        ):
+            raise RunDatabaseError(
+                "active pointer register is behind durable transition history"
+            )
         if register.pointer_version == 0:
             if active is not None or register.updated_at_utc > head.updated_at_utc:
                 raise RunDatabaseError("virgin active pointer register is malformed")
-            if RunRepository._pointer_transition_rows(
-                connection,
-                register.book_id,
-                pointer_version=1,
-            ):
-                raise RunDatabaseError("virgin pointer register has durable history")
             return
         transition = RunRepository._pointer_transition_at_version(
             connection,
             register.book_id,
             register.pointer_version,
         )
+        if register.pointer_version == 1:
+            if transition.previous_snapshot_id is not None:
+                raise RunDatabaseError(
+                    "first active pointer transition has a predecessor"
+                )
+        else:
+            predecessor = RunRepository._pointer_transition_at_version(
+                connection,
+                register.book_id,
+                register.pointer_version - 1,
+            )
+            if (
+                transition.previous_snapshot_id
+                != predecessor.selected_snapshot_id
+                or transition.transitioned_at_utc < predecessor.transitioned_at_utc
+            ):
+                raise RunDatabaseError(
+                    "active pointer tail is not causally linked to its predecessor"
+                )
         if (
             transition.selected_snapshot_id != register.snapshot_id
             or transition.transitioned_at_utc != register.updated_at_utc
@@ -2009,24 +2094,21 @@ class RunRepository:
         connection: sqlite3.Connection,
         register: _ActivePointerRegisterV1,
     ) -> None:
-        transitions = tuple(
-            RunRepository._pointer_transition_from_row(row)
-            for row in RunRepository._pointer_transition_rows(
-                connection, register.book_id
-            )
-        )
-        by_version: dict[int, _PointerTransitionV1] = {}
-        for transition in transitions:
-            if transition.pointer_version in by_version:
-                raise RunDatabaseError("active pointer transition history is not unique")
-            by_version[transition.pointer_version] = transition
-        if set(by_version) != set(range(1, register.pointer_version + 1)):
-            raise RunDatabaseError("active pointer transition history is not contiguous")
-
+        expected_pointer_version = 1
         previous_snapshot_id: str | None = None
         previous_time: datetime | None = None
-        for pointer_version in range(1, register.pointer_version + 1):
-            transition = by_version[pointer_version]
+        transition_count = 0
+        for row in RunRepository._ordered_pointer_transition_rows(
+            connection,
+            register.book_id,
+        ):
+            transition = RunRepository._pointer_transition_from_row(row)
+            if transition.pointer_version < expected_pointer_version:
+                raise RunDatabaseError("active pointer transition history is not unique")
+            if transition.pointer_version > expected_pointer_version:
+                raise RunDatabaseError(
+                    "active pointer transition history is not contiguous"
+                )
             if transition.previous_snapshot_id != previous_snapshot_id:
                 raise RunDatabaseError("active pointer transition predecessor is malformed")
             if (
@@ -2036,6 +2118,11 @@ class RunRepository:
                 raise RunDatabaseError("active pointer transition clock moved backward")
             previous_snapshot_id = transition.selected_snapshot_id
             previous_time = transition.transitioned_at_utc
+            transition_count += 1
+            expected_pointer_version += 1
+
+        if transition_count != register.pointer_version:
+            raise RunDatabaseError("active pointer transition history is not contiguous")
 
         if register.pointer_version == 0:
             if register.snapshot_id is not None:

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+import tracemalloc
 import unicodedata
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -7403,7 +7404,7 @@ def test_missing_pointer_register_is_corruption_not_virgin_state(
             (),
         )
 
-    with pytest.raises(RunDatabaseError):
+    with pytest.raises(RunDatabaseError, match="pointer"):
         if operation == "create_or_join":
             repository.create_or_join(
                 _new_run(
@@ -7438,6 +7439,396 @@ def test_missing_pointer_register_is_corruption_not_virgin_state(
             repository.audit_integrity()
         else:
             RunRepository(tmp_path).initialize()
+
+
+_POINTER_BOUNDARY_OPERATIONS = (
+    "create_or_join",
+    "get_book_head",
+    "get_active",
+    "list_active",
+    "recover_active",
+    "commit_publication",
+    "audit_integrity",
+    "initialize",
+)
+
+
+def _exercise_pointer_boundary(
+    repository: RunRepository,
+    operation: str,
+    *,
+    publishing_run=None,
+) -> None:
+    if operation == "create_or_join":
+        repository.create_or_join(
+            _new_run(
+                run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6K0A",
+                client_idempotency_key="pointer-boundary",
+            ),
+            now=T7,
+        )
+    elif operation == "get_book_head":
+        repository.get_book_head("book-alpha")
+    elif operation == "get_active":
+        repository.get_active("book-alpha")
+    elif operation == "list_active":
+        repository.list_active()
+    elif operation == "recover_active":
+        repository.recover_active(
+            "book-alpha",
+            verify=lambda _snapshot_id: pytest.fail(
+                "corrupt pointer state must be rejected before verification"
+            ),
+            now=T7,
+        )
+    elif operation == "commit_publication":
+        assert publishing_run is not None
+        repository.commit_publication(
+            publishing_run.run_id,
+            _publication(publishing_run.candidate_snapshot_id, generation=1),
+            expected_version=publishing_run.version,
+            now=T7,
+        )
+    elif operation == "audit_integrity":
+        repository.audit_integrity()
+    else:
+        RunRepository(repository.root).initialize()
+
+
+@pytest.mark.parametrize("operation", _POINTER_BOUNDARY_OPERATIONS)
+def test_pointer_register_behind_future_transition_fails_closed(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    # Break caught: a rolled-back register serving A/v1 while durable B/v2 exists,
+    # then allowing an ordinary writer to reuse revision two.
+    repository = _repository(tmp_path)
+    snapshot_ids, _ = _seed_publication_chain(repository, 2)
+    publishing_run = (
+        _publishing_run_at(
+            repository,
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6K0B",
+            snapshot_id=SNAPSHOT_A,
+            now=T1,
+        )
+        if operation == "commit_publication"
+        else None
+    )
+    _execute_without_named_triggers(
+        repository,
+        _ACTIVE_POINTER_UPDATE_BYPASS,
+        """
+        UPDATE active_snapshots
+        SET snapshot_id = ?, book_generation = 1,
+            pointer_version = 1, updated_at_utc = ?
+        WHERE book_id = 'book-alpha'
+        """,
+        (snapshot_ids[0], "2026-08-20T08:00:00.000000Z"),
+        foreign_keys=True,
+    )
+
+    with pytest.raises(RunDatabaseError, match="pointer|history"):
+        _exercise_pointer_boundary(
+            repository,
+            operation,
+            publishing_run=publishing_run,
+        )
+
+    with sqlite3.connect(repository.database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM snapshot_manifests WHERE snapshot_id = ?",
+            (SNAPSHOT_A,),
+        ).fetchone()[0] == 0
+
+
+def test_future_transition_cannot_be_compounded_into_duplicate_epoch(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a schema-valid B/v2 witness hidden behind A/v1, followed by
+    # an ordinary C publisher also committing revision two.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    candidate = _publishing_run_at(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6K0F",
+        snapshot_id=SNAPSHOT_C,
+        now=T4,
+    )
+    raw_run_id = "run_01J5X5S8J5J8P7KQ4Y0T3N6K0G"
+    fingerprint = "9" * 64
+    request = _new_run(
+        run_id=raw_run_id,
+        request_fingerprint=fingerprint,
+        client_idempotency_key=None,
+    )
+    identity = RunRepository._idempotency_identity(request, 1, None)
+    timestamp = "2026-08-20T08:04:00.000000Z"
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """
+            INSERT INTO snapshot_runs (
+                run_id, run_kind, idempotency_identity, request_fingerprint,
+                client_idempotency_key_digest, book_id, captured_generation,
+                expected_active_snapshot_id, expected_active_pointer_version,
+                target_cut_utc, requested_at_utc, started_at_utc, updated_at_utc,
+                finished_at_utc, run_stage, run_outcome,
+                cancel_requested_at_utc, candidate_snapshot_id,
+                published_snapshot_id, result_json, error_code, error_message, version
+            ) VALUES (
+                ?, 'ANALYTICAL_SNAPSHOT', ?, ?, NULL, 'book-alpha', 1,
+                ?, 1, ?, ?, ?, ?, ?, 'PUBLISHING', 'SUCCEEDED',
+                NULL, ?, ?, NULL, NULL, NULL, 1
+            )
+            """,
+            (
+                raw_run_id,
+                identity,
+                fingerprint,
+                SNAPSHOT_A,
+                "2026-08-20T08:00:00.000000Z",
+                timestamp,
+                timestamp,
+                timestamp,
+                timestamp,
+                SNAPSHOT_B,
+                SNAPSHOT_B,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO snapshot_manifests (
+                snapshot_id, run_id, book_id, book_generation, snapshot_status,
+                schema_version, hash_algorithm, manifest_relpath, envelope_sha256,
+                envelope_byte_length, published_at_utc
+            ) VALUES (?, ?, 'book-alpha', 1, 'BLESSED',
+                'analytical_snapshot_manifest_v1', 'sha256', ?, ?, 4096, ?)
+            """,
+            (
+                SNAPSHOT_B,
+                raw_run_id,
+                "snapshots/manifests/analytical_snapshot_manifest_v1/"
+                f"{SNAPSHOT_B[:2]}/{SNAPSHOT_B}.json",
+                "7" * 64,
+                timestamp,
+            ),
+        )
+
+    with pytest.raises(RunDatabaseError, match="pointer|history"):
+        repository.commit_publication(
+            candidate.run_id,
+            _publication(SNAPSHOT_C, generation=1),
+            expected_version=candidate.version,
+            now=T5,
+        )
+
+    assert repository.get(candidate.run_id).run_outcome is RunOutcome.RUNNING
+    with sqlite3.connect(repository.database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM snapshot_manifests WHERE snapshot_id = ?",
+            (SNAPSHOT_C,),
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM snapshot_runs "
+            "WHERE book_id = 'book-alpha' AND expected_active_pointer_version = 1 "
+            "AND run_outcome = 'SUCCEEDED' AND published_snapshot_id IS NOT NULL"
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("operation", _POINTER_BOUNDARY_OPERATIONS)
+def test_pointer_tail_with_wrong_immediate_predecessor_fails_closed(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    # Break caught: C/v3 claiming historical A rather than the actual B/v2 tail.
+    repository = _repository(tmp_path)
+    snapshot_ids, run_ids = _seed_publication_chain(repository, 3)
+    publishing_run = (
+        _publishing_run_at(
+            repository,
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6K0C",
+            snapshot_id=SNAPSHOT_A,
+            now=T1,
+        )
+        if operation == "commit_publication"
+        else None
+    )
+    _execute_without_named_triggers(
+        repository,
+        _TERMINAL_RUN_ALLOCATION_UPDATE_BYPASS,
+        "UPDATE snapshot_runs SET expected_active_snapshot_id = ? WHERE run_id = ?",
+        (snapshot_ids[0], run_ids[2]),
+    )
+
+    with pytest.raises(RunDatabaseError, match="pointer|history"):
+        _exercise_pointer_boundary(
+            repository,
+            operation,
+            publishing_run=publishing_run,
+        )
+
+
+@pytest.mark.parametrize("operation", _POINTER_BOUNDARY_OPERATIONS)
+def test_pointer_tail_with_backward_transition_clock_fails_closed(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    # Break caught: a v2 removal predating the v1 publication it removed.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    repository.recover_active(
+        "book-alpha",
+        verify=lambda _snapshot_id: (_ for _ in ()).throw(ValueError("corrupt")),
+        now=T4,
+    )
+    publishing_run = (
+        _publishing_run_at(
+            repository,
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6K0D",
+            snapshot_id=SNAPSHOT_B,
+            now=T5,
+        )
+        if operation == "commit_publication"
+        else None
+    )
+    regressed_time = "2026-08-20T08:02:00.000000Z"
+    _execute_without_named_triggers(
+        repository,
+        _RECOVERY_EVENT_UPDATE_BYPASS,
+        "UPDATE snapshot_recovery_events SET recorded_at_utc = ? "
+        "WHERE book_id = 'book-alpha'",
+        (regressed_time,),
+    )
+    _execute_without_named_triggers(
+        repository,
+        _ACTIVE_POINTER_UPDATE_BYPASS,
+        "UPDATE active_snapshots SET updated_at_utc = ? "
+        "WHERE book_id = 'book-alpha'",
+        (regressed_time,),
+    )
+
+    with pytest.raises(RunDatabaseError, match="pointer|history"):
+        _exercise_pointer_boundary(
+            repository,
+            operation,
+            publishing_run=publishing_run,
+        )
+
+
+@pytest.mark.parametrize("operation", ["audit_integrity", "initialize"])
+def test_sparse_huge_pointer_epoch_fails_with_bounded_memory(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    # Break caught: set(range(pointer_version)) allocating from a corrupt scalar rather
+    # than from the three durable transition rows actually present.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    repository.recover_active(
+        "book-alpha",
+        verify=lambda _snapshot_id: (_ for _ in ()).throw(ValueError("corrupt")),
+        now=T4,
+    )
+    second = _publishing_run_at(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6K0E",
+        snapshot_id=SNAPSHOT_B,
+        now=T5,
+    )
+    repository.commit_publication(
+        second.run_id,
+        _publication(SNAPSHOT_B, generation=1),
+        expected_version=second.version,
+        now=T5,
+    )
+    huge_version = 100_000
+    _execute_without_named_triggers(
+        repository,
+        _RECOVERY_EVENT_UPDATE_BYPASS,
+        "UPDATE snapshot_recovery_events SET expected_pointer_version = ? "
+        "WHERE book_id = 'book-alpha'",
+        (huge_version - 2,),
+    )
+    _execute_without_named_triggers(
+        repository,
+        _TERMINAL_RUN_ALLOCATION_UPDATE_BYPASS,
+        "UPDATE snapshot_runs SET expected_active_pointer_version = ? WHERE run_id = ?",
+        (huge_version - 1, second.run_id),
+    )
+    _execute_without_named_triggers(
+        repository,
+        _ACTIVE_POINTER_UPDATE_BYPASS,
+        "UPDATE active_snapshots SET pointer_version = ? WHERE book_id = 'book-alpha'",
+        (huge_version,),
+    )
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(RunDatabaseError, match="pointer|history"):
+            _exercise_pointer_boundary(repository, operation)
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak_bytes < 6_000_000
+
+
+def test_pointer_tail_and_replay_queries_use_partial_indexes_without_sorting(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a bounded guard or streaming replay silently scanning/sorting history.
+    repository = _TracingVmRunRepository(tmp_path)
+    repository.initialize()
+    _seed_publication_chain(repository, 3)
+    repository.statements.clear()
+
+    repository.audit_integrity()
+
+    statements = [" ".join(statement.split()) for statement in repository.statements]
+    future_queries = [
+        statement
+        for statement in statements
+        if "expected_active_pointer_version >=" in statement
+        and "expected_pointer_version >=" in statement
+    ]
+    replay_queries = [
+        statement
+        for statement in statements
+        if "UNION ALL" in statement and "ORDER BY _sort_version" in statement
+    ]
+    assert len(future_queries) >= 1
+    assert len(replay_queries) == 1
+
+    with sqlite3.connect(repository.database_path) as connection:
+        for statement in (future_queries[0], replay_queries[0]):
+            plan = " ".join(
+                row[3]
+                for row in connection.execute(f"EXPLAIN QUERY PLAN {statement}")
+            )
+            assert "snapshot_runs_by_book_pointer_version" in plan
+            assert "recovery_events_by_book_pointer_version" in plan
+            assert "TEMP B-TREE" not in plan
 
 
 def test_removed_pointer_rejects_rolled_back_allocation_and_reopens(
