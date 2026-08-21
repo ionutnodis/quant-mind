@@ -5,6 +5,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import unicodedata
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -170,6 +171,12 @@ def _repository(tmp_path: Path) -> RunRepository:
     repository = RunRepository(tmp_path)
     repository.initialize()
     return repository
+
+
+def _raw_journal_mode(repository: RunRepository) -> str:
+    database_uri = f"{repository.database_path.resolve().as_uri()}?mode=ro"
+    with sqlite3.connect(database_uri, uri=True) as connection:
+        return str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
 
 
 def _new_run(
@@ -410,6 +417,85 @@ def _seed_recovery_event_history(
         )
 
 
+def _seed_publication_chain(
+    repository: RunRepository,
+    count: int,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    timestamp = "2026-08-20T08:00:00.000000Z"
+    snapshot_ids = tuple(f"{index + 1_000_000:064x}" for index in range(count))
+    run_ids = tuple(f"run_chain_{index:08d}" for index in range(count))
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        for index, (snapshot_id, run_id) in enumerate(zip(snapshot_ids, run_ids)):
+            fingerprint = f"{index + 2_000_000:064x}"
+            request = _new_run(
+                run_id=run_id,
+                request_fingerprint=fingerprint,
+                client_idempotency_key=None,
+            )
+            identity = RunRepository._idempotency_identity(request, 1, None)
+            expected_snapshot_id = None if index == 0 else snapshot_ids[index - 1]
+            connection.execute(
+                """
+                INSERT INTO snapshot_runs (
+                    run_id, run_kind, idempotency_identity, request_fingerprint,
+                    client_idempotency_key_digest, book_id, captured_generation,
+                    expected_active_snapshot_id, expected_active_pointer_version,
+                    target_cut_utc, requested_at_utc, started_at_utc, updated_at_utc,
+                    finished_at_utc, run_stage, run_outcome,
+                    cancel_requested_at_utc, candidate_snapshot_id,
+                    published_snapshot_id, result_json, error_code, error_message, version
+                ) VALUES (
+                    ?, 'ANALYTICAL_SNAPSHOT', ?, ?, NULL, 'book-alpha', 1,
+                    ?, ?, ?, ?, ?, ?, ?, 'PUBLISHING', 'SUCCEEDED',
+                    NULL, ?, ?, NULL, NULL, NULL, 1
+                )
+                """,
+                (
+                    run_id,
+                    identity,
+                    fingerprint,
+                    expected_snapshot_id,
+                    index,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    snapshot_id,
+                    snapshot_id,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO snapshot_manifests (
+                    snapshot_id, run_id, book_id, book_generation, snapshot_status,
+                    schema_version, hash_algorithm, manifest_relpath, envelope_sha256,
+                    envelope_byte_length, published_at_utc
+                ) VALUES (?, ?, 'book-alpha', 1, 'BLESSED',
+                    'analytical_snapshot_manifest_v1', 'sha256', ?, ?, 4096, ?)
+                """,
+                (
+                    snapshot_id,
+                    run_id,
+                    "snapshots/manifests/analytical_snapshot_manifest_v1/"
+                    f"{snapshot_id[:2]}/{snapshot_id}.json",
+                    f"{index + 3_000_000:064x}",
+                    timestamp,
+                ),
+            )
+        connection.execute(
+            """
+            INSERT INTO active_snapshots (
+                book_id, snapshot_id, book_generation, pointer_version, updated_at_utc
+            ) VALUES ('book-alpha', ?, 1, ?, ?)
+            """,
+            (snapshot_ids[-1], count, timestamp),
+        )
+    return snapshot_ids, run_ids
+
+
 def _execute_without_named_trigger(
     repository: RunRepository,
     trigger_name: str,
@@ -430,6 +516,35 @@ def _execute_without_named_trigger(
         connection.execute(statement, parameters)
         if trigger is not None:
             connection.execute(trigger[0])
+
+
+def _insert_or_replace_run_from_existing(
+    connection: sqlite3.Connection,
+    source_run_id: str,
+    *,
+    overrides: dict[str, object],
+    explicit_rowid: int | None = None,
+) -> None:
+    connection.row_factory = sqlite3.Row
+    source = connection.execute(
+        "SELECT * FROM snapshot_runs WHERE run_id = ?",
+        (source_run_id,),
+    ).fetchone()
+    assert source is not None
+    columns = tuple(source.keys())
+    values = {column: source[column] for column in columns}
+    values.update(overrides)
+    insert_columns = columns
+    parameters: tuple[object, ...] = tuple(values[column] for column in columns)
+    if explicit_rowid is not None:
+        insert_columns = ("rowid", *insert_columns)
+        parameters = (explicit_rowid, *parameters)
+    placeholders = ", ".join("?" for _ in insert_columns)
+    connection.execute(
+        f"INSERT OR REPLACE INTO snapshot_runs ({', '.join(insert_columns)}) "
+        f"VALUES ({placeholders})",
+        parameters,
+    )
 
 
 class _VmBudgetRunRepository(RunRepository):
@@ -475,6 +590,155 @@ class _TracingVmRunRepository(_VmBudgetRunRepository):
         )
         connection.set_trace_callback(self.statements.append)
         return connection
+
+
+class _InitializationRaceConnection:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        role: str,
+        first_locked: threading.Event,
+        second_attempting: threading.Event,
+        second_locked: threading.Event,
+    ) -> None:
+        self._connection = connection
+        self._role = role
+        self._first_locked = first_locked
+        self._second_attempting = second_attempting
+        self._second_locked = second_locked
+
+    def execute(self, statement: str, parameters: tuple[object, ...] = ()):
+        normalized = " ".join(statement.upper().split())
+        if normalized == "BEGIN IMMEDIATE":
+            if self._role == "first":
+                cursor = self._connection.execute(statement, parameters)
+                self._first_locked.set()
+                if not self._second_attempting.wait(timeout=5):
+                    raise AssertionError("second initializer did not attempt its write lock")
+                return cursor
+            self._second_attempting.set()
+            cursor = self._connection.execute(statement, parameters)
+            self._second_locked.set()
+            time.sleep(0.1)
+            return cursor
+        return self._connection.execute(statement, parameters)
+
+    def commit(self) -> None:
+        self._connection.commit()
+        if self._role == "first":
+            if not self._second_locked.wait(timeout=5):
+                raise AssertionError("second initializer did not acquire its write lock")
+
+    def rollback(self) -> None:
+        self._connection.rollback()
+
+    def close(self) -> None:
+        self._connection.close()
+
+    def __getattr__(self, name: str):
+        return getattr(self._connection, name)
+
+
+class _CoordinatedInitializationRepository(RunRepository):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        role: str,
+        first_locked: threading.Event,
+        second_attempting: threading.Event,
+        second_locked: threading.Event,
+    ) -> None:
+        super().__init__(root)
+        self._role = role
+        self._first_locked = first_locked
+        self._second_attempting = second_attempting
+        self._second_locked = second_locked
+
+    def _open_connection(
+        self,
+        *,
+        configure_wal: bool,
+        timeout_ms: int = 5_000,
+    ):
+        connection = super()._open_connection(
+            configure_wal=configure_wal,
+            timeout_ms=timeout_ms,
+        )
+        return _InitializationRaceConnection(
+            connection,
+            role=self._role,
+            first_locked=self._first_locked,
+            second_attempting=self._second_attempting,
+            second_locked=self._second_locked,
+        )
+
+
+class _TrackedWalConnection:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        repository: _BusyWalRepository,
+    ) -> None:
+        self._connection = connection
+        self._repository = repository
+        self._closed = False
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._repository.closed_connections += 1
+        self._connection.close()
+
+    def __getattr__(self, name: str):
+        return getattr(self._connection, name)
+
+
+class _BusyWalRepository(RunRepository):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        failures_before_success: int | None,
+        deadline_seconds: float = 2.0,
+    ) -> None:
+        super().__init__(root)
+        self._WAL_ENABLE_TIMEOUT_SECONDS = deadline_seconds
+        self.failures_remaining = failures_before_success
+        self.wal_attempts = 0
+        self.opened_connections = 0
+        self.closed_connections = 0
+        self.fake_time = 0.0
+        self.sleep_durations: list[float] = []
+
+    def _open_connection(
+        self,
+        *,
+        configure_wal: bool,
+        timeout_ms: int = 5_000,
+    ):
+        connection = super()._open_connection(
+            configure_wal=configure_wal,
+            timeout_ms=timeout_ms,
+        )
+        self.opened_connections += 1
+        return _TrackedWalConnection(connection, self)
+
+    def _request_wal_mode(self, connection: sqlite3.Connection) -> str:
+        self.wal_attempts += 1
+        if self.failures_remaining is None or self.failures_remaining > 0:
+            if self.failures_remaining is not None:
+                self.failures_remaining -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return super()._request_wal_mode(connection)
+
+    def _wal_now(self) -> float:
+        return self.fake_time
+
+    def _wal_sleep(self, duration_seconds: float) -> None:
+        self.sleep_durations.append(duration_seconds)
+        self.fake_time += duration_seconds
 
 
 def test_initialize_migrates_empty_root_idempotently_and_reopens(tmp_path: Path) -> None:
@@ -572,7 +836,7 @@ def test_concurrent_thread_initializers_converge_on_one_complete_schema(
         thread.join()
 
     assert failures == []
-    assert RunRepository(tmp_path).inspect_connection_pragmas().journal_mode == "wal"
+    assert _raw_journal_mode(RunRepository(tmp_path)) == "wal"
 
 
 def test_concurrent_process_initializers_converge_on_one_complete_schema(
@@ -597,6 +861,75 @@ def test_concurrent_process_initializers_converge_on_one_complete_schema(
 
     assert [process.returncode for process in processes] == [0] * len(processes), completed
     RunRepository(tmp_path).initialize()
+
+
+def test_initializer_waits_for_next_serialized_writer_before_enabling_wal(
+    tmp_path: Path,
+) -> None:
+    # Break caught: eight tight post-commit WAL retries exhausting under the next initializer.
+    first_locked = threading.Event()
+    second_attempting = threading.Event()
+    second_locked = threading.Event()
+    failures: list[BaseException] = []
+
+    def initialize(role: str) -> None:
+        try:
+            repository = _CoordinatedInitializationRepository(
+                tmp_path,
+                role=role,
+                first_locked=first_locked,
+                second_attempting=second_attempting,
+                second_locked=second_locked,
+            )
+            repository.initialize()
+            if _raw_journal_mode(repository) != "wal":
+                raise AssertionError("initializer returned before WAL was durable")
+        except BaseException as error:  # pragma: no cover - asserted below
+            failures.append(error)
+
+    first = threading.Thread(target=initialize, args=("first",))
+    first.start()
+    assert first_locked.wait(timeout=5)
+    second = threading.Thread(target=initialize, args=("second",))
+    second.start()
+    first.join(timeout=10)
+    second.join(timeout=10)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert failures == []
+    assert _raw_journal_mode(RunRepository(tmp_path)) == "wal"
+
+
+def test_initializer_reopens_and_outwaits_more_than_eight_wal_busy_results(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a fixed eight-attempt loop failing before a bounded lock clears.
+    repository = _BusyWalRepository(tmp_path, failures_before_success=12)
+
+    repository.initialize()
+
+    assert repository.wal_attempts > 8
+    assert repository.sleep_durations
+    assert repository.opened_connections == repository.closed_connections
+    assert _raw_journal_mode(RunRepository(tmp_path)) == "wal"
+
+
+def test_initializer_always_busy_wal_failure_is_typed_bounded_and_closes_handles(
+    tmp_path: Path,
+) -> None:
+    # Protective regression: the deadline cannot leak handles or escape as raw SQLite errors.
+    repository = _BusyWalRepository(
+        tmp_path,
+        failures_before_success=None,
+        deadline_seconds=0.05,
+    )
+    with pytest.raises(RunDatabaseError):
+        repository.initialize()
+
+    assert repository.fake_time >= repository._WAL_ENABLE_TIMEOUT_SECONDS
+    assert repository.sleep_durations
+    assert repository.opened_connections == repository.closed_connections
 
 
 @pytest.mark.parametrize("damage", ["version_only", "missing_index"])
@@ -4670,6 +5003,253 @@ def test_allocation_immutability_trigger_preserves_lifecycle_updates(
 
 
 @pytest.mark.parametrize(
+    "source_state",
+    ["live_unreferenced", "terminal_unreferenced", "referenced"],
+)
+def test_insert_or_replace_cannot_rewrite_existing_run_id(
+    tmp_path: Path,
+    source_state: str,
+) -> None:
+    # Break caught: delete-then-insert replacing one logical run with a new preimage.
+    repository = _repository(tmp_path)
+    if source_state == "referenced":
+        repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+        publishing = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+        repository.commit_publication(
+            publishing.run_id,
+            _publication(SNAPSHOT_A, generation=1),
+            expected_version=publishing.version,
+            now=T3,
+        )
+        source = repository.get(publishing.run_id)
+    else:
+        source = repository.create_or_join(
+            _new_run(
+                book_id=None,
+                client_idempotency_key=None,
+            ),
+            now=T0,
+        ).record
+        if source_state == "terminal_unreferenced":
+            source = repository.mark_failed(
+                source.run_id,
+                RunFailureV1(code=RunErrorCode.WORKER_FAILED),
+                expected_version=source.version,
+                now=T1,
+            )
+
+    replacement_fingerprint = "d" * 64
+    replacement_request = _new_run(
+        run_id=source.run_id,
+        request_fingerprint=replacement_fingerprint,
+        client_idempotency_key=None,
+        book_id=source.book_id,
+    )
+    replacement_identity = RunRepository._idempotency_identity(
+        replacement_request,
+        source.captured_generation,
+        None,
+    )
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        with pytest.raises(sqlite3.IntegrityError) as captured:
+            _insert_or_replace_run_from_existing(
+                connection,
+                source.run_id,
+                overrides={
+                    "idempotency_identity": replacement_identity,
+                    "request_fingerprint": replacement_fingerprint,
+                    "client_idempotency_key_digest": None,
+                },
+            )
+
+    assert "run identity is immutable" in str(captured.value)
+    assert repository.get(source.run_id).request_fingerprint == source.request_fingerprint
+
+
+def test_insert_or_replace_cannot_hide_existing_run_behind_positive_rowid(
+    tmp_path: Path,
+) -> None:
+    # Break caught: reintroducing a hidden rowid that can evict a terminal run.
+    repository = _repository(tmp_path)
+    source = repository.create_or_join(
+        _new_run(book_id=None, client_idempotency_key=None),
+        now=T0,
+    ).record
+    source = repository.mark_failed(
+        source.run_id,
+        RunFailureV1(code=RunErrorCode.WORKER_FAILED),
+        expected_version=source.version,
+        now=T1,
+    )
+    replacement_id = "run_01J5X5S8J5J8P7KQ4Y0T3N6F1A"
+    replacement_fingerprint = "d" * 64
+    replacement_identity = RunRepository._idempotency_identity(
+        _new_run(
+            run_id=replacement_id,
+            book_id=None,
+            request_fingerprint=replacement_fingerprint,
+            client_idempotency_key=None,
+        ),
+        None,
+        None,
+    )
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        with pytest.raises(sqlite3.OperationalError, match="rowid"):
+            _insert_or_replace_run_from_existing(
+                connection,
+                source.run_id,
+                explicit_rowid=1,
+                overrides={
+                    "run_id": replacement_id,
+                    "idempotency_identity": replacement_identity,
+                    "request_fingerprint": replacement_fingerprint,
+                },
+            )
+
+    assert repository.get(source.run_id).run_id == source.run_id
+    with pytest.raises(RunNotFoundError):
+        repository.get(replacement_id)
+
+
+@pytest.mark.parametrize("collision", ["live_identity", "live_book_generation"])
+def test_insert_or_replace_cannot_evict_live_allocation_conflicts(
+    tmp_path: Path,
+    collision: str,
+) -> None:
+    # Break caught: OR REPLACE turning either partial live uniqueness rule into deletion.
+    repository = _repository(tmp_path)
+    if collision == "live_book_generation":
+        repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+        source = repository.create_or_join(
+            _new_run(client_idempotency_key=None),
+            now=T1,
+        ).record
+        replacement_fingerprint = "d" * 64
+        replacement_identity = RunRepository._idempotency_identity(
+            _new_run(
+                run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6F1B",
+                request_fingerprint=replacement_fingerprint,
+                client_idempotency_key=None,
+            ),
+            1,
+            None,
+        )
+        overrides = {
+            "run_id": "run_01J5X5S8J5J8P7KQ4Y0T3N6F1B",
+            "idempotency_identity": replacement_identity,
+            "request_fingerprint": replacement_fingerprint,
+        }
+    else:
+        source = repository.create_or_join(
+            _new_run(book_id=None, client_idempotency_key=None),
+            now=T0,
+        ).record
+        overrides = {"run_id": "run_01J5X5S8J5J8P7KQ4Y0T3N6F1C"}
+
+    with sqlite3.connect(repository.database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError) as captured:
+            _insert_or_replace_run_from_existing(
+                connection,
+                source.run_id,
+                overrides=overrides,
+            )
+
+    assert "run identity is immutable" in str(captured.value)
+    assert repository.get(source.run_id).run_outcome is RunOutcome.RUNNING
+
+
+@pytest.mark.parametrize("neighborhood", ["identity", "book_generation"])
+def test_run_insert_collision_trigger_allows_fresh_and_terminal_rows(
+    tmp_path: Path,
+    neighborhood: str,
+) -> None:
+    # Protective regression: only live conflicts collide; terminal history remains appendable.
+    repository = _repository(tmp_path)
+    if neighborhood == "book_generation":
+        repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+        source = repository.create_or_join(
+            _new_run(client_idempotency_key=None),
+            now=T1,
+        ).record
+        terminal_fingerprint = "d" * 64
+        terminal_identity = RunRepository._idempotency_identity(
+            _new_run(
+                run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6F1D",
+                request_fingerprint=terminal_fingerprint,
+                client_idempotency_key=None,
+            ),
+            1,
+            None,
+        )
+        allocation_overrides = {
+            "run_id": "run_01J5X5S8J5J8P7KQ4Y0T3N6F1D",
+            "idempotency_identity": terminal_identity,
+            "request_fingerprint": terminal_fingerprint,
+        }
+    else:
+        source = repository.create_or_join(
+            _new_run(book_id=None, client_idempotency_key=None),
+            now=T0,
+        ).record
+        allocation_overrides = {
+            "run_id": "run_01J5X5S8J5J8P7KQ4Y0T3N6F1E",
+        }
+    terminal_id = str(allocation_overrides["run_id"])
+    with sqlite3.connect(repository.database_path) as connection:
+        _insert_or_replace_run_from_existing(
+            connection,
+            source.run_id,
+            overrides={
+                **allocation_overrides,
+                "run_outcome": "FAILED",
+                "updated_at_utc": "2026-08-20T08:02:00.000000Z",
+                "finished_at_utc": "2026-08-20T08:02:00.000000Z",
+                "error_code": "WORKER_FAILED",
+                "error_message": "worker execution failed",
+            },
+        )
+
+    assert repository.get(source.run_id).run_outcome is RunOutcome.RUNNING
+    assert repository.get(terminal_id).run_outcome is RunOutcome.FAILED
+    fresh = repository.create_or_join(
+        _new_run(
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6F1F",
+            book_id=None,
+            request_fingerprint="f" * 64,
+            client_idempotency_key="fresh-after-trigger",
+        ),
+        now=T2,
+    )
+    assert fresh.created is True
+
+
+def test_run_insert_collision_trigger_allows_repeated_fresh_runs(
+    tmp_path: Path,
+) -> None:
+    # Protective regression: logical collision guards must not block unrelated fresh runs.
+    repository = _repository(tmp_path)
+    created_ids = []
+    for index in range(64):
+        run_id = f"run_implicit_{index:08d}"
+        created = repository.create_or_join(
+            _new_run(
+                run_id=run_id,
+                book_id=None,
+                request_fingerprint=f"{index + 4_000_000:064x}",
+                client_idempotency_key=None,
+            ),
+            now=T0,
+        )
+        assert created.created is True
+        created_ids.append(created.record.run_id)
+
+    assert len(created_ids) == 64
+    assert len(repository.list_runs()) == 64
+
+
+@pytest.mark.parametrize(
     ("column", "value"),
     [
         ("idempotency_identity", "b" * 64),
@@ -4857,6 +5437,186 @@ def test_expected_active_provenance_walk_accepts_equal_timestamp_multihop(
     assert repository.get(third.run_id).expected_active_snapshot_id == SNAPSHOT_B
     assert repository.get_active("book-alpha").snapshot_id == SNAPSHOT_C
     repository.audit_integrity()
+
+
+@pytest.mark.parametrize("surface", ["run", "active", "audit"])
+def test_published_owner_cannot_expect_a_forward_publication_sequence(
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    # Break caught: a sequence-one owner accepting sequence two at the same timestamp.
+    repository = _repository(tmp_path)
+    snapshot_ids, run_ids = _seed_publication_chain(repository, 2)
+    _execute_without_named_trigger(
+        repository,
+        "snapshot_run_allocation_immutable",
+        """
+        UPDATE snapshot_runs
+        SET expected_active_snapshot_id = CASE
+                WHEN run_id = ? THEN ?
+                ELSE NULL
+            END,
+            expected_active_pointer_version = CASE
+                WHEN run_id = ? THEN 2
+                ELSE 0
+            END
+        WHERE run_id IN (?, ?)
+        """,
+        (run_ids[0], snapshot_ids[1], run_ids[0], run_ids[0], run_ids[1]),
+    )
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute(
+            """
+            UPDATE active_snapshots
+            SET snapshot_id = ?, pointer_version = 3
+            WHERE book_id = 'book-alpha'
+            """,
+            (snapshot_ids[0],),
+        )
+
+    with pytest.raises(RunDatabaseError, match="publication sequence"):
+        if surface == "run":
+            repository.get(run_ids[0])
+        elif surface == "active":
+            repository.get_active("book-alpha")
+        else:
+            repository.audit_integrity()
+
+
+def test_nonpublished_run_may_reference_an_expected_publication(
+    tmp_path: Path,
+) -> None:
+    # Protective regression: sequence ordering applies only to a publication owner's edge.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    published = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        published.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=published.version,
+        now=T3,
+    )
+    queued = repository.create_or_join(
+        _new_run(
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6F2A",
+            client_idempotency_key="nonpublished-expected",
+        ),
+        now=T3,
+    ).record
+
+    assert repository.get(queued.run_id).expected_active_snapshot_id == SNAPSHOT_A
+    repository.audit_integrity()
+
+
+@pytest.mark.parametrize("operation", ["audit", "initialize"])
+def test_full_catalog_publication_ancestry_scales_linearly(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    # Break caught: every audit root rewalking the complete expected-publication tail.
+    costs: dict[int, int] = {}
+    for count in (100, 400):
+        path = tmp_path / f"{operation}-{count}"
+        seed = _repository(path)
+        _seed_publication_chain(seed, count)
+        measured = _VmBudgetRunRepository(path)
+        measured.reset_vm_callbacks()
+        if operation == "audit":
+            measured.audit_integrity()
+        else:
+            measured.initialize()
+        costs[count] = measured.vm_callbacks
+
+    assert costs[400] <= costs[100] * 6, costs
+
+
+@pytest.mark.parametrize("operation", ["list_publications", "recover_active"])
+def test_multirow_publication_ancestry_reads_scale_linearly(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    # Break caught: each row in one read transaction starting a fresh ancestry walk.
+    costs: dict[int, int] = {}
+    for count in (100, 400):
+        path = tmp_path / f"{operation}-{count}"
+        seed = _repository(path)
+        _seed_publication_chain(seed, count)
+        measured = _VmBudgetRunRepository(path)
+        measured.reset_vm_callbacks()
+        if operation == "list_publications":
+            assert len(measured.list_publications("book-alpha")) == count
+        else:
+            recovered = measured.recover_active(
+                "book-alpha",
+                verify=lambda _snapshot_id: (_ for _ in ()).throw(
+                    ValueError("corrupt")
+                ),
+                now=T1,
+            )
+            assert recovered.decision is ActiveRecoveryDecision.REMOVED
+        costs[count] = measured.vm_callbacks
+
+    assert costs[400] <= costs[100] * 6, costs
+
+
+def test_failed_deep_publication_walk_does_not_poison_completed_tails(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a failed walk memoizing its valid prefix as a proven ancestry tail.
+    repository = _repository(tmp_path)
+    snapshot_ids, run_ids = _seed_publication_chain(repository, 400)
+    missing_snapshot_id = "f" * 64
+    _execute_without_named_trigger(
+        repository,
+        "snapshot_run_allocation_immutable",
+        """
+        UPDATE snapshot_runs
+        SET expected_active_snapshot_id = ?, expected_active_pointer_version = 1
+        WHERE run_id = ?
+        """,
+        (missing_snapshot_id, run_ids[0]),
+    )
+
+    completed: set[tuple[str, str]] = set()
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT * FROM snapshot_manifests WHERE snapshot_id = ?",
+            (snapshot_ids[-1],),
+        ).fetchone()
+        assert row is not None
+        publication = RunRepository._publication_from_row(row)
+        with pytest.raises(RunDatabaseError, match="missing"):
+            RunRepository._validate_publication_relations(
+                connection,
+                publication,
+                completed_tails=completed,
+            )
+
+    assert completed == set()
+
+
+def test_deep_publication_chain_cycle_is_not_hidden_by_completed_tails(
+    tmp_path: Path,
+) -> None:
+    # Protective regression: per-walk visiting state must remain separate from proven tails.
+    repository = _repository(tmp_path)
+    snapshot_ids, run_ids = _seed_publication_chain(repository, 400)
+    _execute_without_named_trigger(
+        repository,
+        "snapshot_run_allocation_immutable",
+        """
+        UPDATE snapshot_runs
+        SET expected_active_snapshot_id = ?, expected_active_pointer_version = 201
+        WHERE run_id = ?
+        """,
+        (snapshot_ids[200], run_ids[0]),
+    )
+
+    with pytest.raises(RunDatabaseError):
+        repository.get_active("book-alpha")
+    with pytest.raises(RunDatabaseError):
+        repository.audit_integrity()
 
 
 def test_expected_active_provenance_walk_rejects_real_cycle(tmp_path: Path) -> None:

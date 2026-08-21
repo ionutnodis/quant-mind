@@ -205,7 +205,7 @@ CREATE TABLE snapshot_runs (
     ),
     FOREIGN KEY (book_id, expected_active_snapshot_id)
         REFERENCES snapshot_manifests(book_id, snapshot_id)
-);
+) WITHOUT ROWID;
 
 CREATE UNIQUE INDEX one_live_idempotency_identity
     ON snapshot_runs(run_kind, idempotency_identity)
@@ -233,6 +233,29 @@ CREATE INDEX snapshot_runs_by_book_generation
 
 CREATE INDEX snapshot_runs_by_book_requested
     ON snapshot_runs(book_id, requested_at_utc DESC, run_id DESC);
+
+CREATE TRIGGER snapshot_run_identity_collision_on_insert
+BEFORE INSERT ON snapshot_runs
+WHEN EXISTS (
+    SELECT 1 FROM snapshot_runs AS existing
+    WHERE existing.run_id = NEW.run_id
+       OR (
+            NEW.run_outcome = 'RUNNING'
+            AND existing.run_outcome = 'RUNNING'
+            AND existing.run_kind = NEW.run_kind
+            AND existing.idempotency_identity = NEW.idempotency_identity
+       )
+       OR (
+            NEW.run_outcome = 'RUNNING'
+            AND NEW.book_id IS NOT NULL
+            AND existing.run_outcome = 'RUNNING'
+            AND existing.book_id = NEW.book_id
+            AND existing.captured_generation = NEW.captured_generation
+       )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'run identity is immutable');
+END;
 
 CREATE TRIGGER snapshot_run_allocation_immutable
 BEFORE UPDATE OF

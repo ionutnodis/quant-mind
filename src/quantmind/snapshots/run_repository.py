@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import time
 import unicodedata
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -973,6 +974,8 @@ RepositoryFaultInjector = Callable[[str], None]
 class RunRepository:
     """Short-connection SQLite repository; workers never receive this object."""
 
+    _WAL_ENABLE_TIMEOUT_SECONDS = 30.0
+
     def __init__(
         self,
         root: Path,
@@ -1006,7 +1009,7 @@ class RunRepository:
             connection.execute("PRAGMA synchronous = FULL")
             if configure_wal:
                 mode = str(
-                    connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+                    connection.execute("PRAGMA journal_mode").fetchone()[0]
                 ).lower()
                 if mode != "wal":
                     raise sqlite3.OperationalError("WAL journal mode was not enabled")
@@ -1051,17 +1054,85 @@ class RunRepository:
         finally:
             connection.close()
 
+    @staticmethod
+    def _sqlite_is_busy_or_locked(error: BaseException) -> bool:
+        if not isinstance(error, sqlite3.OperationalError):
+            return False
+        error_code = getattr(error, "sqlite_errorcode", None)
+        if isinstance(error_code, int) and (error_code & 0xFF) in {
+            sqlite3.SQLITE_BUSY,
+            sqlite3.SQLITE_LOCKED,
+        }:
+            return True
+        message = str(error).lower()
+        return "busy" in message or "locked" in message
+
+    def _request_wal_mode(self, connection: sqlite3.Connection) -> str:
+        return str(
+            connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+        ).lower()
+
+    def _wal_now(self) -> float:
+        return time.monotonic()
+
+    def _wal_sleep(self, duration_seconds: float) -> None:
+        time.sleep(duration_seconds)
+
+    def _enable_wal_with_deadline(self) -> None:
+        deadline = self._wal_now() + self._WAL_ENABLE_TIMEOUT_SECONDS
+        backoff_seconds = 0.005
+        last_error: BaseException | None = None
+        while True:
+            remaining_seconds = deadline - self._wal_now()
+            if remaining_seconds <= 0:
+                raise RunDatabaseError(
+                    "cannot enable WAL after catalog migration"
+                ) from last_error
+            attempt_timeout_ms = max(
+                1,
+                min(250, int(remaining_seconds * 1_000)),
+            )
+            connection: sqlite3.Connection | None = None
+            try:
+                connection = self._open_connection(
+                    configure_wal=False,
+                    timeout_ms=attempt_timeout_ms,
+                )
+                mode = self._request_wal_mode(connection)
+                if mode == "wal":
+                    return
+                last_error = sqlite3.OperationalError(
+                    f"SQLite returned journal mode {mode!r}"
+                )
+            except RunDatabaseError as error:
+                cause = error.__cause__
+                if not self._sqlite_is_busy_or_locked(cause):
+                    raise
+                last_error = cause
+            except sqlite3.OperationalError as error:
+                if not self._sqlite_is_busy_or_locked(error):
+                    raise RunDatabaseError(
+                        "cannot enable WAL after catalog migration"
+                    ) from error
+                last_error = error
+            finally:
+                if connection is not None:
+                    connection.close()
+
+            remaining_seconds = deadline - self._wal_now()
+            if remaining_seconds <= 0:
+                raise RunDatabaseError(
+                    "cannot enable WAL after catalog migration"
+                ) from last_error
+            self._wal_sleep(min(backoff_seconds, remaining_seconds))
+            backoff_seconds = min(backoff_seconds * 2, 0.2)
+
     def initialize(self) -> None:
         try:
             self.database_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as error:
             raise RunDatabaseError("cannot create the durable run database root") from error
-        connection = self._open_connection(
-            configure_wal=False,
-            timeout_ms=30_000,
-        )
         try:
-            connection.execute("BEGIN IMMEDIATE")
             migration = (
                 resources.files("quantmind.snapshots.migrations")
                 .joinpath("0001_run_catalog.sql")
@@ -1071,44 +1142,60 @@ class RunRepository:
             expected_signature = self._expected_schema_signature(
                 migration_statements
             )
-            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        except (OSError, sqlite3.Error) as error:
+            raise RunDatabaseError("cannot initialize the durable run database") from error
+
+        migration_connection = self._open_connection(
+            configure_wal=False,
+            timeout_ms=30_000,
+        )
+        try:
+            migration_connection.execute("BEGIN IMMEDIATE")
+            version = int(
+                migration_connection.execute("PRAGMA user_version").fetchone()[0]
+            )
             if version == 0:
                 for statement in migration_statements:
-                    connection.execute(statement)
-                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                    migration_connection.execute(statement)
+                version = int(
+                    migration_connection.execute("PRAGMA user_version").fetchone()[0]
+                )
             if version != _CURRENT_SCHEMA_VERSION:
                 raise RunDatabaseError(
                     f"unsupported durable run schema version: {version}"
                 )
             self._validate_schema(
-                connection, expected_signature=expected_signature
+                migration_connection, expected_signature=expected_signature
             )
-            self._validate_relational_invariants(connection)
-            connection.commit()
-            for _ in range(8):
-                try:
-                    mode = str(
-                        connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
-                    ).lower()
-                    if mode == "wal":
-                        break
-                except sqlite3.OperationalError as error:
-                    if "locked" not in str(error).lower() and "busy" not in str(error).lower():
-                        raise
-            else:
-                raise RunDatabaseError("cannot enable WAL after catalog migration")
-            self._validate_schema(
-                connection, expected_signature=expected_signature
-            )
-            self._validate_relational_invariants(connection)
+            self._validate_relational_invariants(migration_connection)
+            migration_connection.commit()
         except RunRepositoryError:
-            connection.rollback()
+            migration_connection.rollback()
             raise
         except (OSError, sqlite3.Error) as error:
-            connection.rollback()
+            migration_connection.rollback()
             raise RunDatabaseError("cannot initialize the durable run database") from error
         finally:
-            connection.close()
+            migration_connection.close()
+
+        self._enable_wal_with_deadline()
+
+        validation_connection = self._open_connection(
+            configure_wal=True,
+            timeout_ms=30_000,
+        )
+        try:
+            validation_connection.execute("BEGIN")
+            self._validate_schema(
+                validation_connection, expected_signature=expected_signature
+            )
+            self._validate_relational_invariants(validation_connection)
+        except RunRepositoryError:
+            raise
+        except (OSError, sqlite3.Error) as error:
+            raise RunDatabaseError("cannot initialize the durable run database") from error
+        finally:
+            validation_connection.close()
 
     @staticmethod
     def _migration_statements(script: str) -> tuple[str, ...]:
@@ -1325,17 +1412,34 @@ class RunRepository:
                 "SELECT * FROM snapshot_recovery_events"
             ).fetchall()
         )
+        completed_tails: set[tuple[str, str]] = set()
 
         for head in heads:
             RunRepository._validate_head_relations(connection, head)
         for run in runs:
-            RunRepository._validate_run_relations(connection, run)
+            RunRepository._validate_run_relations(
+                connection,
+                run,
+                completed_tails=completed_tails,
+            )
         for publication in publications:
-            RunRepository._validate_publication_relations(connection, publication)
+            RunRepository._validate_publication_relations(
+                connection,
+                publication,
+                completed_tails=completed_tails,
+            )
         for active in active_snapshots:
-            RunRepository._validate_active_relations(connection, active)
+            RunRepository._validate_active_relations(
+                connection,
+                active,
+                completed_tails=completed_tails,
+            )
         for event in recovery_events:
-            RunRepository._validate_recovery_event_relations(connection, event)
+            RunRepository._validate_recovery_event_relations(
+                connection,
+                event,
+                completed_tails=completed_tails,
+            )
 
         invariant_queries = (
             (
@@ -1746,13 +1850,12 @@ class RunRepository:
 
     @staticmethod
     def _validate_run_relations(
-        connection: sqlite3.Connection, record: RunRecordV1
+        connection: sqlite3.Connection,
+        record: RunRecordV1,
+        *,
+        completed_tails: set[tuple[str, str]] | None = None,
     ) -> None:
         RunRepository._validate_run_head_relation(connection, record)
-
-        expected = RunRepository._expected_publication_for_run(connection, record)
-        if expected is not None:
-            RunRepository._validate_publication_relations(connection, expected)
 
         owned_row = connection.execute(
             "SELECT * FROM snapshot_manifests WHERE run_id = ?", (record.run_id,)
@@ -1762,33 +1865,75 @@ class RunRepository:
                 raise RunDatabaseError("successful book run has no publication")
             publication = RunRepository._publication_from_row(owned_row)
             RunRepository._validate_publication_owner_tuple(publication, record)
+            RunRepository._validate_publication_relations(
+                connection,
+                publication,
+                completed_tails=completed_tails,
+            )
         elif owned_row is not None:
             raise RunDatabaseError("non-successful run unexpectedly owns a publication")
+        else:
+            expected = RunRepository._expected_publication_for_run(connection, record)
+            if expected is not None:
+                RunRepository._validate_publication_relations(
+                    connection,
+                    expected,
+                    completed_tails=completed_tails,
+                )
 
     @staticmethod
     def _validate_publication_relations(
-        connection: sqlite3.Connection, publication: ManifestPublicationRecordV1
+        connection: sqlite3.Connection,
+        publication: ManifestPublicationRecordV1,
+        *,
+        completed_tails: set[tuple[str, str]] | None = None,
     ) -> None:
+        completed = set() if completed_tails is None else completed_tails
         seen: set[tuple[str, str]] = set()
+        path: list[tuple[str, str]] = []
+        sequence_is_historical = True
         current = publication
         while True:
             identity = (current.book_id, current.snapshot_id)
+            if identity in completed:
+                if not sequence_is_historical:
+                    raise RunDatabaseError(
+                        "expected-active publication sequence is not historical"
+                    )
+                completed.update(path)
+                return
             if identity in seen:
                 raise RunDatabaseError(
                     "expected-active publication provenance contains a cycle"
                 )
             seen.add(identity)
+            path.append(identity)
             owner = RunRepository._publication_owner(connection, current)
             expected = RunRepository._expected_publication_for_run(
                 connection, owner
             )
             if expected is None:
+                if not sequence_is_historical:
+                    raise RunDatabaseError(
+                        "expected-active publication sequence is not historical"
+                    )
+                completed.update(path)
                 return
+            expected_identity = (expected.book_id, expected.snapshot_id)
+            if expected_identity in seen:
+                raise RunDatabaseError(
+                    "expected-active publication provenance contains a cycle"
+                )
+            if expected.publication_sequence >= current.publication_sequence:
+                sequence_is_historical = False
             current = expected
 
     @staticmethod
     def _validate_active_relations(
-        connection: sqlite3.Connection, active: ActiveSnapshotV1
+        connection: sqlite3.Connection,
+        active: ActiveSnapshotV1,
+        *,
+        completed_tails: set[tuple[str, str]] | None = None,
     ) -> ManifestPublicationRecordV1:
         publication_row = connection.execute(
             """
@@ -1800,7 +1945,11 @@ class RunRepository:
         if publication_row is None:
             raise RunDatabaseError("active publication is missing")
         publication = RunRepository._publication_from_row(publication_row)
-        RunRepository._validate_publication_relations(connection, publication)
+        RunRepository._validate_publication_relations(
+            connection,
+            publication,
+            completed_tails=completed_tails,
+        )
         head_row = connection.execute(
             "SELECT * FROM book_heads WHERE book_id = ?", (active.book_id,)
         ).fetchone()
@@ -1816,7 +1965,10 @@ class RunRepository:
 
     @staticmethod
     def _validate_recovery_event_relations(
-        connection: sqlite3.Connection, event: RecoveryEventV1
+        connection: sqlite3.Connection,
+        event: RecoveryEventV1,
+        *,
+        completed_tails: set[tuple[str, str]] | None = None,
     ) -> None:
         rejected = connection.execute(
             """
@@ -1829,7 +1981,9 @@ class RunRepository:
             raise RunDatabaseError("recovery rejected publication is missing")
         rejected_publication = RunRepository._publication_from_row(rejected)
         RunRepository._validate_publication_relations(
-            connection, rejected_publication
+            connection,
+            rejected_publication,
+            completed_tails=completed_tails,
         )
         if event.selected_snapshot_id is None:
             return
@@ -1843,7 +1997,11 @@ class RunRepository:
         if selected is None:
             raise RunDatabaseError("recovery selected publication is missing")
         publication = RunRepository._publication_from_row(selected)
-        RunRepository._validate_publication_relations(connection, publication)
+        RunRepository._validate_publication_relations(
+            connection,
+            publication,
+            completed_tails=completed_tails,
+        )
         if (
             publication.snapshot_status is not SnapshotStatus.BLESSED
             or event.selected_snapshot_id == event.rejected_snapshot_id
@@ -2140,8 +2298,13 @@ class RunRepository:
                     (book_id,),
                 ).fetchall()
             records = tuple(self._run_from_row(row) for row in rows)
+            completed_tails: set[tuple[str, str]] = set()
             for record in records:
-                self._validate_run_relations(connection, record)
+                self._validate_run_relations(
+                    connection,
+                    record,
+                    completed_tails=completed_tails,
+                )
             return records
 
     @staticmethod
@@ -2822,8 +2985,13 @@ class RunRepository:
                 """
             ).fetchall()
             active_records = tuple(self._active_from_row(row) for row in rows)
+            completed_tails: set[tuple[str, str]] = set()
             for active in active_records:
-                self._validate_active_relations(connection, active)
+                self._validate_active_relations(
+                    connection,
+                    active,
+                    completed_tails=completed_tails,
+                )
             return active_records
 
     def list_publications(
@@ -2840,8 +3008,13 @@ class RunRepository:
                 (book_id,),
             ).fetchall()
             publications = tuple(self._publication_from_row(row) for row in rows)
+            completed_tails: set[tuple[str, str]] = set()
             for publication in publications:
-                self._validate_publication_relations(connection, publication)
+                self._validate_publication_relations(
+                    connection,
+                    publication,
+                    completed_tails=completed_tails,
+                )
             return publications
 
     def list_blessed_fallbacks(
@@ -2859,8 +3032,13 @@ class RunRepository:
                 (book_id,),
             ).fetchall()
             publications = tuple(self._publication_from_row(row) for row in rows)
+            completed_tails: set[tuple[str, str]] = set()
             for publication in publications:
-                self._validate_publication_relations(connection, publication)
+                self._validate_publication_relations(
+                    connection,
+                    publication,
+                    completed_tails=completed_tails,
+                )
             return tuple(
                 publication
                 for publication in publications
@@ -2879,8 +3057,13 @@ class RunRepository:
                 (book_id,),
             ).fetchall()
             events = tuple(self._recovery_event_from_row(row) for row in rows)
+            completed_tails: set[tuple[str, str]] = set()
             for event in events:
-                self._validate_recovery_event_relations(connection, event)
+                self._validate_recovery_event_relations(
+                    connection,
+                    event,
+                    completed_tails=completed_tails,
+                )
             return events
 
     @staticmethod
@@ -2972,6 +3155,7 @@ class RunRepository:
             raise TypeError("snapshot verifier must be callable")
         now_text = _timestamp_text(now, "active recovery time")
         with self._read_connection() as connection:
+            completed_tails: set[tuple[str, str]] = set()
             previous_row = self._active_row(connection, book_id)
             previous_active = (
                 None
@@ -2983,7 +3167,9 @@ class RunRepository:
                 fallbacks: tuple[ManifestPublicationRecordV1, ...] = ()
             else:
                 active_publication = self._validate_active_relations(
-                    connection, previous_active
+                    connection,
+                    previous_active,
+                    completed_tails=completed_tails,
                 )
                 fallback_rows = connection.execute(
                     """
@@ -2997,7 +3183,11 @@ class RunRepository:
                     self._publication_from_row(row) for row in fallback_rows
                 )
                 for publication in same_book_publications:
-                    self._validate_publication_relations(connection, publication)
+                    self._validate_publication_relations(
+                        connection,
+                        publication,
+                        completed_tails=completed_tails,
+                    )
                 fallbacks = tuple(
                     publication
                     for publication in same_book_publications
@@ -3061,6 +3251,7 @@ class RunRepository:
         detail_json = self._recovery_detail_json(resolution)
         self._inject("recovery.after_selection")
         with self._write_transaction() as connection:
+            completed_tails: set[tuple[str, str]] = set()
             current_row = self._active_row(connection, book_id)
             current_active = (
                 None
@@ -3111,11 +3302,21 @@ class RunRepository:
                         "verified fallback publication metadata changed before resolution"
                     )
             if current_active is not None:
-                self._validate_active_relations(connection, current_active)
-            self._validate_publication_relations(connection, rejected_publication)
+                self._validate_active_relations(
+                    connection,
+                    current_active,
+                    completed_tails=completed_tails,
+                )
+            self._validate_publication_relations(
+                connection,
+                rejected_publication,
+                completed_tails=completed_tails,
+            )
             if selected_publication is not None:
                 self._validate_publication_relations(
-                    connection, selected_publication
+                    connection,
+                    selected_publication,
+                    completed_tails=completed_tails,
                 )
             if not pointer_matches:
                 decision = ActiveRecoveryDecision.CAS_LOST
@@ -3194,9 +3395,17 @@ class RunRepository:
                 else self._active_from_row(new_active_row)
             )
             if new_active is not None:
-                self._validate_active_relations(connection, new_active)
+                self._validate_active_relations(
+                    connection,
+                    new_active,
+                    completed_tails=completed_tails,
+                )
             event = self._recovery_event_from_row(event_row)
-            self._validate_recovery_event_relations(connection, event)
+            self._validate_recovery_event_relations(
+                connection,
+                event,
+                completed_tails=completed_tails,
+            )
             return ActiveRecoveryResultV1(
                 decision=decision,
                 previous_active=previous_active,
