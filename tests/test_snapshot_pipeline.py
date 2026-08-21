@@ -264,6 +264,27 @@ def _publisher_case(
     return publisher_module, repository, store, run, authority, candidate
 
 
+def _cancelled_publication_rejection_case(tmp_path: Path, *, run_id: str):
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id=run_id,
+    )
+
+    def cancel_before_commit(stage) -> None:
+        if stage is module.PublisherFaultStage.BEFORE_REPOSITORY_COMMIT:
+            repository.request_cancel(run.run_id, now=T3)
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+        fault_injector=cancel_before_commit,
+    ).publish(run.run_id, candidate, authority=authority)
+    assert result.result_code is module.PublisherResultCode.CATALOG_RESULT
+    assert result.rejection_code is RunErrorCode.CANCELLED_BY_USER
+    return module, repository, store, result.run, authority, candidate
+
+
 def _publish_then_exit_before_catalog_commit(
     root: str,
     run_id: str,
@@ -1644,3 +1665,428 @@ def test_precommit_acknowledged_cancellation_returns_terminal_truth(
     assert repository.get(run.run_id) == result.run
     assert repository.list_publications("book-alpha") == ()
     assert repository.get_active("book-alpha") is None
+
+
+def test_failure_terminalization_converges_attachment_then_cancellation_stales(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a fixed retry budget exhausting after two distinct legal
+    # PUBLISHING mutations and leaking stale-version uncertainty instead of cancellation.
+    mark_attempts = 0
+    candidate_snapshot_id: str | None = None
+
+    class CompoundRaceRepository(RunRepository):
+        def mark_failed(self, run_id, failure, *, expected_version, now):
+            nonlocal mark_attempts
+            mark_attempts += 1
+            if mark_attempts == 1:
+                assert candidate_snapshot_id is not None
+                self.attach_candidate(
+                    run_id,
+                    candidate_snapshot_id,
+                    expected_version=expected_version,
+                    now=now,
+                )
+            elif mark_attempts == 2:
+                self.request_cancel(run_id, now=now)
+            return super().mark_failed(
+                run_id,
+                failure,
+                expected_version=expected_version,
+                now=now,
+            )
+
+    repository = CompoundRaceRepository(tmp_path)
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B3B",
+        repository=repository,
+    )
+    candidate_snapshot_id = create_manifest(candidate.manifest_body).snapshot_id
+    forged = module.SnapshotCandidateV1(
+        manifest_body=candidate.manifest_body,
+        outputs=(
+            candidate.outputs[0].model_copy(
+                update={"payload": b'{"xray":"tampered"}'}
+            ),
+        ),
+    )
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, forged, authority=authority)
+
+    assert mark_attempts == 2
+    assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
+    assert result.publication_result is None
+    assert result.run.run_outcome is RunOutcome.CANCELLED
+    assert result.run.error_code is RunErrorCode.CANCELLED_BY_USER
+    assert result.run.candidate_snapshot_id == candidate_snapshot_id
+    assert RunRepository(tmp_path).get(run.run_id) == result.run
+
+
+@pytest.mark.parametrize("newer_durable_state", ["cancellation", "candidate"])
+def test_terminalization_floors_a_stale_publisher_clock(
+    tmp_path: Path,
+    newer_durable_state: str,
+) -> None:
+    # Break caught: a controller clock behind newer durable failure/cancellation state
+    # making terminalization violate the repository's monotonic lifecycle-time invariant.
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B3C",
+    )
+    if newer_durable_state == "cancellation":
+        advanced = repository.request_cancel(run.run_id, now=T4)
+        published_candidate = candidate
+        expected_outcome = RunOutcome.CANCELLED
+        expected_code = RunErrorCode.CANCELLED_BY_USER
+    else:
+        advanced = repository.attach_candidate(
+            run.run_id,
+            create_manifest(candidate.manifest_body).snapshot_id,
+            expected_version=run.version,
+            now=T4,
+        )
+        published_candidate = module.SnapshotCandidateV1(
+            manifest_body=candidate.manifest_body,
+            outputs=(
+                candidate.outputs[0].model_copy(
+                    update={"payload": b'{"xray":"tampered"}'}
+                ),
+            ),
+        )
+        expected_outcome = RunOutcome.FAILED
+        expected_code = RunErrorCode.SERIALIZATION_FAILED
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, published_candidate, authority=authority)
+
+    assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
+    assert result.publication_result is None
+    assert result.run.run_outcome is expected_outcome
+    assert result.run.error_code is expected_code
+    assert result.run.finished_at_utc == advanced.updated_at_utc
+    assert result.run.updated_at_utc == advanced.updated_at_utc
+    assert repository.get(run.run_id) == result.run
+
+
+def test_terminal_cancel_rejection_response_loss_allows_exact_verified_retry(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a catalog rejection committed before publisher response loss becoming
+    # impossible to recover even though the exact attached candidate remains verifiable.
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B3D",
+    )
+
+    def cancel_then_lose_response(stage) -> None:
+        if stage is module.PublisherFaultStage.BEFORE_REPOSITORY_COMMIT:
+            repository.request_cancel(run.run_id, now=T3)
+        elif stage is module.PublisherFaultStage.AFTER_REPOSITORY_COMMIT:
+            raise OSError("lost terminal catalog response")
+
+    with pytest.raises(OSError, match="lost terminal catalog response"):
+        module.SnapshotPublisher(
+            repository=repository,
+            store=store,
+            clock=lambda: T3,
+            fault_injector=cancel_then_lose_response,
+        ).publish(run.run_id, candidate, authority=authority)
+
+    durable = repository.get(run.run_id)
+    assert durable.run_outcome is RunOutcome.CANCELLED
+    assert durable.error_code is RunErrorCode.CANCELLED_BY_USER
+    assert durable.candidate_snapshot_id == create_manifest(
+        candidate.manifest_body
+    ).snapshot_id
+    assert durable.published_snapshot_id is None
+
+    retried = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert retried.result_code is module.PublisherResultCode.CATALOG_RESULT
+    assert retried.publication_result is not None
+    assert retried.run == durable
+    assert retried.publication_result.run == durable
+    assert retried.publication_result.rejection_code is RunErrorCode.CANCELLED_BY_USER
+    assert retried.published is False
+    assert retried.publication is None
+    assert repository.list_publications("book-alpha") == ()
+    assert repository.get_active("book-alpha") is None
+
+
+def test_terminal_generation_rejection_response_loss_allows_exact_verified_retry(
+    tmp_path: Path,
+) -> None:
+    # Break caught: retry eligibility being limited to cancellation even though stale
+    # generation rejection is an equally durable catalog decision after response loss.
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B3E",
+    )
+    next_book_ref = store.put_bytes(
+        b'{"schema_version":"canonical_book_v1","generation":2}',
+        media_type="application/json",
+        schema_version="canonical_book_v1",
+    )
+
+    def advance_generation_then_lose_response(stage) -> None:
+        if stage is module.PublisherFaultStage.BEFORE_REPOSITORY_COMMIT:
+            repository.advance_book_head(
+                "book-alpha",
+                2,
+                next_book_ref.digest,
+                now=T3,
+            )
+        elif stage is module.PublisherFaultStage.AFTER_REPOSITORY_COMMIT:
+            raise OSError("lost terminal catalog response")
+
+    with pytest.raises(OSError, match="lost terminal catalog response"):
+        module.SnapshotPublisher(
+            repository=repository,
+            store=store,
+            clock=lambda: T3,
+            fault_injector=advance_generation_then_lose_response,
+        ).publish(run.run_id, candidate, authority=authority)
+
+    durable = repository.get(run.run_id)
+    assert durable.run_outcome is RunOutcome.FAILED
+    assert durable.error_code is RunErrorCode.STALE_BOOK_GENERATION
+    assert durable.candidate_snapshot_id == create_manifest(
+        candidate.manifest_body
+    ).snapshot_id
+    assert durable.published_snapshot_id is None
+
+    retried = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert retried.result_code is module.PublisherResultCode.CATALOG_RESULT
+    assert retried.publication_result is not None
+    assert retried.run == durable
+    assert retried.publication_result.rejection_code is RunErrorCode.STALE_BOOK_GENERATION
+    assert retried.published is False
+    assert retried.publication is None
+    assert repository.list_publications("book-alpha") == ()
+    assert repository.get_active("book-alpha") is None
+
+
+def test_terminal_pointer_rejection_response_loss_allows_exact_verified_retry(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a stale-pointer catalog rejection being unrecoverable after response
+    # loss despite exact candidate attachment, immutable bytes, and controller authority.
+    module, repository, store, first_run, authority, first_candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B3F",
+    )
+    first = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(first_run.run_id, first_candidate, authority=authority)
+    assert first.published is True
+
+    replacement_payload = b'{"xray":"replacement"}'
+    replacement_ref = _artifact_ref(
+        replacement_payload,
+        media_type="application/json",
+        schema_version="xray_read_model_v1",
+    )
+    replacement_body = first_candidate.manifest_body.model_copy(
+        update={
+            "outputs": (
+                first_candidate.manifest_body.outputs[0].model_copy(
+                    update={"object_ref": replacement_ref}
+                ),
+            )
+        }
+    )
+    candidate = module.SnapshotCandidateV1(
+        manifest_body=replacement_body,
+        outputs=(
+            first_candidate.outputs[0].model_copy(
+                update={"payload": replacement_payload}
+            ),
+        ),
+    )
+    run = _publishing_run(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B3G",
+        requested_at=T3,
+        stage_at=T3,
+    )
+
+    def reject_active(_snapshot_id: str):
+        raise ValueError("active failed recovery verification")
+
+    def move_pointer_then_lose_response(stage) -> None:
+        if stage is module.PublisherFaultStage.BEFORE_REPOSITORY_COMMIT:
+            repository.recover_active(
+                "book-alpha",
+                verify=reject_active,
+                now=T4,
+            )
+        elif stage is module.PublisherFaultStage.AFTER_REPOSITORY_COMMIT:
+            raise OSError("lost terminal catalog response")
+
+    with pytest.raises(OSError, match="lost terminal catalog response"):
+        module.SnapshotPublisher(
+            repository=repository,
+            store=store,
+            clock=lambda: T4,
+            fault_injector=move_pointer_then_lose_response,
+        ).publish(run.run_id, candidate, authority=authority)
+
+    durable = repository.get(run.run_id)
+    assert durable.run_outcome is RunOutcome.FAILED
+    assert durable.error_code is RunErrorCode.STALE_ACTIVE_POINTER
+    assert durable.candidate_snapshot_id == create_manifest(
+        candidate.manifest_body
+    ).snapshot_id
+    assert durable.published_snapshot_id is None
+
+    retried = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T4,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert retried.result_code is module.PublisherResultCode.CATALOG_RESULT
+    assert retried.publication_result is not None
+    assert retried.run == durable
+    assert retried.publication_result.rejection_code is RunErrorCode.STALE_ACTIVE_POINTER
+    assert retried.published is False
+    assert retried.publication is None
+    assert repository.list_publications("book-alpha") == (first.publication,)
+    assert repository.get_active("book-alpha") is None
+
+
+@pytest.mark.parametrize(
+    "refusal_case",
+    [
+        "worker_failed",
+        "disk_write_failed",
+        "interrupted",
+        "cancelled_without_candidate",
+        "mismatched_candidate",
+        "missing_manifest",
+        "tampered_artifact",
+    ],
+)
+def test_terminal_retry_refuses_ineligible_or_unverifiable_history(
+    tmp_path: Path,
+    refusal_case: str,
+) -> None:
+    # Break caught: widening response-loss recovery into a generic terminal-run replay,
+    # or trusting candidate identity without re-verifying its immutable stored bytes.
+    run_id = "run_01J5X5S8J5J8P7KQ4Y0T3T3B3H"
+    generic_codes = {
+        "worker_failed": RunErrorCode.WORKER_FAILED,
+        "disk_write_failed": RunErrorCode.DISK_WRITE_FAILED,
+        "interrupted": RunErrorCode.INTERRUPTED,
+    }
+    if refusal_case in generic_codes or refusal_case == "cancelled_without_candidate":
+        module, repository, store, run, authority, candidate = _publisher_case(
+            tmp_path,
+            run_id=run_id,
+        )
+        if refusal_case in generic_codes:
+            attached = repository.attach_candidate(
+                run.run_id,
+                create_manifest(candidate.manifest_body).snapshot_id,
+                expected_version=run.version,
+                now=T3,
+            )
+            repository.mark_failed(
+                run.run_id,
+                RunFailureV1(code=generic_codes[refusal_case]),
+                expected_version=attached.version,
+                now=T3,
+            )
+        else:
+            requested = repository.request_cancel(run.run_id, now=T3)
+            repository.acknowledge_cancel(
+                run.run_id,
+                expected_version=requested.version,
+                now=T3,
+            )
+        expected_error = TerminalRunMutationError
+    else:
+        module, repository, store, run, authority, candidate = (
+            _cancelled_publication_rejection_case(tmp_path, run_id=run_id)
+        )
+        if refusal_case == "mismatched_candidate":
+            replacement_payload = b'{"xray":"different-terminal-retry"}'
+            replacement_ref = _artifact_ref(
+                replacement_payload,
+                media_type="application/json",
+                schema_version="xray_read_model_v1",
+            )
+            candidate = module.SnapshotCandidateV1(
+                manifest_body=candidate.manifest_body.model_copy(
+                    update={
+                        "outputs": (
+                            candidate.manifest_body.outputs[0].model_copy(
+                                update={"object_ref": replacement_ref}
+                            ),
+                        )
+                    }
+                ),
+                outputs=(
+                    candidate.outputs[0].model_copy(
+                        update={"payload": replacement_payload}
+                    ),
+                ),
+            )
+            expected_error = TerminalRunMutationError
+        elif refusal_case == "missing_manifest":
+            snapshot_id = create_manifest(candidate.manifest_body).snapshot_id
+            manifest_path = (
+                tmp_path
+                / "snapshots"
+                / "manifests"
+                / "analytical_snapshot_manifest_v1"
+                / snapshot_id[:2]
+                / f"{snapshot_id}.json"
+            )
+            manifest_path.unlink()
+            expected_error = SnapshotStoreError
+        else:
+            output_ref = candidate.outputs[0].artifact_ref()
+            artifact_path = (
+                tmp_path
+                / "snapshots"
+                / "objects"
+                / "sha256"
+                / output_ref.digest[:2]
+                / output_ref.digest
+            )
+            artifact_path.write_bytes(b"tampered immutable bytes")
+            expected_error = SnapshotStoreError
+
+    durable_before = repository.get(run.run_id)
+    publications_before = repository.list_publications("book-alpha")
+    active_before = repository.get_active("book-alpha")
+    with pytest.raises(expected_error):
+        module.SnapshotPublisher(
+            repository=repository,
+            store=store,
+            clock=lambda: T4,
+        ).publish(run.run_id, candidate, authority=authority)
+
+    assert repository.get(run.run_id) == durable_before
+    assert repository.list_publications("book-alpha") == publications_before
+    assert repository.get_active("book-alpha") == active_before

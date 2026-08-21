@@ -60,6 +60,13 @@ _MAX_AGGREGATE_OUTPUT_BYTES: Final = 64 * 1024 * 1024
 _MAX_MANIFEST_BODY_BYTES: Final = 1024 * 1024
 _MAX_AUTHORITY_BYTES: Final = 1024 * 1024
 _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
+_RETRYABLE_TERMINAL_REJECTIONS: Final = frozenset(
+    {
+        RunErrorCode.CANCELLED_BY_USER,
+        RunErrorCode.STALE_BOOK_GENERATION,
+        RunErrorCode.STALE_ACTIVE_POINTER,
+    }
+)
 
 
 def _bounded_identifier(value: str, field_name: str) -> str:
@@ -504,31 +511,97 @@ class SnapshotPublisher:
         run_id: str,
         code: RunErrorCode,
     ) -> SnapshotPublisherResultV1:
-        stale_error: StaleRunVersionError | None = None
-        for _attempt in range(2):
-            current = self._repository.get(run_id)
+        current = self._repository.get(run_id)
+        while True:
             if current.run_outcome in {RunOutcome.FAILED, RunOutcome.CANCELLED}:
                 return self._terminal_result(current)
             if current.run_outcome is RunOutcome.SUCCEEDED:
                 raise TerminalRunMutationError(
                     "run succeeded while publisher failure evidence was being recorded"
                 )
+            terminal_time = max(
+                value
+                for value in (
+                    self._now(),
+                    current.updated_at_utc,
+                    current.cancel_requested_at_utc,
+                )
+                if value is not None
+            )
             try:
                 if current.cancel_requested_at_utc is not None:
                     terminal = self._repository.acknowledge_cancel(
                         run_id,
                         expected_version=current.version,
-                        now=self._now(),
+                        now=terminal_time,
                     )
                 else:
                     terminal = self._repository.mark_failed(
                         run_id,
                         RunFailureV1(code=code),
                         expected_version=current.version,
-                        now=self._now(),
+                        now=terminal_time,
                     )
             except StaleRunVersionError as error:
-                stale_error = error
+                durable = self._repository.get(run_id)
+                if durable.run_outcome in {
+                    RunOutcome.FAILED,
+                    RunOutcome.CANCELLED,
+                }:
+                    return self._terminal_result(durable)
+                if durable.run_outcome is RunOutcome.SUCCEEDED:
+                    raise TerminalRunMutationError(
+                        "run succeeded while publisher failure evidence was being recorded"
+                    ) from error
+                old_state = current.model_dump(
+                    mode="python",
+                    warnings=False,
+                    exclude={
+                        "candidate_snapshot_id",
+                        "cancel_requested_at_utc",
+                        "updated_at_utc",
+                        "version",
+                    },
+                )
+                new_state = durable.model_dump(
+                    mode="python",
+                    warnings=False,
+                    exclude={
+                        "candidate_snapshot_id",
+                        "cancel_requested_at_utc",
+                        "updated_at_utc",
+                        "version",
+                    },
+                )
+                candidate_advanced = (
+                    current.candidate_snapshot_id is None
+                    and durable.candidate_snapshot_id is not None
+                )
+                cancellation_advanced = (
+                    current.cancel_requested_at_utc is None
+                    and durable.cancel_requested_at_utc is not None
+                )
+                expected_version = current.version + int(candidate_advanced) + int(
+                    cancellation_advanced
+                )
+                if (
+                    old_state != new_state
+                    or durable.updated_at_utc < current.updated_at_utc
+                    or durable.version != expected_version
+                    or (
+                        current.candidate_snapshot_id is not None
+                        and durable.candidate_snapshot_id
+                        != current.candidate_snapshot_id
+                    )
+                    or (
+                        current.cancel_requested_at_utc is not None
+                        and durable.cancel_requested_at_utc
+                        != current.cancel_requested_at_utc
+                    )
+                    or not (candidate_advanced or cancellation_advanced)
+                ):
+                    raise error
+                current = durable
                 continue
             except TerminalRunMutationError:
                 durable = self._repository.get(run_id)
@@ -539,8 +612,6 @@ class SnapshotPublisher:
                     return self._terminal_result(durable)
                 raise
             return self._terminal_result(terminal)
-        assert stale_error is not None
-        raise stale_error
 
     @staticmethod
     def _terminal_result(run: RunRecordV1) -> SnapshotPublisherResultV1:
@@ -564,6 +635,20 @@ class SnapshotPublisher:
             raise TerminalRunMutationError(
                 "completed run is bound to a different snapshot candidate"
             )
+        stored = self._inspect_existing_candidate(expected_manifest)
+        return ManifestPublicationV1(
+            snapshot_id=stored.snapshot_id,
+            book_id=stored.manifest.body.book_id,
+            book_generation=stored.manifest.body.book_generation,
+            snapshot_status=stored.status,
+            schema_version=stored.manifest.body.schema_version,
+            hash_algorithm=stored.manifest.body.hash_algorithm,
+            manifest_relpath=stored.manifest_relpath,
+            envelope_sha256=stored.envelope_sha256,
+            envelope_byte_length=stored.envelope_byte_length,
+        )
+
+    def _inspect_existing_candidate(self, expected_manifest) -> StoredManifestV1:
         stored = self._store.inspect_verified_manifest(expected_manifest.snapshot_id)
         if not isinstance(stored, StoredManifestV1):
             raise TypeError("store must return StoredManifestV1")
@@ -579,16 +664,33 @@ class SnapshotPublisher:
                 "completed run snapshot differs from its retried candidate"
             )
         self._inject(PublisherFaultStage.AFTER_SNAPSHOT_VERIFIED)
-        return ManifestPublicationV1(
-            snapshot_id=stored.snapshot_id,
-            book_id=stored.manifest.body.book_id,
-            book_generation=stored.manifest.body.book_generation,
-            snapshot_status=stored.status,
-            schema_version=stored.manifest.body.schema_version,
-            hash_algorithm=stored.manifest.body.hash_algorithm,
-            manifest_relpath=stored.manifest_relpath,
-            envelope_sha256=stored.envelope_sha256,
-            envelope_byte_length=stored.envelope_byte_length,
+        return stored
+
+    def _terminal_rejection_retry(
+        self,
+        *,
+        run: RunRecordV1,
+        candidate: SnapshotCandidateV1,
+    ) -> SnapshotPublisherResultV1:
+        expected_manifest = create_manifest(candidate.manifest_body)
+        if (
+            run.error_code not in _RETRYABLE_TERMINAL_REJECTIONS
+            or run.candidate_snapshot_id != expected_manifest.snapshot_id
+            or run.published_snapshot_id is not None
+        ):
+            raise TerminalRunMutationError(
+                "terminal run is not an exact publication-rejection retry"
+            )
+        self._inspect_existing_candidate(expected_manifest)
+        return self._catalog_result(
+            PublicationResultV1(
+                run=run,
+                publication=None,
+                active=self._repository.get_active(run.book_id),
+                published=False,
+                already_published=False,
+                rejection_code=run.error_code,
+            )
         )
 
     def _converge_attachment_race(
@@ -670,15 +772,25 @@ class SnapshotPublisher:
             raise TypeError("authority must be PublicationAuthorityV1")
 
         initial = self._repository.get(run_id)
-        if initial.run_outcome not in {RunOutcome.RUNNING, RunOutcome.SUCCEEDED}:
-            raise TerminalRunMutationError(
-                "failed and cancelled runs cannot publish snapshot candidates"
-            )
         if initial.run_stage is not RunStage.PUBLISHING:
             raise IllegalRunTransitionError(
                 "snapshot publication requires the PUBLISHING stage"
             )
-        if initial.cancel_requested_at_utc is not None:
+        terminal_rejection_retry = initial.run_outcome in {
+            RunOutcome.FAILED,
+            RunOutcome.CANCELLED,
+        }
+        if terminal_rejection_retry and (
+            initial.error_code not in _RETRYABLE_TERMINAL_REJECTIONS
+            or initial.published_snapshot_id is not None
+        ):
+            raise TerminalRunMutationError(
+                "failed and cancelled runs cannot publish snapshot candidates"
+            )
+        if (
+            initial.run_outcome is RunOutcome.RUNNING
+            and initial.cancel_requested_at_utc is not None
+        ):
             return self._terminalize_failure(
                 run_id,
                 RunErrorCode.SERIALIZATION_FAILED,
@@ -691,7 +803,11 @@ class SnapshotPublisher:
             authority = PublicationAuthorityV1.model_validate(
                 authority.model_dump(mode="python", warnings=False)
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as error:
+            if terminal_rejection_retry:
+                raise TerminalRunMutationError(
+                    "terminal publication retry has invalid candidate authority"
+                ) from error
             return self._terminalize_failure(run_id, RunErrorCode.SERIALIZATION_FAILED)
 
         head = self._repository.get_book_head(initial.book_id)
@@ -702,8 +818,18 @@ class SnapshotPublisher:
                 candidate=candidate,
                 authority=authority,
             )
-        except _PublisherSerializationError:
+        except _PublisherSerializationError as error:
+            if terminal_rejection_retry:
+                raise TerminalRunMutationError(
+                    "terminal publication retry differs from controller authority"
+                ) from error
             return self._terminalize_failure(run_id, RunErrorCode.SERIALIZATION_FAILED)
+
+        if terminal_rejection_retry:
+            return self._terminal_rejection_retry(
+                run=initial,
+                candidate=candidate,
+            )
 
         if initial.run_outcome is RunOutcome.SUCCEEDED:
             publication = self._completed_run_publication(
