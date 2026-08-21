@@ -1053,6 +1053,8 @@ class PublicationResultV1(FrozenContractBase):
             raise ValueError("rejected publication cannot already be published")
         if self.rejection_code not in _PUBLICATION_REJECTION_CODES:
             raise ValueError("publication result uses an open rejection shape")
+        if run.run_stage is not RunStage.PUBLISHING:
+            raise ValueError("publication rejection requires the PUBLISHING stage")
         if run.error_code is not self.rejection_code:
             raise ValueError("publication rejection does not bind durable run evidence")
         if self.rejection_code is RunErrorCode.CANCELLED_BY_USER:
@@ -1187,6 +1189,12 @@ class RunRepository:
         self.root = Path(root)
         self.database_path = self.root / "snapshots" / "runs.sqlite3"
         self._fault_injector = fault_injector
+
+    @property
+    def fault_injector(self) -> RepositoryFaultInjector | None:
+        """Expose the construction-time fault seam without permitting reassignment."""
+
+        return self._fault_injector
 
     def _inject(self, stage: str) -> None:
         if self._fault_injector is not None:
@@ -3306,6 +3314,45 @@ class RunRepository:
                 or captured_pointer.transitioned_at_utc > run.requested_at_utc
             ):
                 raise RunDatabaseError("run pointer capture is not causal")
+            if expected_version == 1:
+                if captured_pointer.previous_snapshot_id is not None:
+                    raise RunDatabaseError(
+                        "first captured pointer transition has a predecessor"
+                    )
+            else:
+                predecessor = RunRepository._pointer_transition_at_version(
+                    connection,
+                    run.book_id,
+                    expected_version - 1,
+                )
+                if (
+                    captured_pointer.previous_snapshot_id
+                    != predecessor.selected_snapshot_id
+                    or captured_pointer.transitioned_at_utc
+                    < predecessor.transitioned_at_utc
+                ):
+                    raise RunDatabaseError(
+                        "captured pointer is not causally linked to its predecessor"
+                    )
+
+        if publication is not None:
+            publication_transition = RunRepository._pointer_transition_at_version(
+                connection,
+                run.book_id,
+                expected_version + 1,
+            )
+            if (
+                publication_transition.transition_kind != "PUBLICATION"
+                or publication_transition.previous_snapshot_id
+                != run.expected_active_snapshot_id
+                or publication_transition.selected_snapshot_id
+                != publication.snapshot_id
+                or publication_transition.transitioned_at_utc
+                != publication.published_at_utc
+            ):
+                raise RunDatabaseError(
+                    "publication does not match its exact pointer transition"
+                )
 
         if run.error_code is RunErrorCode.STALE_ACTIVE_POINTER:
             invalidating = RunRepository._pointer_transition_at_version(
@@ -3367,17 +3414,20 @@ class RunRepository:
             raise RunDatabaseError(
                 "durable run does not describe a publication result"
             )
-        result = PublicationResultV1(
-            run=run,
-            publication=publication_record,
-            active=active,
-            published=publication_row is not None,
-            already_published=already_published,
-            rejection_code=rejection_code,
-        )
-        return PublicationResultV1.model_validate(
-            result.model_dump(mode="python", warnings=False)
-        )
+        try:
+            result = PublicationResultV1(
+                run=run,
+                publication=publication_record,
+                active=active,
+                published=publication_row is not None,
+                already_published=already_published,
+                rejection_code=rejection_code,
+            )
+            return PublicationResultV1.model_validate(
+                result.model_dump(mode="python", warnings=False)
+            )
+        except (TypeError, ValueError) as error:
+            raise RunDatabaseError("durable publication result is invalid") from error
 
     def resolve_publication_result(
         self, run_id: str, *, already_published: bool

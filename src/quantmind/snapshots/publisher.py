@@ -437,6 +437,13 @@ class SnapshotPublisher:
         if not callable(clock):
             raise TypeError("clock must be callable")
         self._repository = repository
+        self._catalog_repository = RunRepository(
+            repository.root,
+            fault_injector=RunRepository.fault_injector.__get__(
+                repository,
+                RunRepository,
+            ),
+        )
         self._store = store
         self._clock = clock
         self._fault_injector = fault_injector
@@ -594,28 +601,13 @@ class SnapshotPublisher:
         *,
         already_published: bool,
     ) -> PublicationResultV1:
-        injected = self._revalidate_publication_result(
-            self._repository.resolve_publication_result(
-                run_id,
-                already_published=already_published,
-            )
-        )
-        resolver = getattr(type(self._repository), "resolve_publication_result")
-        if resolver is RunRepository.resolve_publication_result:
-            return injected
-
-        base = self._revalidate_publication_result(
+        return self._revalidate_publication_result(
             RunRepository.resolve_publication_result(
-                self._repository,
+                self._catalog_repository,
                 run_id,
                 already_published=already_published,
             )
         )
-        if injected != base:
-            raise RunDatabaseError(
-                "overridden resolver differs from base durable truth and verified manifest"
-            )
-        return base
 
     def _terminalize_failure(
         self,
@@ -844,12 +836,13 @@ class SnapshotPublisher:
         publication: ManifestPublicationV1,
         expected_version: int,
     ) -> SnapshotPublisherResultV1:
-        before_commit = self._repository.get(run_id)
+        before_commit = RunRepository.get(self._catalog_repository, run_id)
         commit_time = max(self._now(), before_commit.updated_at_utc)
         self._inject(PublisherFaultStage.BEFORE_REPOSITORY_COMMIT)
         try:
             committed = self._revalidate_publication_result(
-                self._repository.commit_publication(
+                RunRepository.commit_publication(
+                    self._catalog_repository,
                     run_id,
                     publication,
                     expected_version=expected_version,
@@ -857,7 +850,7 @@ class SnapshotPublisher:
                 )
             )
         except TerminalRunMutationError:
-            durable = self._repository.get(run_id)
+            durable = RunRepository.get(self._catalog_repository, run_id)
             if durable.run_outcome in {
                 RunOutcome.FAILED,
                 RunOutcome.CANCELLED,
@@ -865,17 +858,13 @@ class SnapshotPublisher:
                 return self._terminal_result(durable)
             raise
         self._inject(PublisherFaultStage.AFTER_REPOSITORY_COMMIT)
-        result = self._resolve_publication_result(
-            run_id,
-            already_published=committed.already_published,
-        )
-        if result.publication is not None and (
-            self._publication_projection(result.publication) != publication
+        if committed.publication is not None and (
+            self._publication_projection(committed.publication) != publication
         ):
             raise RunDatabaseError(
                 "durable publication differs from the locally verified manifest"
             )
-        return self._catalog_result(result)
+        return self._catalog_result(committed)
 
     def publish(
         self,

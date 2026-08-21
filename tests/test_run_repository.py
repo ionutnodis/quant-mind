@@ -1445,9 +1445,56 @@ def test_publication_result_resolution_has_constant_valid_chain_work(
 
     vm_callbacks = tuple(cost[0] for cost in costs.values())
     query_counts = tuple(cost[1] for cost in costs.values())
-    assert query_counts == (15, 15, 15)
+    assert query_counts == (17, 17, 17)
     assert max(vm_callbacks) <= 2
     assert max(vm_callbacks) <= min(vm_callbacks) + 1
+
+
+def test_publication_result_rejects_duplicate_target_transition_version(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    _snapshot_ids, run_ids = _seed_publication_chain(repository, 6)
+    _execute_without_named_triggers(
+        repository,
+        _TERMINAL_RUN_ALLOCATION_UPDATE_BYPASS,
+        """
+        UPDATE snapshot_runs
+        SET expected_active_pointer_version = 3
+        WHERE run_id = ?
+        """,
+        (run_ids[0],),
+    )
+
+    with pytest.raises(RunDatabaseError, match="transition history is not unique"):
+        repository.resolve_publication_result(
+            run_ids[3],
+            already_published=True,
+        )
+
+
+def test_publication_result_rejects_broken_captured_predecessor_edge(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    snapshot_ids, run_ids = _seed_publication_chain(repository, 6)
+    _execute_without_named_triggers(
+        repository,
+        _TERMINAL_RUN_ALLOCATION_UPDATE_BYPASS,
+        """
+        UPDATE snapshot_runs
+        SET expected_active_snapshot_id = ?
+        WHERE run_id = ?
+        """,
+        (snapshot_ids[5], run_ids[2]),
+        foreign_keys=True,
+    )
+
+    with pytest.raises(RunDatabaseError, match="predecessor|causal"):
+        repository.resolve_publication_result(
+            run_ids[3],
+            already_published=True,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1569,6 +1616,43 @@ def test_publication_result_allows_cancellation_before_candidate_attachment(
     assert result.run.candidate_snapshot_id is None
     assert result.run.run_outcome is RunOutcome.CANCELLED
     assert result.publication is None
+
+
+def test_publication_result_rejects_cancellation_outside_publishing_stage(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    run = repository.create_or_join(_new_run(), now=T1).record
+    ingesting = repository.claim_start(
+        run.run_id,
+        expected_version=run.version,
+        now=T1,
+    )
+    requested = repository.request_cancel(ingesting.run_id, now=T2)
+    cancelled = repository.acknowledge_cancel(
+        ingesting.run_id,
+        expected_version=requested.version,
+        now=T2,
+    )
+    forged = PublicationResultV1.model_construct(
+        run=cancelled,
+        publication=None,
+        active=None,
+        published=False,
+        already_published=False,
+        rejection_code=RunErrorCode.CANCELLED_BY_USER,
+    )
+
+    with pytest.raises(RunDatabaseError, match="publication result"):
+        repository.resolve_publication_result(
+            cancelled.run_id,
+            already_published=False,
+        )
+    with pytest.raises(ValueError, match="PUBLISHING"):
+        PublicationResultV1.model_validate(
+            forged.model_dump(mode="python", warnings=False)
+        )
 
 
 def test_publication_rejection_refuses_a_later_pointer_with_pre_request_clock(
