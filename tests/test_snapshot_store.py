@@ -479,6 +479,35 @@ def test_put_verified_manifest_returns_exact_durable_envelope_metadata(tmp_path)
     assert store.read_verified_manifest(stored.snapshot_id) == stored.manifest
 
 
+def test_inspect_verified_manifest_returns_existing_metadata_without_writing(tmp_path):
+    # Break caught: terminal retry rebuilding metadata from an unbounded catalog scan
+    # or accidentally recreating missing historical bytes through a write seam.
+    store = SnapshotStore(tmp_path)
+    manifest = _complete_manifest(store)
+    expected = store.put_verified_manifest(manifest)
+    files_before = tuple(
+        sorted(
+            path.relative_to(tmp_path)
+            for path in tmp_path.rglob("*")
+            if path.is_file()
+        )
+    )
+
+    inspected = SnapshotStore(tmp_path).inspect_verified_manifest(
+        manifest.snapshot_id
+    )
+
+    files_after = tuple(
+        sorted(
+            path.relative_to(tmp_path)
+            for path in tmp_path.rglob("*")
+            if path.is_file()
+        )
+    )
+    assert inspected == expected
+    assert files_after == files_before
+
+
 def test_read_verified_manifest_fails_when_a_required_artifact_later_disappears(tmp_path):
     store = SnapshotStore(tmp_path)
     manifest = _complete_manifest(store)

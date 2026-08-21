@@ -22,6 +22,7 @@ from quantmind.snapshots.input_artifacts import (
 )
 from quantmind.snapshots.manifest import (
     AnalyticalSnapshotManifestV1,
+    ManifestError,
     parse_manifest,
 )
 
@@ -461,6 +462,31 @@ class SnapshotStore:
             )
         self._verify_manifest_references(manifest)
         return manifest
+
+    def inspect_verified_manifest(self, snapshot_id: str) -> StoredManifestV1:
+        """Return exact metadata for existing canonical bytes without publishing."""
+        snapshot_id = _require_full_digest(snapshot_id, "snapshot ID")
+        payload = self._read_regular_bytes(self._manifest_path(snapshot_id))
+        try:
+            manifest = parse_manifest(payload)
+        except ManifestError as error:
+            raise SnapshotVerificationError(
+                "stored manifest bytes failed canonical verification"
+            ) from error
+        if manifest.snapshot_id != snapshot_id:
+            raise ManifestFilenameMismatchError(
+                f"manifest filename ID {snapshot_id} does not match embedded ID "
+                f"{manifest.snapshot_id}"
+            )
+        self._verify_manifest_references(manifest)
+        return StoredManifestV1(
+            snapshot_id=snapshot_id,
+            manifest_relpath=self._manifest_relpath(snapshot_id).as_posix(),
+            envelope_sha256=hashlib.sha256(payload).hexdigest(),
+            envelope_byte_length=len(payload),
+            status=manifest.body.snapshot_status,
+            manifest=manifest,
+        )
 
     def verify_snapshot(
         self,
