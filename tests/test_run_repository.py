@@ -8,6 +8,7 @@ import threading
 import time
 import tracemalloc
 import unicodedata
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -38,6 +39,7 @@ from quantmind.snapshots.run_repository import (
     ManifestPublicationV1,
     NewRunV1,
     PublicationConflictError,
+    PublicationResultV1,
     RecoveryEventV1,
     RecoveryRejectionCode,
     RunDatabaseError,
@@ -1220,6 +1222,198 @@ def test_claimed_v1_with_weakened_table_constraint_is_rejected(tmp_path: Path) -
 
     with pytest.raises(RunDatabaseError):
         RunRepository(tmp_path).initialize()
+
+
+def _revalidate_publication_result(
+    result: PublicationResultV1, *, json_round_trip: bool
+) -> PublicationResultV1:
+    if json_round_trip:
+        return PublicationResultV1.model_validate_json(result.model_dump_json())
+    return PublicationResultV1.model_validate(
+        result.model_dump(mode="python", warnings=False)
+    )
+
+
+@pytest.mark.parametrize("json_round_trip", [False, True])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "published_flag",
+        "already_without_publication",
+        "rejection_on_success",
+        "foreign_publication_run",
+        "foreign_publication_book",
+        "foreign_publication_generation",
+        "foreign_publication_snapshot",
+        "foreign_publication_time",
+        "foreign_active_book",
+        "impossible_active_successor",
+    ],
+)
+def test_publication_result_rejects_bypassed_cross_record_incoherence(
+    tmp_path: Path,
+    mutation: str,
+    json_round_trip: bool,
+) -> None:
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    candidate = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    result = repository.commit_publication(
+        candidate.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=candidate.version,
+        now=T3,
+    )
+    publication = result.publication
+    active = result.active
+    assert publication is not None
+    assert active is not None
+
+    if mutation == "published_flag":
+        forged = result.model_copy(update={"published": False})
+    elif mutation == "already_without_publication":
+        forged = result.model_copy(
+            update={"publication": None, "published": False, "already_published": True}
+        )
+    elif mutation == "rejection_on_success":
+        forged = result.model_copy(
+            update={"rejection_code": RunErrorCode.STALE_ACTIVE_POINTER}
+        )
+    elif mutation == "foreign_publication_run":
+        forged = result.model_copy(
+            update={
+                "publication": publication.model_copy(
+                    update={"run_id": "run_01J5X5S8J5J8P7KQ4Y0T3N6ZZZ"}
+                )
+            }
+        )
+    elif mutation == "foreign_publication_book":
+        forged = result.model_copy(
+            update={"publication": publication.model_copy(update={"book_id": "book-beta"})}
+        )
+    elif mutation == "foreign_publication_generation":
+        forged = result.model_copy(
+            update={"publication": publication.model_copy(update={"book_generation": 2})}
+        )
+    elif mutation == "foreign_publication_snapshot":
+        forged_publication = publication.model_copy(
+            update={
+                "snapshot_id": SNAPSHOT_B,
+                "manifest_relpath": (
+                    "snapshots/manifests/analytical_snapshot_manifest_v1/"
+                    f"{SNAPSHOT_B[:2]}/{SNAPSHOT_B}.json"
+                ),
+            }
+        )
+        forged = result.model_copy(update={"publication": forged_publication})
+    elif mutation == "foreign_publication_time":
+        forged = result.model_copy(
+            update={"publication": publication.model_copy(update={"published_at_utc": T4})}
+        )
+    elif mutation == "foreign_active_book":
+        forged = result.model_copy(
+            update={"active": active.model_copy(update={"book_id": "book-beta"})}
+        )
+    else:
+        forged = result.model_copy(
+            update={
+                "active": active.model_copy(
+                    update={"snapshot_id": SNAPSHOT_B, "book_generation": 1}
+                )
+            }
+        )
+
+    with pytest.raises(ValueError):
+        _revalidate_publication_result(forged, json_round_trip=json_round_trip)
+
+
+@pytest.mark.parametrize("json_round_trip", [False, True])
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        RunErrorCode.WORKER_FAILED,
+        RunErrorCode.STALE_BOOK_GENERATION,
+        RunErrorCode.STALE_ACTIVE_POINTER,
+    ],
+)
+def test_publication_result_rejects_open_or_candidate_free_rejection_shapes(
+    tmp_path: Path,
+    error_code: RunErrorCode,
+    json_round_trip: bool,
+) -> None:
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    run = repository.create_or_join(_new_run(), now=T1).record
+    failed = repository.mark_failed(
+        run.run_id,
+        RunFailureV1(code=RunErrorCode.WORKER_FAILED),
+        expected_version=run.version,
+        now=T2,
+    )
+    forged_run = failed.model_copy(
+        update={
+            "error_code": error_code,
+            "error_message": {
+                RunErrorCode.WORKER_FAILED: "worker execution failed",
+                RunErrorCode.STALE_BOOK_GENERATION: (
+                    "canonical book generation changed before publication"
+                ),
+                RunErrorCode.STALE_ACTIVE_POINTER: (
+                    "active snapshot pointer changed before publication"
+                ),
+            }[error_code],
+        }
+    )
+    forged = PublicationResultV1.model_construct(
+        run=forged_run,
+        publication=None,
+        active=None,
+        published=False,
+        already_published=False,
+        rejection_code=error_code,
+    )
+
+    with pytest.raises(ValueError):
+        _revalidate_publication_result(forged, json_round_trip=json_round_trip)
+
+
+def test_resolve_publication_result_is_one_bounded_read_without_history_scan(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    candidate = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    committed = repository.commit_publication(
+        candidate.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=candidate.version,
+        now=T3,
+    )
+
+    class CountingReadRepository(RunRepository):
+        read_transactions = 0
+
+        @contextmanager
+        def _read_connection(self):
+            self.read_transactions += 1
+            with super()._read_connection() as connection:
+                yield connection
+
+        def list_publications(self, *args, **kwargs):
+            raise AssertionError("run-scoped resolution must not scan publication history")
+
+    reopened = CountingReadRepository(tmp_path)
+    reopened.initialize()
+    reopened.read_transactions = 0
+
+    resolved = reopened.resolve_publication_result(
+        candidate.run_id, already_published=False
+    )
+
+    assert resolved == committed
+    assert reopened.read_transactions == 1
+    with pytest.raises(TypeError, match="boolean"):
+        reopened.resolve_publication_result(candidate.run_id, already_published=1)
 
 
 @pytest.mark.parametrize(

@@ -276,6 +276,15 @@ class RunErrorCode(str, Enum):
     SHUTDOWN_INTERRUPTED = "SHUTDOWN_INTERRUPTED"
 
 
+_PUBLICATION_REJECTION_CODES = frozenset(
+    {
+        RunErrorCode.CANCELLED_BY_USER,
+        RunErrorCode.STALE_BOOK_GENERATION,
+        RunErrorCode.STALE_ACTIVE_POINTER,
+    }
+)
+
+
 _ERROR_MESSAGES: dict[RunErrorCode, str] = {
     RunErrorCode.SUBMISSION_FAILED: "executor submission failed",
     RunErrorCode.WORKER_FAILED: "worker execution failed",
@@ -972,6 +981,104 @@ class PublicationResultV1(FrozenContractBase):
     published: bool
     already_published: bool
     rejection_code: RunErrorCode | None
+
+    @model_validator(mode="after")
+    def _records_describe_one_publication_attempt(self) -> "PublicationResultV1":
+        # Nested model instances may have been created through model_copy or
+        # model_construct. Reparse their primitive fields before trusting any
+        # cross-record relationship in this security boundary contract.
+        RunRecordV1.model_validate(
+            self.run.model_dump(mode="python", warnings=False)
+        )
+        if self.publication is not None:
+            ManifestPublicationRecordV1.model_validate(
+                self.publication.model_dump(mode="python", warnings=False)
+            )
+        if self.active is not None:
+            ActiveSnapshotV1.model_validate(
+                self.active.model_dump(mode="python", warnings=False)
+            )
+
+        publication = self.publication
+        run = self.run
+        if self.published != (publication is not None):
+            raise ValueError("published flag must match durable publication presence")
+        if self.already_published and publication is None:
+            raise ValueError("already-published result requires a publication")
+        if run.book_id is None or run.captured_generation is None:
+            raise ValueError("publication results require a durable book identity")
+        if self.active is not None and self.active.book_id != run.book_id:
+            raise ValueError("active snapshot belongs to a different book")
+
+        if publication is not None:
+            if run.run_outcome is not RunOutcome.SUCCEEDED:
+                raise ValueError("publication presence requires a successful run")
+            if self.rejection_code is not None:
+                raise ValueError("successful publication cannot carry rejection evidence")
+            if (
+                publication.run_id != run.run_id
+                or publication.book_id != run.book_id
+                or publication.book_generation != run.captured_generation
+                or publication.snapshot_id != run.candidate_snapshot_id
+                or publication.snapshot_id != run.published_snapshot_id
+            ):
+                raise ValueError("publication identity does not bind the durable run")
+            if (
+                run.finished_at_utc is None
+                or publication.published_at_utc != run.finished_at_utc
+                or publication.published_at_utc != run.updated_at_utc
+            ):
+                raise ValueError("publication and successful run clocks are not bound")
+            publication_pointer_version = run.expected_active_pointer_version + 1
+            if self.active is not None:
+                if self.active.pointer_version < publication_pointer_version:
+                    raise ValueError("active pointer predates the publication")
+                if self.active.pointer_version == publication_pointer_version and (
+                    self.active.snapshot_id != publication.snapshot_id
+                    or self.active.book_generation != publication.book_generation
+                    or self.active.updated_at_utc != publication.published_at_utc
+                ):
+                    raise ValueError("publication pointer state is not exact")
+                if self.active.updated_at_utc < publication.published_at_utc:
+                    raise ValueError("active pointer clock predates the publication")
+            return self
+
+        if self.already_published:
+            raise ValueError("rejected publication cannot already be published")
+        if self.rejection_code not in _PUBLICATION_REJECTION_CODES:
+            raise ValueError("publication result uses an open rejection shape")
+        if run.error_code is not self.rejection_code:
+            raise ValueError("publication rejection does not bind durable run evidence")
+        if self.rejection_code is RunErrorCode.CANCELLED_BY_USER:
+            if run.run_outcome is not RunOutcome.CANCELLED:
+                raise ValueError("cancellation rejection requires cancelled outcome")
+        elif run.run_outcome is not RunOutcome.FAILED:
+            raise ValueError("stale publication rejection requires failed outcome")
+        if run.published_snapshot_id is not None:
+            raise ValueError("rejected publication cannot bind a published snapshot")
+        if (
+            self.rejection_code
+            in {
+                RunErrorCode.STALE_BOOK_GENERATION,
+                RunErrorCode.STALE_ACTIVE_POINTER,
+            }
+            and run.candidate_snapshot_id is None
+        ):
+            raise ValueError("stale publication rejection requires an attached candidate")
+
+        if self.active is not None:
+            expected_version = run.expected_active_pointer_version
+            if self.active.pointer_version < expected_version:
+                raise ValueError("active pointer predates the captured predecessor")
+            if self.active.pointer_version == expected_version:
+                if (
+                    run.expected_active_snapshot_id is None
+                    or self.active.snapshot_id != run.expected_active_snapshot_id
+                ):
+                    raise ValueError("active pointer does not match the captured predecessor")
+                if self.rejection_code is RunErrorCode.STALE_ACTIVE_POINTER:
+                    raise ValueError("stale-pointer rejection requires a later pointer")
+        return self
 
 
 class RecoveryEventV1(FrozenContractBase):
@@ -3090,7 +3197,6 @@ class RunRepository:
         run_id: str,
         *,
         already_published: bool,
-        rejection_code: RunErrorCode | None = None,
     ) -> PublicationResultV1:
         run_row = connection.execute(
             "SELECT * FROM snapshot_runs WHERE run_id = ?", (run_id,)
@@ -3122,7 +3228,10 @@ class RunRepository:
         active = None if pointer is None else pointer.active_snapshot()
         if active is not None:
             self._validate_active_relations(connection, active)
-        return PublicationResultV1(
+        rejection_code = (
+            run.error_code if run.error_code in _PUBLICATION_REJECTION_CODES else None
+        )
+        result = PublicationResultV1(
             run=run,
             publication=publication_record,
             active=active,
@@ -3130,21 +3239,39 @@ class RunRepository:
             already_published=already_published,
             rejection_code=rejection_code,
         )
+        return PublicationResultV1.model_validate(
+            result.model_dump(mode="python", warnings=False)
+        )
 
-    def _publication_result_from_durable_truth(
+    def resolve_publication_result(
         self, run_id: str, *, already_published: bool
     ) -> PublicationResultV1:
+        """Resolve one exact publication attempt from one bounded read transaction."""
+
+        if not isinstance(run_id, str):
+            raise TypeError("run ID must be a string")
+        if not _OPAQUE_ID_RE.fullmatch(run_id):
+            raise ValueError("run ID must be a full bounded opaque identifier")
+        if type(already_published) is not bool:
+            raise TypeError("already_published must be a boolean")
         with self._read_connection() as connection:
-            result = self._publication_result_from_connection(
+            return self._publication_result_from_connection(
                 connection,
                 run_id,
                 already_published=already_published,
             )
-            if not result.published or result.run.run_outcome is not RunOutcome.SUCCEEDED:
-                raise RunDatabaseError(
-                    "publication commit outcome could not be resolved from durable truth"
-                )
-            return result
+
+    def _publication_result_from_durable_truth(
+        self, run_id: str, *, already_published: bool
+    ) -> PublicationResultV1:
+        result = self.resolve_publication_result(
+            run_id, already_published=already_published
+        )
+        if not result.published or result.run.run_outcome is not RunOutcome.SUCCEEDED:
+            raise RunDatabaseError(
+                "publication commit outcome could not be resolved from durable truth"
+            )
+        return result
 
     @staticmethod
     def _terminalize_publication_rejection(
@@ -3248,7 +3375,6 @@ class RunRepository:
                     connection,
                     run_id,
                     already_published=False,
-                    rejection_code=RunErrorCode.CANCELLED_BY_USER,
                 )
                 connection.commit()
                 committed = True
@@ -3288,7 +3414,6 @@ class RunRepository:
                     connection,
                     run_id,
                     already_published=False,
-                    rejection_code=RunErrorCode.STALE_BOOK_GENERATION,
                 )
                 connection.commit()
                 committed = True
@@ -3321,7 +3446,6 @@ class RunRepository:
                     connection,
                     run_id,
                     already_published=False,
-                    rejection_code=RunErrorCode.STALE_ACTIVE_POINTER,
                 )
                 connection.commit()
                 committed = True
