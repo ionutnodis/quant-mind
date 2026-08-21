@@ -26,17 +26,21 @@ from quantmind.snapshots.input_artifacts import (
     InputArtifactBindingV1,
 )
 from quantmind.snapshots.manifest import (
+    AnalyticalSnapshotManifestV1,
     AnalyticalSnapshotManifestBodyV1,
     ManifestError,
     ManifestPolicyEvidenceV1,
     OutputArtifactBindingV1,
     create_manifest,
+    parse_manifest,
 )
 from quantmind.snapshots.run_repository import (
     BookHeadV1,
     IllegalRunTransitionError,
+    ManifestPublicationRecordV1,
     ManifestPublicationV1,
     PublicationResultV1,
+    RunDatabaseError,
     RunErrorCode,
     RunFailureV1,
     RunRecordV1,
@@ -450,6 +454,30 @@ class SnapshotPublisher:
         return now.astimezone(UTC)
 
     @staticmethod
+    def _canonical_manifest(
+        body: AnalyticalSnapshotManifestBodyV1,
+    ) -> AnalyticalSnapshotManifestV1:
+        """Reparse the exact canonical envelope used by the durable store."""
+
+        return parse_manifest(canonical_json_bytes(create_manifest(body)))
+
+    @staticmethod
+    def _publication_projection(
+        publication_record: ManifestPublicationRecordV1,
+    ) -> ManifestPublicationV1:
+        return ManifestPublicationV1(
+            snapshot_id=publication_record.snapshot_id,
+            book_id=publication_record.book_id,
+            book_generation=publication_record.book_generation,
+            snapshot_status=publication_record.snapshot_status,
+            schema_version=publication_record.schema_version,
+            hash_algorithm=publication_record.hash_algorithm,
+            manifest_relpath=publication_record.manifest_relpath,
+            envelope_sha256=publication_record.envelope_sha256,
+            envelope_byte_length=publication_record.envelope_byte_length,
+        )
+
+    @staticmethod
     def _output_binding_by_key(
         body: AnalyticalSnapshotManifestBodyV1,
     ) -> dict[tuple[str, str], OutputArtifactBindingV1]:
@@ -675,7 +703,7 @@ class SnapshotPublisher:
         run: RunRecordV1,
         candidate: SnapshotCandidateV1,
     ) -> ManifestPublicationV1:
-        expected_manifest = create_manifest(candidate.manifest_body)
+        expected_manifest = self._canonical_manifest(candidate.manifest_body)
         if (
             run.candidate_snapshot_id != expected_manifest.snapshot_id
             or run.published_snapshot_id != expected_manifest.snapshot_id
@@ -720,7 +748,7 @@ class SnapshotPublisher:
         run: RunRecordV1,
         candidate: SnapshotCandidateV1,
     ) -> SnapshotPublisherResultV1:
-        expected_manifest = create_manifest(candidate.manifest_body)
+        expected_manifest = self._canonical_manifest(candidate.manifest_body)
         if (
             run.error_code not in _RETRYABLE_TERMINAL_REJECTIONS
             or run.candidate_snapshot_id != expected_manifest.snapshot_id
@@ -731,13 +759,9 @@ class SnapshotPublisher:
             )
         self._inspect_existing_candidate(expected_manifest)
         return self._catalog_result(
-            PublicationResultV1(
-                run=run,
-                publication=None,
-                active=self._repository.get_active(run.book_id),
-                published=False,
+            self._repository.resolve_publication_result(
+                run.run_id,
                 already_published=False,
-                rejection_code=run.error_code,
             )
         )
 
@@ -785,13 +809,18 @@ class SnapshotPublisher:
         publication: ManifestPublicationV1,
         expected_version: int,
     ) -> SnapshotPublisherResultV1:
+        before_commit = self._repository.get(run_id)
+        already_published = before_commit.run_outcome is RunOutcome.SUCCEEDED
+        commit_time = max(self._now(), before_commit.updated_at_utc)
         self._inject(PublisherFaultStage.BEFORE_REPOSITORY_COMMIT)
         try:
-            result = self._repository.commit_publication(
+            # The mutation return is deliberately not a trust boundary. Resolve the
+            # committed attempt independently from one durable read transaction below.
+            self._repository.commit_publication(
                 run_id,
                 publication,
                 expected_version=expected_version,
-                now=self._now(),
+                now=commit_time,
             )
         except TerminalRunMutationError:
             durable = self._repository.get(run_id)
@@ -802,9 +831,16 @@ class SnapshotPublisher:
                 return self._terminal_result(durable)
             raise
         self._inject(PublisherFaultStage.AFTER_REPOSITORY_COMMIT)
-        durable_run = self._repository.get(run_id)
-        if durable_run != result.run:
-            raise ValueError("publisher result differs from durable run truth")
+        result = self._repository.resolve_publication_result(
+            run_id,
+            already_published=already_published,
+        )
+        if result.publication is not None and (
+            self._publication_projection(result.publication) != publication
+        ):
+            raise RunDatabaseError(
+                "durable publication differs from the locally verified manifest"
+            )
         return self._catalog_result(result)
 
     def publish(
@@ -910,7 +946,7 @@ class SnapshotPublisher:
                 )
 
         try:
-            manifest = create_manifest(candidate.manifest_body)
+            manifest = self._canonical_manifest(candidate.manifest_body)
         except (TypeError, ValueError):
             return self._terminalize_failure(run_id, RunErrorCode.SERIALIZATION_FAILED)
         try:
@@ -986,6 +1022,8 @@ class SnapshotPublisher:
             attached = current
         elif current.run_outcome in {RunOutcome.FAILED, RunOutcome.CANCELLED}:
             return self._terminal_result(current)
+        elif current.candidate_snapshot_id == stored.snapshot_id:
+            attached = current
         elif current.cancel_requested_at_utc is None:
             self._inject(PublisherFaultStage.BEFORE_CANDIDATE_ATTACH)
             try:
@@ -993,7 +1031,7 @@ class SnapshotPublisher:
                     run_id,
                     stored.snapshot_id,
                     expected_version=current.version,
-                    now=self._now(),
+                    now=max(self._now(), current.updated_at_utc),
                 )
             except StaleRunVersionError as error:
                 convergence = self._converge_attachment_race(

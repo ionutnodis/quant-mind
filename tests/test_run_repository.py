@@ -1416,6 +1416,133 @@ def test_resolve_publication_result_is_one_bounded_read_without_history_scan(
         reopened.resolve_publication_result(candidate.run_id, already_published=1)
 
 
+def test_resolve_publication_result_refuses_a_non_catalog_run_with_typed_error(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    running = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+
+    with pytest.raises(RunDatabaseError, match="publication result"):
+        repository.resolve_publication_result(
+            running.run_id, already_published=False
+        )
+
+
+def test_publication_result_allows_cancellation_before_candidate_attachment(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    run = repository.create_or_join(_new_run(), now=T1).record
+    run = repository.claim_start(
+        run.run_id, expected_version=run.version, now=T1
+    )
+    for stage in (
+        RunStage.RECONCILING,
+        RunStage.VALIDATING,
+        RunStage.MODELING,
+        RunStage.PUBLISHING,
+    ):
+        run = repository.advance_stage(
+            run.run_id, stage, expected_version=run.version, now=T2
+        )
+    requested = repository.request_cancel(run.run_id, now=T3)
+
+    result = repository.commit_publication(
+        run.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=requested.version,
+        now=T3,
+    )
+
+    assert result.rejection_code is RunErrorCode.CANCELLED_BY_USER
+    assert result.run.candidate_snapshot_id is None
+    assert result.run.run_outcome is RunOutcome.CANCELLED
+    assert result.publication is None
+
+
+def test_publication_rejection_refuses_a_later_pointer_with_pre_request_clock(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    published = repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    assert published.active is not None
+    rejected_run = _publishing_run_at(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6ZZA",
+        snapshot_id=SNAPSHOT_B,
+        now=T3,
+    )
+    repository.request_cancel(rejected_run.run_id, now=T4)
+    rejected = repository.commit_publication(
+        rejected_run.run_id,
+        _publication(SNAPSHOT_B, generation=1),
+        expected_version=rejected_run.version,
+        now=T4,
+    )
+    assert rejected.active is not None
+    forged = rejected.model_copy(
+        update={
+            "active": rejected.active.model_copy(
+                update={"pointer_version": 2, "updated_at_utc": T0}
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match="clock"):
+        PublicationResultV1.model_validate(
+            forged.model_dump(mode="python", warnings=False)
+        )
+
+
+def test_stale_pointer_rejection_cannot_claim_the_captured_predecessor_is_current(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    published = repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    assert published.active is not None
+    stale = _publishing_run_at(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6ZZB",
+        snapshot_id=SNAPSHOT_C,
+        now=T3,
+    )
+    repository.recover_active(
+        "book-alpha",
+        verify=lambda _snapshot_id: (_ for _ in ()).throw(ValueError("corrupt")),
+        now=T4,
+    )
+    rejected = repository.commit_publication(
+        stale.run_id,
+        _publication(SNAPSHOT_C, generation=1),
+        expected_version=stale.version,
+        now=T5,
+    )
+    assert rejected.rejection_code is RunErrorCode.STALE_ACTIVE_POINTER
+    assert rejected.active is None
+    forged = rejected.model_copy(update={"active": published.active})
+
+    with pytest.raises(ValueError, match="later pointer"):
+        PublicationResultV1.model_validate(
+            forged.model_dump(mode="python", warnings=False)
+        )
+
+
 @pytest.mark.parametrize(
     "object_ddl",
     [

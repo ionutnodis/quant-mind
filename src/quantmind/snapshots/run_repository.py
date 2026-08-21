@@ -1070,6 +1070,11 @@ class PublicationResultV1(FrozenContractBase):
             expected_version = run.expected_active_pointer_version
             if self.active.pointer_version < expected_version:
                 raise ValueError("active pointer predates the captured predecessor")
+            if (
+                self.active.pointer_version > expected_version
+                and self.active.updated_at_utc < run.requested_at_utc
+            ):
+                raise ValueError("later active pointer clock predates the run request")
             if self.active.pointer_version == expected_version:
                 if (
                     run.expected_active_snapshot_id is None
@@ -3231,6 +3236,10 @@ class RunRepository:
         rejection_code = (
             run.error_code if run.error_code in _PUBLICATION_REJECTION_CODES else None
         )
+        if publication_record is None and rejection_code is None:
+            raise RunDatabaseError(
+                "durable run does not describe a publication result"
+            )
         result = PublicationResultV1(
             run=run,
             publication=publication_record,
