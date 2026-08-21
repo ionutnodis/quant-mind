@@ -1109,7 +1109,7 @@ class RunRepository:
                 if not self._sqlite_is_busy_or_locked(cause):
                     raise
                 last_error = cause
-            except sqlite3.OperationalError as error:
+            except sqlite3.Error as error:
                 if not self._sqlite_is_busy_or_locked(error):
                     raise RunDatabaseError(
                         "cannot enable WAL after catalog migration"
@@ -1371,6 +1371,12 @@ class RunRepository:
         if connection.execute("PRAGMA foreign_key_check").fetchall():
             raise RunDatabaseError("durable run catalog contains foreign-key violations")
         if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise RunDatabaseError("durable run catalog integrity check failed")
+        integrity_results = tuple(
+            str(row[0])
+            for row in connection.execute("PRAGMA integrity_check").fetchall()
+        )
+        if integrity_results != ("ok",):
             raise RunDatabaseError("durable run catalog integrity check failed")
 
     @staticmethod
@@ -1985,6 +1991,8 @@ class RunRepository:
             rejected_publication,
             completed_tails=completed_tails,
         )
+        if event.recorded_at_utc < rejected_publication.published_at_utc:
+            raise RunDatabaseError("recovery evidence predates rejected publication")
         if event.selected_snapshot_id is None:
             return
         selected = connection.execute(
@@ -2005,6 +2013,7 @@ class RunRepository:
         if (
             publication.snapshot_status is not SnapshotStatus.BLESSED
             or event.selected_snapshot_id == event.rejected_snapshot_id
+            or event.recorded_at_utc < publication.published_at_utc
         ):
             raise RunDatabaseError("recovery selected publication is not safe")
 
@@ -2760,7 +2769,6 @@ class RunRepository:
                     already_published=False,
                     rejection_code=RunErrorCode.CANCELLED_BY_USER,
                 )
-            _require_monotonic_update(row, now_text)
             if row["version"] != expected_version:
                 raise StaleRunVersionError("run version does not match durable state")
             if RunStage(row["run_stage"]) is not RunStage.PUBLISHING:
@@ -2777,15 +2785,20 @@ class RunRepository:
                 )
 
             head = connection.execute(
-                "SELECT generation FROM book_heads WHERE book_id = ?",
+                "SELECT generation, updated_at_utc FROM book_heads WHERE book_id = ?",
                 (row["book_id"],),
             ).fetchone()
             if head is None or head["generation"] != row["captured_generation"]:
+                terminal_time_text = max(
+                    now_text,
+                    row["updated_at_utc"],
+                    head["updated_at_utc"] if head is not None else row["updated_at_utc"],
+                )
                 self._terminalize_publication_rejection(
                     connection,
                     run_id=run_id,
                     code=RunErrorCode.STALE_BOOK_GENERATION,
-                    now_text=now_text,
+                    now_text=terminal_time_text,
                 )
                 connection.commit()
                 committed = True
@@ -2800,8 +2813,6 @@ class RunRepository:
             if active_row is not None:
                 active_record = self._active_from_row(active_row)
                 self._validate_active_relations(connection, active_record)
-            if active_row is not None and now_text < active_row["updated_at_utc"]:
-                raise ValueError("publication time cannot precede the active pointer update")
             expected_active_id = row["expected_active_snapshot_id"]
             expected_pointer_version = row["expected_active_pointer_version"]
             pointer_matches = (
@@ -2814,11 +2825,18 @@ class RunRepository:
                 and active_row["pointer_version"] == expected_pointer_version
             )
             if not pointer_matches:
+                terminal_time_text = max(
+                    now_text,
+                    row["updated_at_utc"],
+                    active_row["updated_at_utc"]
+                    if active_row is not None
+                    else now_text,
+                )
                 self._terminalize_publication_rejection(
                     connection,
                     run_id=run_id,
                     code=RunErrorCode.STALE_ACTIVE_POINTER,
-                    now_text=now_text,
+                    now_text=terminal_time_text,
                 )
                 connection.commit()
                 committed = True
@@ -2828,6 +2846,10 @@ class RunRepository:
                     already_published=False,
                     rejection_code=RunErrorCode.STALE_ACTIVE_POINTER,
                 )
+
+            _require_monotonic_update(row, now_text)
+            if active_row is not None and now_text < active_row["updated_at_utc"]:
+                raise ValueError("publication time cannot precede the active pointer update")
 
             try:
                 cursor = connection.execute(
@@ -3424,20 +3446,23 @@ class RunRepository:
                 ORDER BY requested_at_utc, run_id
                 """
             ).fetchall()
-            for row in rows:
-                _require_monotonic_update(row, now_text)
             run_ids = tuple(row["run_id"] for row in rows)
-            if run_ids:
-                connection.execute(
+            for row in rows:
+                terminal_time_text = max(now_text, row["updated_at_utc"])
+                updated = connection.execute(
                     """
                     UPDATE snapshot_runs
                     SET run_outcome = 'FAILED', error_code = 'INTERRUPTED',
                         error_message = 'run interrupted by process restart',
                         finished_at_utc = ?, updated_at_utc = ?, version = version + 1
-                    WHERE run_outcome = 'RUNNING'
+                    WHERE run_id = ? AND run_outcome = 'RUNNING'
                     """,
-                    (now_text, now_text),
+                    (terminal_time_text, terminal_time_text, row["run_id"]),
                 )
+                if updated.rowcount != 1:
+                    raise RunDatabaseError(
+                        "running row changed during startup recovery"
+                    )
             return run_ids
 
 

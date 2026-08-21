@@ -286,8 +286,23 @@ BEGIN
     SELECT RAISE(ABORT, 'run allocation fields are immutable');
 END;
 
+CREATE TRIGGER snapshot_run_terminal_update_immutable
+BEFORE UPDATE ON snapshot_runs
+WHEN OLD.run_outcome <> 'RUNNING'
+BEGIN
+    SELECT RAISE(ABORT, 'terminal run is immutable');
+END;
+
+CREATE TRIGGER snapshot_run_delete_immutable
+BEFORE DELETE ON snapshot_runs
+BEGIN
+    SELECT RAISE(ABORT, 'run history is immutable');
+END;
+
 CREATE TABLE snapshot_manifests (
-    publication_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    publication_sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (
+        publication_sequence > 0
+    ),
     snapshot_id TEXT NOT NULL UNIQUE CHECK (
         length(snapshot_id) = 64 AND snapshot_id NOT GLOB '*[^0-9a-f]*'
     ),
@@ -334,7 +349,7 @@ WHEN EXISTS (
     SELECT 1 FROM snapshot_manifests
     WHERE (
             NEW.publication_sequence > 0
-            AND publication_sequence = NEW.publication_sequence
+            AND publication_sequence >= NEW.publication_sequence
         )
        OR snapshot_id = NEW.snapshot_id
        OR run_id = NEW.run_id
@@ -342,6 +357,18 @@ WHEN EXISTS (
 )
 BEGIN
     SELECT RAISE(ABORT, 'manifest identity is immutable');
+END;
+
+CREATE TRIGGER manifest_update_immutable
+BEFORE UPDATE ON snapshot_manifests
+BEGIN
+    SELECT RAISE(ABORT, 'manifest is immutable');
+END;
+
+CREATE TRIGGER manifest_delete_immutable
+BEFORE DELETE ON snapshot_manifests
+BEGIN
+    SELECT RAISE(ABORT, 'manifest is immutable');
 END;
 
 CREATE TABLE active_snapshots (
@@ -359,7 +386,7 @@ CREATE TABLE active_snapshots (
 );
 
 CREATE TABLE snapshot_recovery_events (
-    event_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (event_sequence > 0),
     book_id TEXT NOT NULL REFERENCES book_heads(book_id),
     rejected_snapshot_id TEXT NOT NULL CHECK (
         length(rejected_snapshot_id) = 64
@@ -401,6 +428,50 @@ CREATE TABLE snapshot_recovery_events (
 
 CREATE INDEX recovery_events_by_book_sequence
     ON snapshot_recovery_events(book_id, event_sequence);
+
+CREATE TRIGGER recovery_event_identity_collision_on_insert
+BEFORE INSERT ON snapshot_recovery_events
+WHEN NEW.event_sequence > 0
+ AND EXISTS (
+    SELECT 1 FROM snapshot_recovery_events
+    WHERE event_sequence >= NEW.event_sequence
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'recovery event identity is immutable');
+END;
+
+CREATE TRIGGER recovery_event_time_not_before_publications
+BEFORE INSERT ON snapshot_recovery_events
+WHEN EXISTS (
+    SELECT 1 FROM snapshot_manifests
+    WHERE book_id = NEW.book_id
+      AND snapshot_id = NEW.rejected_snapshot_id
+      AND published_at_utc > NEW.recorded_at_utc
+ )
+ OR (
+    NEW.selected_snapshot_id IS NOT NULL
+    AND EXISTS (
+        SELECT 1 FROM snapshot_manifests
+        WHERE book_id = NEW.book_id
+          AND snapshot_id = NEW.selected_snapshot_id
+          AND published_at_utc > NEW.recorded_at_utc
+    )
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'recovery event predates its publication');
+END;
+
+CREATE TRIGGER recovery_event_update_immutable
+BEFORE UPDATE ON snapshot_recovery_events
+BEGIN
+    SELECT RAISE(ABORT, 'recovery event is immutable');
+END;
+
+CREATE TRIGGER recovery_event_delete_immutable
+BEFORE DELETE ON snapshot_recovery_events
+BEGIN
+    SELECT RAISE(ABORT, 'recovery event is immutable');
+END;
 
 CREATE TRIGGER recovery_selected_snapshot_blessed_on_insert
 BEFORE INSERT ON snapshot_recovery_events
