@@ -27,6 +27,7 @@ from quantmind.snapshots.input_artifacts import (
 )
 from quantmind.snapshots.manifest import (
     AnalyticalSnapshotManifestBodyV1,
+    ManifestError,
     ManifestPolicyEvidenceV1,
     OutputArtifactBindingV1,
     create_manifest,
@@ -507,11 +508,7 @@ class SnapshotPublisher:
         for _attempt in range(2):
             current = self._repository.get(run_id)
             if current.run_outcome in {RunOutcome.FAILED, RunOutcome.CANCELLED}:
-                return SnapshotPublisherResultV1(
-                    result_code=PublisherResultCode.TERMINAL_FAILURE,
-                    run=current,
-                    publication_result=None,
-                )
+                return self._terminal_result(current)
             if current.run_outcome is RunOutcome.SUCCEEDED:
                 raise TerminalRunMutationError(
                     "run succeeded while publisher failure evidence was being recorded"
@@ -533,13 +530,25 @@ class SnapshotPublisher:
             except StaleRunVersionError as error:
                 stale_error = error
                 continue
-            return SnapshotPublisherResultV1(
-                result_code=PublisherResultCode.TERMINAL_FAILURE,
-                run=terminal,
-                publication_result=None,
-            )
+            except TerminalRunMutationError:
+                durable = self._repository.get(run_id)
+                if durable.run_outcome in {
+                    RunOutcome.FAILED,
+                    RunOutcome.CANCELLED,
+                }:
+                    return self._terminal_result(durable)
+                raise
+            return self._terminal_result(terminal)
         assert stale_error is not None
         raise stale_error
+
+    @staticmethod
+    def _terminal_result(run: RunRecordV1) -> SnapshotPublisherResultV1:
+        return SnapshotPublisherResultV1(
+            result_code=PublisherResultCode.TERMINAL_FAILURE,
+            run=run,
+            publication_result=None,
+        )
 
     def _completed_run_publication(
         self,
@@ -582,6 +591,43 @@ class SnapshotPublisher:
             envelope_byte_length=stored.envelope_byte_length,
         )
 
+    def _converge_attachment_race(
+        self,
+        *,
+        run_id: str,
+        snapshot_id: str,
+        candidate: SnapshotCandidateV1,
+        error: StaleRunVersionError | TerminalRunMutationError,
+        allow_running: bool,
+    ) -> RunRecordV1 | SnapshotPublisherResultV1:
+        durable = self._repository.get(run_id)
+        if durable.run_outcome in {RunOutcome.FAILED, RunOutcome.CANCELLED}:
+            return self._terminal_result(durable)
+        if (
+            durable.run_outcome is RunOutcome.SUCCEEDED
+            and durable.candidate_snapshot_id == snapshot_id
+            and durable.published_snapshot_id == snapshot_id
+        ):
+            publication = self._completed_run_publication(
+                run=durable,
+                candidate=candidate,
+            )
+            return self._commit_verified_publication(
+                run_id=run_id,
+                publication=publication,
+                expected_version=durable.version,
+            )
+        if (
+            allow_running
+            and durable.run_outcome is RunOutcome.RUNNING
+            and (
+                durable.cancel_requested_at_utc is not None
+                or durable.candidate_snapshot_id == snapshot_id
+            )
+        ):
+            return durable
+        raise error
+
     def _commit_verified_publication(
         self,
         *,
@@ -590,12 +636,21 @@ class SnapshotPublisher:
         expected_version: int,
     ) -> SnapshotPublisherResultV1:
         self._inject(PublisherFaultStage.BEFORE_REPOSITORY_COMMIT)
-        result = self._repository.commit_publication(
-            run_id,
-            publication,
-            expected_version=expected_version,
-            now=self._now(),
-        )
+        try:
+            result = self._repository.commit_publication(
+                run_id,
+                publication,
+                expected_version=expected_version,
+                now=self._now(),
+            )
+        except TerminalRunMutationError:
+            durable = self._repository.get(run_id)
+            if durable.run_outcome in {
+                RunOutcome.FAILED,
+                RunOutcome.CANCELLED,
+            }:
+                return self._terminal_result(durable)
+            raise
         self._inject(PublisherFaultStage.AFTER_REPOSITORY_COMMIT)
         durable_run = self._repository.get(run_id)
         if durable_run != result.run:
@@ -700,7 +755,7 @@ class SnapshotPublisher:
         self._inject(PublisherFaultStage.AFTER_MANIFEST_DURABLE)
         try:
             verified = self._store.verify_snapshot(stored.snapshot_id)
-        except (SnapshotStoreError, OSError):
+        except (SnapshotStoreError, ManifestError, OSError):
             return self._terminalize_failure(run_id, RunErrorCode.DISK_WRITE_FAILED)
         try:
             if not isinstance(verified, VerifiedSnapshotV1):
@@ -746,10 +801,8 @@ class SnapshotPublisher:
                     "completed run is bound to a different snapshot candidate"
                 )
             attached = current
-        elif current.run_outcome is not RunOutcome.RUNNING:
-            raise TerminalRunMutationError(
-                "failed and cancelled runs cannot publish snapshot candidates"
-            )
+        elif current.run_outcome in {RunOutcome.FAILED, RunOutcome.CANCELLED}:
+            return self._terminal_result(current)
         elif current.cancel_requested_at_utc is None:
             self._inject(PublisherFaultStage.BEFORE_CANDIDATE_ATTACH)
             try:
@@ -759,13 +812,28 @@ class SnapshotPublisher:
                     expected_version=current.version,
                     now=self._now(),
                 )
-            except StaleRunVersionError:
-                attached = self._repository.get(run_id)
-                if (
-                    attached.cancel_requested_at_utc is None
-                    and attached.candidate_snapshot_id != stored.snapshot_id
-                ):
-                    raise
+            except StaleRunVersionError as error:
+                convergence = self._converge_attachment_race(
+                    run_id=run_id,
+                    snapshot_id=stored.snapshot_id,
+                    candidate=candidate,
+                    error=error,
+                    allow_running=True,
+                )
+                if isinstance(convergence, SnapshotPublisherResultV1):
+                    return convergence
+                attached = convergence
+            except TerminalRunMutationError as error:
+                convergence = self._converge_attachment_race(
+                    run_id=run_id,
+                    snapshot_id=stored.snapshot_id,
+                    candidate=candidate,
+                    error=error,
+                    allow_running=False,
+                )
+                if isinstance(convergence, SnapshotPublisherResultV1):
+                    return convergence
+                attached = convergence
             self._inject(PublisherFaultStage.AFTER_CANDIDATE_ATTACH)
         else:
             attached = current

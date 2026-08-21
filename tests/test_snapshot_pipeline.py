@@ -40,7 +40,10 @@ from quantmind.snapshots.run_repository import (
     NewRunV1,
     RunDatabaseError,
     RunErrorCode,
+    RunFailureV1,
     RunRepository,
+    StaleRunVersionError,
+    TerminalRunMutationError,
 )
 from quantmind.snapshots.store import (
     ArtifactNotFoundError,
@@ -1298,3 +1301,346 @@ def test_publisher_propagates_repository_error_while_recording_failure(
     assert durable.get(run.run_id).run_outcome is RunOutcome.RUNNING
     assert durable.get(run.run_id).candidate_snapshot_id is None
     assert durable.list_publications("book-alpha") == ()
+
+
+def test_corrupt_manifest_after_durable_write_records_disk_failure(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a corrupt canonical envelope leaking ManifestError and leaving the
+    # run live instead of recording exact pre-CAS disk verification evidence.
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B2A",
+    )
+    manifest = create_manifest(candidate.manifest_body)
+    manifest_path = (
+        tmp_path
+        / "snapshots"
+        / "manifests"
+        / "analytical_snapshot_manifest_v1"
+        / manifest.snapshot_id[:2]
+        / f"{manifest.snapshot_id}.json"
+    )
+
+    def corrupt_after_durable(stage) -> None:
+        if stage is module.PublisherFaultStage.AFTER_MANIFEST_DURABLE:
+            manifest_path.write_bytes(b"corrupt canonical manifest")
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+        fault_injector=corrupt_after_durable,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
+    assert result.publication_result is None
+    assert result.run.run_outcome is RunOutcome.FAILED
+    assert result.run.error_code is RunErrorCode.DISK_WRITE_FAILED
+    assert repository.get(run.run_id) == result.run
+    assert result.run.candidate_snapshot_id is None
+    assert repository.list_publications("book-alpha") == ()
+    assert repository.get_active("book-alpha") is None
+
+
+@pytest.mark.parametrize(
+    "terminal_race",
+    [
+        "cancelled_before_reload",
+        "failed_before_reload",
+        "cancelled_during_attach",
+        "identical_success_during_attach",
+    ],
+)
+def test_candidate_attachment_converges_terminal_race(
+    tmp_path: Path,
+    terminal_race: str,
+) -> None:
+    # Break caught: exact cancellation acknowledgement or an identical concurrent
+    # publication winning between reload and attachment escaping as terminal mutation.
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B2B",
+    )
+    raced = False
+
+    def terminalize_before_attachment(stage) -> None:
+        nonlocal raced
+        before_reload = terminal_race.endswith("before_reload")
+        expected_stage = (
+            module.PublisherFaultStage.AFTER_SNAPSHOT_VERIFIED
+            if before_reload
+            else module.PublisherFaultStage.BEFORE_CANDIDATE_ATTACH
+        )
+        if stage is not expected_stage or raced:
+            return
+        raced = True
+        if terminal_race.startswith("cancelled"):
+            cancel = repository.request_cancel(run.run_id, now=T3)
+            repository.acknowledge_cancel(
+                run.run_id,
+                expected_version=cancel.version,
+                now=T3,
+            )
+        elif terminal_race.startswith("failed"):
+            current = repository.get(run.run_id)
+            repository.mark_failed(
+                run.run_id,
+                RunFailureV1(code=RunErrorCode.WORKER_FAILED),
+                expected_version=current.version,
+                now=T3,
+            )
+        else:
+            module.SnapshotPublisher(
+                repository=repository,
+                store=store,
+                clock=lambda: T3,
+            ).publish(run.run_id, candidate, authority=authority)
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+        fault_injector=terminalize_before_attachment,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert raced is True
+    assert repository.get(run.run_id) == result.run
+    if not terminal_race.startswith("identical_success"):
+        assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
+        assert result.publication_result is None
+        if terminal_race.startswith("cancelled"):
+            assert result.run.run_outcome is RunOutcome.CANCELLED
+            assert result.run.error_code is RunErrorCode.CANCELLED_BY_USER
+        else:
+            assert result.run.run_outcome is RunOutcome.FAILED
+            assert result.run.error_code is RunErrorCode.WORKER_FAILED
+        assert repository.list_publications("book-alpha") == ()
+        assert repository.get_active("book-alpha") is None
+    else:
+        assert result.result_code is module.PublisherResultCode.CATALOG_RESULT
+        assert result.publication_result is not None
+        assert result.run.run_outcome is RunOutcome.SUCCEEDED
+        assert result.published is True
+        assert result.already_published is True
+        assert len(repository.list_publications("book-alpha")) == 1
+        assert repository.get_active("book-alpha").pointer_version == 1
+
+
+def test_candidate_attachment_race_refuses_conflicting_success(
+    tmp_path: Path,
+) -> None:
+    # Break caught: convergence accepting any concurrent success instead of requiring
+    # exact candidate and published snapshot identity.
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B2F",
+    )
+    competing_payload = b'{"xray":"competing"}'
+    competing_ref = _artifact_ref(
+        competing_payload,
+        media_type="application/json",
+        schema_version="xray_read_model_v1",
+    )
+    competing_body = candidate.manifest_body.model_copy(
+        update={
+            "outputs": (
+                candidate.manifest_body.outputs[0].model_copy(
+                    update={"object_ref": competing_ref}
+                ),
+            )
+        }
+    )
+    competing_candidate = module.SnapshotCandidateV1(
+        manifest_body=competing_body,
+        outputs=(
+            candidate.outputs[0].model_copy(update={"payload": competing_payload}),
+        ),
+    )
+    raced = False
+
+    def publish_competing_candidate(stage) -> None:
+        nonlocal raced
+        if stage is module.PublisherFaultStage.BEFORE_CANDIDATE_ATTACH and not raced:
+            raced = True
+            module.SnapshotPublisher(
+                repository=repository,
+                store=store,
+                clock=lambda: T3,
+            ).publish(run.run_id, competing_candidate, authority=authority)
+
+    with pytest.raises(TerminalRunMutationError):
+        module.SnapshotPublisher(
+            repository=repository,
+            store=store,
+            clock=lambda: T3,
+            fault_injector=publish_competing_candidate,
+        ).publish(run.run_id, candidate, authority=authority)
+
+    competing_snapshot_id = create_manifest(competing_body).snapshot_id
+    durable = repository.get(run.run_id)
+    assert raced is True
+    assert durable.run_outcome is RunOutcome.SUCCEEDED
+    assert durable.candidate_snapshot_id == competing_snapshot_id
+    assert durable.published_snapshot_id == competing_snapshot_id
+    assert repository.get_active("book-alpha").snapshot_id == competing_snapshot_id
+    assert len(repository.list_publications("book-alpha")) == 1
+
+
+@pytest.mark.parametrize("terminal_winner", ["cancelled", "failed"])
+def test_failure_terminalization_converges_concurrent_terminal_truth(
+    tmp_path: Path,
+    terminal_winner: str,
+) -> None:
+    # Break caught: durable terminal truth winning after failure's read but before
+    # mark_failed escaping as TerminalRunMutationError instead of being returned exactly.
+    armed = False
+
+    class CancelBeforeFailureRepository(RunRepository):
+        def mark_failed(self, run_id, failure, *, expected_version, now):
+            nonlocal armed
+            if armed:
+                armed = False
+                if terminal_winner == "cancelled":
+                    cancel = self.request_cancel(run_id, now=now)
+                    self.acknowledge_cancel(
+                        run_id,
+                        expected_version=cancel.version,
+                        now=now,
+                    )
+                else:
+                    super().mark_failed(
+                        run_id,
+                        RunFailureV1(code=RunErrorCode.WORKER_FAILED),
+                        expected_version=expected_version,
+                        now=now,
+                    )
+            return super().mark_failed(
+                run_id,
+                failure,
+                expected_version=expected_version,
+                now=now,
+            )
+
+    repository = CancelBeforeFailureRepository(tmp_path)
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B2C",
+        repository=repository,
+    )
+    armed = True
+    bad_output = candidate.outputs[0].model_copy(
+        update={"payload": b'{"xray":"tampered"}'}
+    )
+    forged = module.SnapshotCandidateV1(
+        manifest_body=candidate.manifest_body,
+        outputs=(bad_output,),
+    )
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, forged, authority=authority)
+
+    assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
+    assert result.publication_result is None
+    if terminal_winner == "cancelled":
+        assert result.run.run_outcome is RunOutcome.CANCELLED
+        assert result.run.error_code is RunErrorCode.CANCELLED_BY_USER
+    else:
+        assert result.run.run_outcome is RunOutcome.FAILED
+        assert result.run.error_code is RunErrorCode.WORKER_FAILED
+    assert RunRepository(tmp_path).get(run.run_id) == result.run
+    assert RunRepository(tmp_path).list_publications("book-alpha") == ()
+
+
+def test_stale_attachment_reread_converges_acknowledged_cancellation(
+    tmp_path: Path,
+) -> None:
+    # Break caught: stale attachment CAS rereading terminal cancellation and then
+    # falling through to commit, which leaks a terminal-mutation exception.
+    armed = False
+
+    class StaleThenCancelledRepository(RunRepository):
+        def attach_candidate(self, run_id, snapshot_id, *, expected_version, now):
+            nonlocal armed
+            if armed:
+                armed = False
+                cancel = self.request_cancel(run_id, now=now)
+                self.acknowledge_cancel(
+                    run_id,
+                    expected_version=cancel.version,
+                    now=now,
+                )
+                raise StaleRunVersionError("injected stale attachment response")
+            return super().attach_candidate(
+                run_id,
+                snapshot_id,
+                expected_version=expected_version,
+                now=now,
+            )
+
+    repository = StaleThenCancelledRepository(tmp_path)
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B2D",
+        repository=repository,
+    )
+    armed = True
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
+    assert result.publication_result is None
+    assert result.run.run_outcome is RunOutcome.CANCELLED
+    assert result.run.error_code is RunErrorCode.CANCELLED_BY_USER
+    assert RunRepository(tmp_path).get(run.run_id) == result.run
+    assert RunRepository(tmp_path).list_publications("book-alpha") == ()
+    assert RunRepository(tmp_path).get_active("book-alpha") is None
+
+
+def test_precommit_acknowledged_cancellation_returns_terminal_truth(
+    tmp_path: Path,
+) -> None:
+    # Break caught: cancellation acknowledged after candidate attachment but before the
+    # final catalog CAS escaping instead of returning the exact durable terminal run.
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B2E",
+    )
+    raced = False
+
+    def acknowledge_before_commit(stage) -> None:
+        nonlocal raced
+        if stage is module.PublisherFaultStage.BEFORE_REPOSITORY_COMMIT and not raced:
+            raced = True
+            cancel = repository.request_cancel(run.run_id, now=T3)
+            repository.acknowledge_cancel(
+                run.run_id,
+                expected_version=cancel.version,
+                now=T3,
+            )
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+        fault_injector=acknowledge_before_commit,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert raced is True
+    assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
+    assert result.publication_result is None
+    assert result.run.run_outcome is RunOutcome.CANCELLED
+    assert result.run.error_code is RunErrorCode.CANCELLED_BY_USER
+    assert result.run.candidate_snapshot_id == create_manifest(
+        candidate.manifest_body
+    ).snapshot_id
+    assert repository.get(run.run_id) == result.run
+    assert repository.list_publications("book-alpha") == ()
+    assert repository.get_active("book-alpha") is None
