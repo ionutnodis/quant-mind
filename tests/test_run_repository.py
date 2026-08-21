@@ -3367,6 +3367,69 @@ def test_after_commit_fault_rereads_durable_success(tmp_path: Path) -> None:
     assert RunRepository(tmp_path).get_active("book-alpha").snapshot_id == SNAPSHOT_A
 
 
+def test_postcommit_result_reread_uses_one_consistent_snapshot(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a legitimate publisher advancing the pointer between result SELECTs
+    # making an already-committed predecessor look like corrupt durable history.
+    class RacingRepository(RunRepository):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.postcommit_armed = False
+            self.interleaved = False
+
+        def _inject(self, stage: str) -> None:
+            super()._inject(stage)
+            if stage == "db.after_commit":
+                self.postcommit_armed = True
+
+        def _pointer_row(
+            self,
+            connection: sqlite3.Connection,
+            book_id: str,
+        ) -> sqlite3.Row | None:
+            row = RunRepository._pointer_row(connection, book_id)
+            if self.postcommit_armed and not self.interleaved:
+                self.interleaved = True
+                competing = RunRepository(self.root)
+                second = _publishing_run(
+                    competing,
+                    run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6K1D",
+                    snapshot_id=SNAPSHOT_B,
+                )
+                competing.commit_publication(
+                    second.run_id,
+                    _publication(SNAPSHOT_B, generation=1),
+                    expected_version=second.version,
+                    now=T4,
+                )
+            return row
+
+    repository = RacingRepository(tmp_path)
+    repository.initialize()
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+
+    result = repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+
+    reopened = RunRepository(tmp_path)
+    assert repository.interleaved is True
+    assert result.run.run_outcome is RunOutcome.SUCCEEDED
+    assert result.active is not None
+    assert result.active.snapshot_id == SNAPSHOT_A
+    assert result.active.pointer_version == 1
+    assert reopened.get(first.run_id).run_outcome is RunOutcome.SUCCEEDED
+    durable_active = reopened.get_active("book-alpha")
+    assert durable_active is not None
+    assert durable_active.snapshot_id == SNAPSHOT_B
+    assert durable_active.pointer_version == 2
+
+
 @pytest.mark.parametrize("signal_type", [KeyboardInterrupt, SystemExit, GeneratorExit])
 def test_precommit_process_control_exception_propagates_after_rollback(
     tmp_path: Path, signal_type: type[BaseException]

@@ -3414,15 +3414,13 @@ class RunRepository:
             try:
                 self._inject("db.after_commit")
             except Exception:
-                connection.close()
-                connection = None
-                return self._publication_result_from_durable_truth(
-                    run_id, already_published=False
-                )
-            result = self._publication_result_from_connection(
-                connection,
-                run_id,
-                already_published=False,
+                # The transaction is already durable; resolve response uncertainty
+                # from the same read path as an ordinary committed result.
+                pass
+            connection.close()
+            connection = None
+            result = self._publication_result_from_durable_truth(
+                run_id, already_published=False
             )
             if (
                 result.publication is None
