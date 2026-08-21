@@ -573,6 +573,46 @@ def _seed_publication_chain(
     return snapshot_ids, run_ids
 
 
+def _publish_two_snapshot_chain(repository: RunRepository):
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    published_first = repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    second = _publishing_run(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6K1A",
+        snapshot_id=SNAPSHOT_B,
+    )
+    published_second = repository.commit_publication(
+        second.run_id,
+        _publication(SNAPSHOT_B, generation=1),
+        expected_version=second.version,
+        now=T4,
+    )
+    return first, published_first, second, published_second
+
+
+def _roll_pointer_register_back_to_first_publication(
+    repository: RunRepository,
+) -> None:
+    _execute_without_named_triggers(
+        repository,
+        _ACTIVE_POINTER_UPDATE_BYPASS,
+        """
+        UPDATE active_snapshots
+        SET snapshot_id = ?, book_generation = 1,
+            pointer_version = 1, updated_at_utc = ?
+        WHERE book_id = 'book-alpha'
+        """,
+        (SNAPSHOT_A, "2026-08-20T08:03:00.000000Z"),
+        foreign_keys=True,
+    )
+
+
 def _execute_without_named_trigger(
     repository: RunRepository,
     trigger_name: str,
@@ -7539,6 +7579,80 @@ def test_pointer_register_behind_future_transition_fails_closed(
             "SELECT COUNT(*) FROM snapshot_manifests WHERE snapshot_id = ?",
             (SNAPSHOT_A,),
         ).fetchone()[0] == 0
+
+
+def test_idempotent_publication_retry_validates_pointer_tail(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a completed publisher returning stale durable truth after the
+    # pointer register was rolled behind a later successful publication.
+    repository = _repository(tmp_path)
+    first, published_first, _, _ = _publish_two_snapshot_chain(repository)
+    _roll_pointer_register_back_to_first_publication(repository)
+
+    with pytest.raises(RunDatabaseError, match="pointer|history"):
+        repository.commit_publication(
+            first.run_id,
+            _publication(SNAPSHOT_A, generation=1),
+            expected_version=published_first.run.version,
+            now=T7,
+        )
+
+    assert repository.get(first.run_id) == published_first.run
+
+
+def test_cancelled_publication_rejection_validates_pointer_tail_before_commit(
+    tmp_path: Path,
+) -> None:
+    # Break caught: cancellation terminalizing a publisher before discovering that
+    # the active register hides a later durable pointer transition.
+    repository = _repository(tmp_path)
+    _publish_two_snapshot_chain(repository)
+    publisher = _publishing_run_at(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6K1B",
+        snapshot_id=SNAPSHOT_C,
+        now=T5,
+    )
+    cancelled = repository.request_cancel(publisher.run_id, now=T6)
+    _roll_pointer_register_back_to_first_publication(repository)
+
+    with pytest.raises(RunDatabaseError, match="pointer|history"):
+        repository.commit_publication(
+            publisher.run_id,
+            _publication(SNAPSHOT_C, generation=1),
+            expected_version=cancelled.version,
+            now=T7,
+        )
+
+    assert repository.get(publisher.run_id) == cancelled
+
+
+def test_stale_generation_rejection_validates_pointer_tail_before_commit(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a stale-generation rejection becoming durable before discovering
+    # that the active register hides a later durable pointer transition.
+    repository = _repository(tmp_path)
+    _publish_two_snapshot_chain(repository)
+    publisher = _publishing_run_at(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6K1C",
+        snapshot_id=SNAPSHOT_C,
+        now=T5,
+    )
+    repository.advance_book_head("book-alpha", 2, BOOK_REF_2, now=T6)
+    _roll_pointer_register_back_to_first_publication(repository)
+
+    with pytest.raises(RunDatabaseError, match="pointer|history"):
+        repository.commit_publication(
+            publisher.run_id,
+            _publication(SNAPSHOT_C, generation=1),
+            expected_version=publisher.version,
+            now=T7,
+        )
+
+    assert repository.get(publisher.run_id) == publisher
 
 
 def test_future_transition_cannot_be_compounded_into_duplicate_epoch(

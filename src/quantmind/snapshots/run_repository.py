@@ -3098,11 +3098,11 @@ class RunRepository:
         if run_row is None:
             raise RunNotFoundError(f"run not found: {run_id}")
         publication_row = self._publication_row_for_run(connection, run_id)
-        active_row = (
-            None
-            if run_row["book_id"] is None
-            else self._active_row(connection, run_row["book_id"])
-        )
+        pointer_row = None
+        if run_row["book_id"] is not None:
+            pointer_row = self._pointer_row(connection, run_row["book_id"])
+            if pointer_row is None:
+                raise RunDatabaseError("book head has no active pointer register")
         run = self._run_from_row(run_row)
         self._validate_run_relations(connection, run)
         publication_record = (
@@ -3112,7 +3112,14 @@ class RunRepository:
         )
         if publication_record is not None:
             self._validate_publication_relations(connection, publication_record)
-        active = None if active_row is None else self._active_from_row(active_row)
+        pointer = (
+            None
+            if pointer_row is None
+            else self._pointer_register_from_row(pointer_row)
+        )
+        if pointer is not None:
+            self._validate_pointer_register_relations(connection, pointer)
+        active = None if pointer is None else pointer.active_snapshot()
         if active is not None:
             self._validate_active_relations(connection, active)
         return PublicationResultV1(
@@ -3213,12 +3220,13 @@ class RunRepository:
                     and existing["envelope_byte_length"]
                     == publication.envelope_byte_length
                 ):
-                    connection.rollback()
-                    return self._publication_result_from_connection(
+                    result = self._publication_result_from_connection(
                         connection,
                         run_id,
                         already_published=True,
                     )
+                    connection.rollback()
+                    return result
                 raise PublicationConflictError(
                     "completed run is bound to different publication metadata"
                 )
@@ -3236,14 +3244,15 @@ class RunRepository:
                     code=RunErrorCode.CANCELLED_BY_USER,
                     now_text=terminal_time_text,
                 )
-                connection.commit()
-                committed = True
-                return self._publication_result_from_connection(
+                result = self._publication_result_from_connection(
                     connection,
                     run_id,
                     already_published=False,
                     rejection_code=RunErrorCode.CANCELLED_BY_USER,
                 )
+                connection.commit()
+                committed = True
+                return result
             if row["version"] != expected_version:
                 raise StaleRunVersionError("run version does not match durable state")
             if RunStage(row["run_stage"]) is not RunStage.PUBLISHING:
@@ -3275,14 +3284,15 @@ class RunRepository:
                     code=RunErrorCode.STALE_BOOK_GENERATION,
                     now_text=terminal_time_text,
                 )
-                connection.commit()
-                committed = True
-                return self._publication_result_from_connection(
+                result = self._publication_result_from_connection(
                     connection,
                     run_id,
                     already_published=False,
                     rejection_code=RunErrorCode.STALE_BOOK_GENERATION,
                 )
+                connection.commit()
+                committed = True
+                return result
 
             pointer_row = self._pointer_row(connection, publication.book_id)
             if pointer_row is None:
@@ -3307,14 +3317,15 @@ class RunRepository:
                     code=RunErrorCode.STALE_ACTIVE_POINTER,
                     now_text=terminal_time_text,
                 )
-                connection.commit()
-                committed = True
-                return self._publication_result_from_connection(
+                result = self._publication_result_from_connection(
                     connection,
                     run_id,
                     already_published=False,
                     rejection_code=RunErrorCode.STALE_ACTIVE_POINTER,
                 )
+                connection.commit()
+                committed = True
+                return result
 
             _require_monotonic_update(row, now_text)
             if now_text < pointer_row["updated_at_utc"]:
