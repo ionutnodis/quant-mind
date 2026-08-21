@@ -7366,12 +7366,31 @@ def test_generation_advance_preserves_pointer_epoch(tmp_path: Path) -> None:
     assert next_run.expected_active_pointer_version == 1
 
 
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "create_or_join",
+        "get_book_head",
+        "get_active",
+        "list_active",
+        "recover_active",
+        "commit_publication",
+        "audit_integrity",
+        "initialize",
+    ],
+)
 def test_missing_pointer_register_is_corruption_not_virgin_state(
     tmp_path: Path,
+    operation: str,
 ) -> None:
-    # Break caught: an absent per-book register being silently fabricated as None/v0.
+    # Break caught: any public boundary fabricating None/v0 for an absent register.
     repository = _repository(tmp_path)
     repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    publishing_run = (
+        _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+        if operation == "commit_publication"
+        else None
+    )
     with sqlite3.connect(repository.database_path) as connection:
         has_register = connection.execute(
             "SELECT 1 FROM active_snapshots WHERE book_id = 'book-alpha'"
@@ -7384,18 +7403,41 @@ def test_missing_pointer_register_is_corruption_not_virgin_state(
             (),
         )
 
-    with pytest.raises(RunDatabaseError, match="pointer"):
-        repository.create_or_join(
-            _new_run(
-                run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6J0A",
-                client_idempotency_key="missing-register",
-            ),
-            now=T1,
-        )
-    with pytest.raises(RunDatabaseError, match="pointer"):
-        repository.audit_integrity()
     with pytest.raises(RunDatabaseError):
-        RunRepository(tmp_path).initialize()
+        if operation == "create_or_join":
+            repository.create_or_join(
+                _new_run(
+                    run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6J0A",
+                    client_idempotency_key="missing-register",
+                ),
+                now=T1,
+            )
+        elif operation == "get_book_head":
+            repository.get_book_head("book-alpha")
+        elif operation == "get_active":
+            repository.get_active("book-alpha")
+        elif operation == "list_active":
+            repository.list_active()
+        elif operation == "recover_active":
+            repository.recover_active(
+                "book-alpha",
+                verify=lambda _snapshot_id: pytest.fail(
+                    "missing-register recovery must not invoke verification"
+                ),
+                now=T3,
+            )
+        elif operation == "commit_publication":
+            assert publishing_run is not None
+            repository.commit_publication(
+                publishing_run.run_id,
+                _publication(SNAPSHOT_A, generation=1),
+                expected_version=publishing_run.version,
+                now=T3,
+            )
+        elif operation == "audit_integrity":
+            repository.audit_integrity()
+        else:
+            RunRepository(tmp_path).initialize()
 
 
 def test_removed_pointer_rejects_rolled_back_allocation_and_reopens(
