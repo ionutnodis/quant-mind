@@ -60,6 +60,8 @@ T3 = datetime(2026, 8, 20, 8, 3, tzinfo=UTC)
 T4 = datetime(2026, 8, 20, 8, 4, tzinfo=UTC)
 T5 = datetime(2026, 8, 20, 8, 5, tzinfo=UTC)
 T6 = datetime(2026, 8, 20, 8, 6, tzinfo=UTC)
+T7 = datetime(2026, 8, 20, 8, 7, tzinfo=UTC)
+T8 = datetime(2026, 8, 20, 8, 8, tzinfo=UTC)
 BOOK_REF_1 = "1" * 64
 BOOK_REF_2 = "2" * 64
 
@@ -243,6 +245,36 @@ def _publishing_run(
     )
 
 
+def _publishing_run_at(
+    repository: RunRepository,
+    *,
+    run_id: str,
+    snapshot_id: str,
+    now: datetime,
+    record=None,
+):
+    if record is None:
+        record = repository.create_or_join(_new_run(run_id), now=now).record
+    record = repository.claim_start(
+        record.run_id, expected_version=record.version, now=now
+    )
+    for stage in (
+        RunStage.RECONCILING,
+        RunStage.VALIDATING,
+        RunStage.MODELING,
+        RunStage.PUBLISHING,
+    ):
+        record = repository.advance_stage(
+            record.run_id, stage, expected_version=record.version, now=now
+        )
+    return repository.attach_candidate(
+        record.run_id,
+        snapshot_id,
+        expected_version=record.version,
+        now=now,
+    )
+
+
 def _failed_nonbook_run(
     repository: RunRepository,
     *,
@@ -309,6 +341,24 @@ def _publish_alpha_and_beta(repository: RunRepository) -> None:
         _publication(SNAPSHOT_BETA, generation=1, book_id="book-beta"),
         expected_version=beta.version,
         now=T3,
+    )
+
+
+def _publish_second_alpha(
+    repository: RunRepository,
+    *,
+    run_id: str = "run_01J5X5S8J5J8P7KQ4Y0T3N6F2X",
+) -> None:
+    second = _publishing_run(
+        repository,
+        run_id=run_id,
+        snapshot_id=SNAPSHOT_B,
+    )
+    repository.commit_publication(
+        second.run_id,
+        _publication(SNAPSHOT_B, generation=1),
+        expected_version=second.version,
+        now=T4,
     )
 
 
@@ -394,26 +444,48 @@ def _seed_recovery_event_history(
     book_id: str,
     rejected_snapshot_id: str,
 ) -> None:
+    if count < 1:
+        return
     timestamp = "2026-08-20T08:05:00.000000Z"
     with sqlite3.connect(repository.database_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
+        updated = connection.execute(
+            """
+            UPDATE active_snapshots
+            SET snapshot_id = NULL, book_generation = NULL,
+                pointer_version = pointer_version + 1, updated_at_utc = ?
+            WHERE book_id = ? AND snapshot_id = ? AND pointer_version = 1
+            """,
+            (timestamp, book_id, rejected_snapshot_id),
+        )
+        assert updated.rowcount == 1
+        connection.execute(
+            """
+            INSERT INTO snapshot_recovery_events (
+                book_id, rejected_snapshot_id, expected_pointer_version,
+                resolution_action, selected_snapshot_id, detail_json,
+                recorded_at_utc
+            ) VALUES (?, ?, 1, 'REMOVED', NULL,
+                      '{"failures":[],"omitted_count":0}', ?)
+            """,
+            (book_id, rejected_snapshot_id, timestamp),
+        )
         connection.execute(
             """
             WITH RECURSIVE sequence(value) AS (
-                VALUES (0)
-                UNION ALL
-                SELECT value + 1 FROM sequence WHERE value + 1 < ?
+                SELECT 1 WHERE ? > 1
+                UNION ALL SELECT value + 1 FROM sequence WHERE value + 1 < ?
             )
             INSERT INTO snapshot_recovery_events (
                 book_id, rejected_snapshot_id, expected_pointer_version,
                 resolution_action, selected_snapshot_id, detail_json,
                 recorded_at_utc
             )
-            SELECT ?, ?, value + 1, 'CAS_LOST', NULL,
+            SELECT ?, ?, 1, 'CAS_LOST', NULL,
                    '{"failures":[],"omitted_count":0}', ?
             FROM sequence
             """,
-            (count, book_id, rejected_snapshot_id, timestamp),
+            (count, count, book_id, rejected_snapshot_id, timestamp),
         )
 
 
@@ -485,14 +557,18 @@ def _seed_publication_chain(
                     timestamp,
                 ),
             )
-        connection.execute(
-            """
-            INSERT INTO active_snapshots (
-                book_id, snapshot_id, book_generation, pointer_version, updated_at_utc
-            ) VALUES ('book-alpha', ?, 1, ?, ?)
-            """,
-            (snapshot_ids[-1], count, timestamp),
-        )
+    _execute_without_named_triggers(
+        repository,
+        _ACTIVE_POINTER_UPDATE_BYPASS,
+        """
+        UPDATE active_snapshots
+        SET snapshot_id = ?, book_generation = 1,
+            pointer_version = ?, updated_at_utc = ?
+        WHERE book_id = 'book-alpha'
+        """,
+        (snapshot_ids[-1], count, timestamp),
+        foreign_keys=True,
+    )
     return snapshot_ids, run_ids
 
 
@@ -564,6 +640,10 @@ _TERMINAL_RUN_ALLOCATION_UPDATE_BYPASS = (
     "snapshot_run_allocation_immutable",
 )
 _RECOVERY_EVENT_UPDATE_BYPASS = ("recovery_event_update_immutable",)
+_ACTIVE_POINTER_UPDATE_BYPASS = ("active_pointer_transition_guard",)
+_RECOVERY_EVENT_INSERT_CAUSAL_BYPASS = (
+    "recovery_event_pointer_causal_on_insert",
+)
 
 
 def _insert_or_replace_run_from_existing(
@@ -2380,11 +2460,13 @@ def test_list_active_maps_corrupt_durable_rows_to_typed_database_error(
         expected_version=run.version,
         now=T3,
     )
-    with sqlite3.connect(repository.database_path) as connection:
-        connection.execute("PRAGMA ignore_check_constraints = ON")
-        connection.execute(
-            "UPDATE active_snapshots SET updated_at_utc = '2026-08-20'"
-        )
+    _execute_without_named_triggers(
+        repository,
+        _ACTIVE_POINTER_UPDATE_BYPASS,
+        "UPDATE active_snapshots SET updated_at_utc = '2026-08-20'",
+        (),
+        ignore_check_constraints=True,
+    )
 
     with pytest.raises(RunDatabaseError):
         repository.list_active()
@@ -2425,23 +2507,24 @@ def test_bypassed_active_binding_tamper_fails_every_read_boundary(
     # Break caught: active reads trusting independently valid book/snapshot/generation fields.
     repository = _repository(tmp_path)
     _publish_alpha_and_beta(repository)
-    with sqlite3.connect(repository.database_path) as connection:
-        connection.execute("PRAGMA foreign_keys = OFF")
-        if tamper == "foreign_book":
-            connection.execute(
-                """
-                UPDATE active_snapshots SET snapshot_id = ?
-                WHERE book_id = 'book-alpha'
-                """,
-                (SNAPSHOT_BETA,),
-            )
-        else:
-            connection.execute(
-                """
-                UPDATE active_snapshots SET book_generation = 2
-                WHERE book_id = 'book-alpha'
-                """
-            )
+    if tamper == "foreign_book":
+        statement = (
+            "UPDATE active_snapshots SET snapshot_id = ? "
+            "WHERE book_id = 'book-alpha'"
+        )
+        parameters = (SNAPSHOT_BETA,)
+    else:
+        statement = (
+            "UPDATE active_snapshots SET book_generation = 2 "
+            "WHERE book_id = 'book-alpha'"
+        )
+        parameters = ()
+    _execute_without_named_triggers(
+        repository,
+        _ACTIVE_POINTER_UPDATE_BYPASS,
+        statement,
+        parameters,
+    )
 
     with pytest.raises(RunDatabaseError):
         if operation == "initialize":
@@ -2468,7 +2551,6 @@ def test_sql_rejects_successful_book_run_without_its_candidate_publication_id(
         expected_version=run.version,
         now=T3,
     )
-
     with sqlite3.connect(repository.database_path) as connection:
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
@@ -2694,15 +2776,16 @@ def test_cross_table_publication_timestamps_fail_closed(
             (SNAPSHOT_A,),
         )
     else:
-        with sqlite3.connect(repository.database_path) as connection:
-            connection.execute(
-                """
-                UPDATE active_snapshots
-                SET updated_at_utc = '2026-08-20T08:02:59.000000Z'
-                WHERE snapshot_id = ?
-                """,
-                (SNAPSHOT_A,),
-            )
+        _execute_without_named_triggers(
+            repository,
+            _ACTIVE_POINTER_UPDATE_BYPASS,
+            """
+            UPDATE active_snapshots
+            SET updated_at_utc = '2026-08-20T08:02:59.000000Z'
+            WHERE snapshot_id = ?
+            """,
+            (SNAPSHOT_A,),
+        )
 
     with pytest.raises(RunDatabaseError):
         RunRepository(tmp_path).initialize()
@@ -2758,23 +2841,24 @@ def test_constraint_bypassed_recovery_event_coherence_fails_typed(
         expected_version=run.version,
         now=T3,
     )
-    with sqlite3.connect(repository.database_path) as connection:
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA ignore_check_constraints = ON")
-        connection.execute(
-            """
-            INSERT INTO snapshot_recovery_events (
-                book_id, rejected_snapshot_id, expected_pointer_version,
-                resolution_action, selected_snapshot_id, detail_json,
-                recorded_at_utc
-            ) VALUES (
-                'book-alpha', ?, 1, ?, ?,
-                '{"failures":[],"omitted_count":0}',
-                '2026-08-20T08:04:00.000000Z'
-            )
-            """,
-            (SNAPSHOT_A, action, selected_snapshot_id),
+    _execute_without_named_triggers(
+        repository,
+        _RECOVERY_EVENT_INSERT_CAUSAL_BYPASS,
+        """
+        INSERT INTO snapshot_recovery_events (
+            book_id, rejected_snapshot_id, expected_pointer_version,
+            resolution_action, selected_snapshot_id, detail_json,
+            recorded_at_utc
+        ) VALUES (
+            'book-alpha', ?, 1, ?, ?,
+            '{"failures":[],"omitted_count":0}',
+            '2026-08-20T08:04:00.000000Z'
         )
+        """,
+        (SNAPSHOT_A, action, selected_snapshot_id),
+        ignore_check_constraints=True,
+        foreign_keys=True,
+    )
 
     with pytest.raises(RunDatabaseError):
         repository.list_recovery_events("book-alpha")
@@ -3709,11 +3793,12 @@ def test_recovery_cas_detects_active_generation_change_after_selection(
 
     def mutate_active_generation(stage: str) -> None:
         if armed and stage == "recovery.after_selection":
-            with sqlite3.connect(repository.database_path) as connection:
-                connection.execute("PRAGMA foreign_keys = OFF")
-                connection.execute(
-                    "UPDATE active_snapshots SET book_generation = 2"
-                )
+            _execute_without_named_triggers(
+                repository,
+                _ACTIVE_POINTER_UPDATE_BYPASS,
+                "UPDATE active_snapshots SET book_generation = 2",
+                (),
+            )
 
     repository = RunRepository(tmp_path, fault_injector=mutate_active_generation)
     repository.initialize()
@@ -3902,7 +3987,7 @@ def test_recovery_caps_700_candidate_failures_and_still_removes_active(
                     published_snapshot_id, result_json, error_code, error_message, version
                 ) VALUES (
                     ?, 'ANALYTICAL_SNAPSHOT', ?, ?, NULL, 'book-alpha', 1,
-                    NULL, 0, ?, ?, ?, ?, ?, 'PUBLISHING', 'SUCCEEDED',
+                    ?, ?, ?, ?, ?, ?, ?, 'PUBLISHING', 'SUCCEEDED',
                     NULL, ?, ?, NULL, NULL, NULL, 1
                 )
                 """,
@@ -3910,6 +3995,8 @@ def test_recovery_caps_700_candidate_failures_and_still_removes_active(
                     run_id,
                     identity,
                     request_fingerprint,
+                    None if index == 0 else snapshot_ids[index - 1],
+                    index,
                     timestamp,
                     timestamp,
                     timestamp,
@@ -3937,14 +4024,18 @@ def test_recovery_caps_700_candidate_failures_and_still_removes_active(
                     timestamp,
                 ),
             )
-        connection.execute(
-            """
-            INSERT INTO active_snapshots (
-                book_id, snapshot_id, book_generation, pointer_version, updated_at_utc
-            ) VALUES ('book-alpha', ?, 1, 1, ?)
-            """,
-            (snapshot_ids[-1], timestamp),
-        )
+    _execute_without_named_triggers(
+        repository,
+        _ACTIVE_POINTER_UPDATE_BYPASS,
+        """
+        UPDATE active_snapshots
+        SET snapshot_id = ?, book_generation = 1,
+            pointer_version = ?, updated_at_utc = ?
+        WHERE book_id = 'book-alpha'
+        """,
+        (snapshot_ids[-1], len(snapshot_ids), timestamp),
+        foreign_keys=True,
+    )
 
     recovered = repository.recover_active(
         "book-alpha",
@@ -4247,6 +4338,7 @@ def test_sql_accepts_cas_lost_null_selection_for_attempted_removal(
         expected_version=run.version,
         now=T3,
     )
+    _publish_second_alpha(repository)
     with sqlite3.connect(repository.database_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
@@ -4302,16 +4394,16 @@ def test_sql_accepts_distinct_blessed_cas_lost_selection(
                 resolution_action, selected_snapshot_id, detail_json,
                 recorded_at_utc
             ) VALUES (
-                'book-alpha', ?, 2, 'CAS_LOST', ?,
+                'book-alpha', ?, 1, 'CAS_LOST', ?,
                 '{"failures":[],"omitted_count":0}',
                 '2026-08-20T08:05:00.000000Z'
             )
             """,
-            (SNAPSHOT_B, SNAPSHOT_A),
+            (SNAPSHOT_A, SNAPSHOT_B),
         )
 
     event = repository.list_recovery_events("book-alpha")[0]
-    assert event.selected_snapshot_id == SNAPSHOT_A
+    assert event.selected_snapshot_id == SNAPSHOT_B
 
 
 def test_cas_lost_selected_publication_must_remain_blessed_on_read_and_audit(
@@ -4347,12 +4439,12 @@ def test_cas_lost_selected_publication_must_remain_blessed_on_read_and_audit(
                 resolution_action, selected_snapshot_id, detail_json,
                 recorded_at_utc
             ) VALUES (
-                'book-alpha', ?, 2, 'CAS_LOST', ?,
+                'book-alpha', ?, 1, 'CAS_LOST', ?,
                 '{"failures":[],"omitted_count":0}',
                 '2026-08-20T08:05:00.000000Z'
             )
             """,
-            (SNAPSHOT_B, SNAPSHOT_A),
+            (SNAPSHOT_A, SNAPSHOT_B),
         )
     _execute_without_named_triggers(
         repository,
@@ -4361,7 +4453,7 @@ def test_cas_lost_selected_publication_must_remain_blessed_on_read_and_audit(
         UPDATE snapshot_manifests SET snapshot_status = 'DEGRADED'
         WHERE snapshot_id = ?
         """,
-        (SNAPSHOT_A,),
+        (SNAPSHOT_B,),
         ignore_check_constraints=True,
     )
 
@@ -4401,6 +4493,7 @@ def test_manual_and_initialize_audits_cover_scalar_and_lifecycle_domains(
         expected_version=publication_run.version,
         now=T3,
     )
+    _publish_second_alpha(repository)
     running = repository.create_or_join(
         _new_run(
             run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6A6D",
@@ -4434,6 +4527,7 @@ def test_manual_and_initialize_audits_cover_scalar_and_lifecycle_domains(
     }[table]
     bypass = {
         "snapshot_manifests": _MANIFEST_UPDATE_BYPASS,
+        "active_snapshots": _ACTIVE_POINTER_UPDATE_BYPASS,
         "snapshot_recovery_events": _RECOVERY_EVENT_UPDATE_BYPASS,
     }.get(table)
     if bypass is None:
@@ -4833,19 +4927,19 @@ def test_recovery_event_references_validate_publication_owner_provenance(
                 resolution_action, selected_snapshot_id, detail_json,
                 recorded_at_utc
             ) VALUES (
-                'book-alpha', ?, 2, 'CAS_LOST', ?,
+                'book-alpha', ?, 1, 'CAS_LOST', ?,
                 '{"failures":[],"omitted_count":0}',
                 '2026-08-20T08:05:00.000000Z'
             )
             """,
-            (SNAPSHOT_B, SNAPSHOT_A),
+            (SNAPSHOT_A, SNAPSHOT_B),
         )
     invalid_owner = _failed_nonbook_run(
         repository,
         run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6D2B",
         client_idempotency_key=f"invalid-event-{reference}-owner",
     )
-    target_snapshot_id = SNAPSHOT_B if reference == "rejected" else SNAPSHOT_A
+    target_snapshot_id = SNAPSHOT_A if reference == "rejected" else SNAPSHOT_B
     _execute_without_named_triggers(
         repository,
         _MANIFEST_UPDATE_BYPASS,
@@ -4938,12 +5032,12 @@ def test_all_publication_status_updates_are_rejected_after_insert(
                 resolution_action, selected_snapshot_id, detail_json,
                 recorded_at_utc
             ) VALUES (
-                'book-alpha', ?, 2, 'CAS_LOST', ?,
+                'book-alpha', ?, 1, 'CAS_LOST', ?,
                 '{"failures":[],"omitted_count":0}',
                 '2026-08-20T08:05:00.000000Z'
             )
             """,
-            (SNAPSHOT_B, SNAPSHOT_A),
+            (SNAPSHOT_A, SNAPSHOT_B),
         )
         for snapshot_id, status in (
             (SNAPSHOT_A, "DEGRADED"),
@@ -5053,6 +5147,76 @@ def test_recovery_event_listing_uses_index_with_100k_unrelated_rows(
             )
         )
     assert "recovery_events_by_book_sequence" in plan
+
+
+def test_recovery_event_append_is_constant_with_100k_same_book_rows(
+    tmp_path: Path,
+) -> None:
+    # Break caught: causal-clock enforcement scanning all prior same-book events.
+    small = _VmBudgetRunRepository(tmp_path / "small-event-append")
+    large = _VmBudgetRunRepository(tmp_path / "large-event-append")
+    for repository, count in ((small, 100), (large, 100_000)):
+        repository.initialize()
+        repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+        run = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+        repository.commit_publication(
+            run.run_id,
+            _publication(SNAPSHOT_A, generation=1),
+            expected_version=run.version,
+            now=T3,
+        )
+        _seed_recovery_event_history(
+            repository,
+            count,
+            book_id="book-alpha",
+            rejected_snapshot_id=SNAPSHOT_A,
+        )
+
+    def pointer_read_cost(repository: _VmBudgetRunRepository) -> int:
+        repository.reset_vm_callbacks()
+        assert repository.get_active("book-alpha") is None
+        return repository.vm_callbacks
+
+    def append_vm_cost(repository: _VmBudgetRunRepository) -> int:
+        repository.reset_vm_callbacks()
+        with repository._write_transaction() as connection:
+            _insert_raw_recovery_event(
+                connection,
+                rejected_snapshot_id=SNAPSHOT_A,
+                expected_pointer_version=1,
+                recorded_at_utc="2026-08-20T08:05:00.000000Z",
+            )
+        return repository.vm_callbacks
+
+    small_read = pointer_read_cost(small)
+    large_read = pointer_read_cost(large)
+    small_cost = append_vm_cost(small)
+    large_cost = append_vm_cost(large)
+    assert large_read <= small_read + 20
+    assert large_cost <= small_cost + 20
+
+    with sqlite3.connect(large.database_path) as connection:
+        plan = " ".join(
+            row[3]
+            for row in connection.execute(
+                "EXPLAIN QUERY PLAN SELECT recorded_at_utc "
+                "FROM snapshot_recovery_events WHERE book_id = ? "
+                "ORDER BY event_sequence DESC LIMIT 1",
+                ("book-alpha",),
+            )
+        )
+    assert "recovery_events_by_book_sequence" in plan
+    with sqlite3.connect(large.database_path) as connection:
+        transition_plan = " ".join(
+            row[3]
+            for row in connection.execute(
+                "EXPLAIN QUERY PLAN SELECT * FROM snapshot_recovery_events "
+                "WHERE book_id = ? AND expected_pointer_version = ? "
+                "AND resolution_action IN ('REPOINTED', 'REMOVED')",
+                ("book-alpha", 1),
+            )
+        )
+    assert "recovery_events_by_book_pointer_version" in transition_plan
 
 
 def test_complete_neighborhood_queries_use_named_full_indexes(tmp_path: Path) -> None:
@@ -5541,12 +5705,12 @@ def test_expected_active_provenance_walk_reaches_deep_ancestors(
                 resolution_action, selected_snapshot_id, detail_json,
                 recorded_at_utc
             ) VALUES (
-                'book-alpha', ?, 2, 'CAS_LOST', NULL,
+                'book-alpha', ?, 1, 'CAS_LOST', NULL,
                 '{"failures":[],"omitted_count":0}',
                 '2026-08-20T08:05:00.000000Z'
             )
             """,
-            (SNAPSHOT_B,),
+            (SNAPSHOT_A,),
         )
 
     if ancestor_corruption == "invalid_owner":
@@ -5877,17 +6041,21 @@ def test_expected_active_provenance_walk_rejects_real_cycle(tmp_path: Path) -> N
                     timestamp,
                 ),
             )
-        connection.execute(
-            """
-            INSERT INTO active_snapshots (
-                book_id, snapshot_id, book_generation, pointer_version, updated_at_utc
-            ) VALUES ('book-alpha', ?, 1, 2, ?)
-            """,
-            (SNAPSHOT_B, timestamp),
-        )
         connection.commit()
         connection.execute("PRAGMA foreign_keys = ON")
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    _execute_without_named_triggers(
+        repository,
+        _ACTIVE_POINTER_UPDATE_BYPASS,
+        """
+        UPDATE active_snapshots
+        SET snapshot_id = ?, book_generation = 1,
+            pointer_version = 2, updated_at_utc = ?
+        WHERE book_id = 'book-alpha'
+        """,
+        (SNAPSHOT_B, timestamp),
+        foreign_keys=True,
+    )
 
     with pytest.raises(RunDatabaseError, match="cycle"):
         repository.get_active("book-alpha")
@@ -5954,17 +6122,21 @@ def test_expected_active_provenance_walk_rejects_self_cycle(tmp_path: Path) -> N
                 timestamp,
             ),
         )
-        connection.execute(
-            """
-            INSERT INTO active_snapshots (
-                book_id, snapshot_id, book_generation, pointer_version, updated_at_utc
-            ) VALUES ('book-alpha', ?, 1, 1, ?)
-            """,
-            (SNAPSHOT_A, timestamp),
-        )
         connection.commit()
         connection.execute("PRAGMA foreign_keys = ON")
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    _execute_without_named_triggers(
+        repository,
+        _ACTIVE_POINTER_UPDATE_BYPASS,
+        """
+        UPDATE active_snapshots
+        SET snapshot_id = ?, book_generation = 1,
+            pointer_version = 1, updated_at_utc = ?
+        WHERE book_id = 'book-alpha'
+        """,
+        (SNAPSHOT_A, timestamp),
+        foreign_keys=True,
+    )
 
     with pytest.raises(RunDatabaseError, match="cycle"):
         repository.get_active("book-alpha")
@@ -5990,64 +6162,34 @@ def test_publication_provenance_walk_allows_normal_owner_back_edge(
     assert repository.get_active("book-alpha").snapshot_id == SNAPSHOT_A
 
 
-@pytest.mark.parametrize("resolution", ["fallback", "removal"])
-def test_recovery_timestamp_only_pointer_drift_loses_exact_cas(
+@pytest.mark.parametrize("publication_count", [1, 2])
+def test_timestamp_only_pointer_drift_is_rejected_before_recovery_cas(
     tmp_path: Path,
-    resolution: str,
+    publication_count: int,
 ) -> None:
-    # Break caught: recovery overwriting a pointer whose timestamp changed after capture.
-    armed = False
-
-    def drift_pointer_timestamp(stage: str) -> None:
-        if armed and stage == "recovery.after_selection":
-            with sqlite3.connect(repository.database_path) as connection:
-                connection.execute(
-                    "UPDATE active_snapshots SET updated_at_utc = ? "
-                    "WHERE book_id = 'book-alpha'",
-                    ("2026-08-20T08:05:00.000000Z",),
-                )
-
-    repository = RunRepository(tmp_path, fault_injector=drift_pointer_timestamp)
-    repository.initialize()
+    # Break caught: a timestamp-only rewrite fabricating pointer drift outside a revision.
+    repository = _repository(tmp_path)
     repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
-    if resolution == "fallback":
-        first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
-        repository.commit_publication(
-            first.run_id,
-            _publication(SNAPSHOT_A, generation=1),
-            expected_version=first.version,
-            now=T3,
-        )
-    second = _publishing_run(
-        repository,
-        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6E4A",
-        snapshot_id=SNAPSHOT_B,
-    )
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
     repository.commit_publication(
-        second.run_id,
-        _publication(SNAPSHOT_B, generation=1),
-        expected_version=second.version,
-        now=T4,
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
     )
+    if publication_count == 2:
+        _publish_second_alpha(repository)
+    before = repository.get_active("book-alpha")
 
-    def verify(snapshot_id: str) -> VerifiedSnapshotV1:
-        if snapshot_id == SNAPSHOT_B:
-            raise ValueError("corrupt active")
-        if resolution == "removal":
-            raise ValueError("no fallback")
-        return _verified(snapshot_id)
+    with sqlite3.connect(repository.database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError, match="transition"):
+            connection.execute(
+                "UPDATE active_snapshots SET updated_at_utc = ? "
+                "WHERE book_id = 'book-alpha'",
+                ("2026-08-20T08:05:00.000000Z",),
+            )
 
-    armed = True
-    recovered = repository.recover_active("book-alpha", verify=verify, now=T6)
-
-    assert recovered.decision is ActiveRecoveryDecision.CAS_LOST
-    assert recovered.active.snapshot_id == SNAPSHOT_B
-    assert recovered.active.pointer_version == (2 if resolution == "fallback" else 1)
-    assert recovered.active.updated_at_utc == T5
-    assert recovered.event.resolution_action is ActiveRecoveryDecision.CAS_LOST
-    assert recovered.event.selected_snapshot_id == (
-        SNAPSHOT_A if resolution == "fallback" else None
-    )
+    assert repository.get_active("book-alpha") == before
 
 
 def test_insert_or_replace_cannot_replace_immutable_manifest_identity(
@@ -6083,16 +6225,16 @@ def test_insert_or_replace_cannot_replace_immutable_manifest_identity(
                 resolution_action, selected_snapshot_id, detail_json,
                 recorded_at_utc
             ) VALUES (
-                'book-alpha', ?, 2, 'CAS_LOST', ?,
+                'book-alpha', ?, 1, 'CAS_LOST', ?,
                 '{"failures":[],"omitted_count":0}',
                 '2026-08-20T08:05:00.000000Z'
             )
             """,
-            (SNAPSHOT_B, SNAPSHOT_A),
+            (SNAPSHOT_A, SNAPSHOT_B),
         )
         row = connection.execute(
             "SELECT * FROM snapshot_manifests WHERE snapshot_id = ?",
-            (SNAPSHOT_A,),
+            (SNAPSHOT_B,),
         ).fetchone()
         with pytest.raises(sqlite3.IntegrityError) as captured:
             connection.execute(
@@ -6121,7 +6263,7 @@ def test_insert_or_replace_cannot_replace_immutable_manifest_identity(
 
     assert "manifest identity is immutable" in str(captured.value)
     assert repository.list_publications("book-alpha")[-1].snapshot_status is SnapshotStatus.BLESSED
-    assert repository.list_recovery_events("book-alpha")[0].selected_snapshot_id == SNAPSHOT_A
+    assert repository.list_recovery_events("book-alpha")[0].selected_snapshot_id == SNAPSHOT_B
 
 
 def test_insert_or_replace_cannot_replace_positive_publication_sequence(
@@ -6137,10 +6279,6 @@ def test_insert_or_replace_cannot_replace_positive_publication_sequence(
         expected_version=first.version,
         now=T3,
     )
-    with sqlite3.connect(repository.database_path) as connection:
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("DELETE FROM active_snapshots WHERE book_id = 'book-alpha'")
-
     replacement = _publishing_run(
         repository,
         run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6E4C",
@@ -6312,12 +6450,14 @@ def test_manifest_cannot_be_deleted_after_publication(tmp_path: Path) -> None:
         expected_version=run.version,
         now=T3,
     )
+    repository.recover_active(
+        "book-alpha",
+        verify=lambda snapshot_id: (_ for _ in ()).throw(ValueError("corrupt")),
+        now=T4,
+    )
 
     with sqlite3.connect(repository.database_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute(
-            "DELETE FROM active_snapshots WHERE book_id = 'book-alpha'"
-        )
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
                 "DELETE FROM snapshot_manifests WHERE snapshot_id = ?",
@@ -6338,6 +6478,7 @@ def test_recovery_event_cannot_be_updated(tmp_path: Path) -> None:
         expected_version=run.version,
         now=T3,
     )
+    _publish_second_alpha(repository)
     with sqlite3.connect(repository.database_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         _insert_raw_recovery_event(connection, rejected_snapshot_id=SNAPSHOT_A)
@@ -6369,6 +6510,7 @@ def test_recovery_event_cannot_be_deleted(tmp_path: Path) -> None:
         expected_version=run.version,
         now=T3,
     )
+    _publish_second_alpha(repository)
     with sqlite3.connect(repository.database_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         _insert_raw_recovery_event(connection, rejected_snapshot_id=SNAPSHOT_A)
@@ -6395,6 +6537,7 @@ def test_insert_or_replace_cannot_rewrite_recovery_event_sequence(
         expected_version=run.version,
         now=T3,
     )
+    _publish_second_alpha(repository)
     with sqlite3.connect(repository.database_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         _insert_raw_recovery_event(connection, rejected_snapshot_id=SNAPSHOT_A)
@@ -6405,7 +6548,7 @@ def test_insert_or_replace_cannot_rewrite_recovery_event_sequence(
             _insert_raw_recovery_event(
                 connection,
                 rejected_snapshot_id=SNAPSHOT_A,
-                expected_pointer_version=2,
+                expected_pointer_version=1,
                 event_sequence=1,
                 replace=True,
             )
@@ -6426,13 +6569,14 @@ def test_recovery_event_sequences_allow_implicit_positive_append(
         expected_version=run.version,
         now=T3,
     )
+    _publish_second_alpha(repository)
     with sqlite3.connect(repository.database_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         _insert_raw_recovery_event(connection, rejected_snapshot_id=SNAPSHOT_A)
         _insert_raw_recovery_event(
             connection,
             rejected_snapshot_id=SNAPSHOT_A,
-            expected_pointer_version=2,
+            expected_pointer_version=1,
         )
         sequences = tuple(
             row[0]
@@ -6459,6 +6603,7 @@ def test_recovery_event_sequence_must_be_positive(
         expected_version=run.version,
         now=T3,
     )
+    _publish_second_alpha(repository)
 
     with sqlite3.connect(repository.database_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
@@ -6481,6 +6626,7 @@ def test_recovery_event_cannot_backfill_below_high_water_mark(tmp_path: Path) ->
         expected_version=run.version,
         now=T3,
     )
+    _publish_second_alpha(repository)
     with sqlite3.connect(repository.database_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         _insert_raw_recovery_event(
@@ -6492,7 +6638,7 @@ def test_recovery_event_cannot_backfill_below_high_water_mark(tmp_path: Path) ->
             _insert_raw_recovery_event(
                 connection,
                 rejected_snapshot_id=SNAPSHOT_A,
-                expected_pointer_version=2,
+                expected_pointer_version=1,
                 event_sequence=1,
             )
 
@@ -6775,9 +6921,12 @@ def test_recovery_event_read_and_audit_reject_bypassed_time_travel(
         if later_reference == "rejected"
         else (SNAPSHOT_A, SNAPSHOT_B)
     )
-    _execute_without_named_trigger(
+    _execute_without_named_triggers(
         repository,
-        "recovery_event_time_not_before_publications",
+        (
+            "recovery_event_time_not_before_publications",
+            "recovery_event_pointer_causal_on_insert",
+        ),
         """
         INSERT INTO snapshot_recovery_events (
             book_id, rejected_snapshot_id, expected_pointer_version,
@@ -6841,6 +6990,7 @@ def test_full_integrity_check_rejects_missing_unique_index_entries(
         "snapshot_run_terminal_update_immutable",
         "snapshot_run_delete_immutable",
         "recovery_event_time_not_before_publications",
+        "recovery_event_pointer_causal_on_insert",
     ],
 )
 def test_initialize_attests_every_append_only_guard(
@@ -6887,7 +7037,7 @@ def test_recovery_event_time_equal_to_latest_reference_is_valid(
             connection,
             rejected_snapshot_id=SNAPSHOT_A,
             selected_snapshot_id=SNAPSHOT_B,
-            expected_pointer_version=2,
+            expected_pointer_version=1,
             recorded_at_utc="2026-08-20T08:04:00.000000Z",
         )
 
@@ -7066,3 +7216,654 @@ def test_manifest_cannot_backfill_below_high_water_mark(tmp_path: Path) -> None:
         finally:
             connection.execute("ROLLBACK TO backfill_attack")
             connection.execute("RELEASE backfill_attack")
+
+
+def test_new_book_has_private_virgin_pointer_register(tmp_path: Path) -> None:
+    # Break caught: a newly created book representing pointer state through row absence.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+
+    with sqlite3.connect(repository.database_path) as connection:
+        register = connection.execute(
+            "SELECT snapshot_id, book_generation, pointer_version, updated_at_utc "
+            "FROM active_snapshots WHERE book_id = 'book-alpha'"
+        ).fetchone()
+
+    assert register == (None, None, 0, "2026-08-20T08:00:00.000000Z")
+    assert repository.get_active("book-alpha") is None
+    assert repository.list_active() == ()
+
+
+def test_list_active_hides_tombstones_but_validates_their_registers(
+    tmp_path: Path,
+) -> None:
+    # Break caught: startup enumeration silently skipping a corrupt private tombstone.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    run = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        run.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=run.version,
+        now=T3,
+    )
+    repository.recover_active(
+        "book-alpha",
+        verify=lambda snapshot_id: (_ for _ in ()).throw(ValueError("corrupt")),
+        now=T4,
+    )
+    assert repository.list_active() == ()
+
+    _execute_without_named_triggers(
+        repository,
+        _ACTIVE_POINTER_UPDATE_BYPASS,
+        "UPDATE active_snapshots SET pointer_version = 3 "
+        "WHERE book_id = 'book-alpha'",
+        (),
+    )
+
+    with pytest.raises(RunDatabaseError, match="pointer"):
+        repository.list_active()
+
+
+def test_pointer_register_rejects_delete_replace_and_skipped_revision(
+    tmp_path: Path,
+) -> None:
+    # Break caught: SQL erasing, replacing, or jumping the durable register revision.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+
+    with sqlite3.connect(repository.database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "DELETE FROM active_snapshots WHERE book_id = 'book-alpha'"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO active_snapshots (
+                    book_id, snapshot_id, book_generation,
+                    pointer_version, updated_at_utc
+                ) VALUES ('book-alpha', NULL, NULL, 0, ?)
+                """,
+                ("2026-08-20T08:00:00.000000Z",),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                UPDATE active_snapshots
+                SET pointer_version = 2, updated_at_utc = ?
+                WHERE book_id = 'book-alpha'
+                """,
+                ("2026-08-20T08:01:00.000000Z",),
+            )
+
+    assert repository.get_active("book-alpha") is None
+    repository.audit_integrity()
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "snapshot_id = NULL",
+        "book_generation = NULL",
+        (
+            "pointer_version = pointer_version + 1, "
+            "updated_at_utc = '2026-08-20T08:04:00.000000Z'"
+        ),
+    ],
+)
+def test_live_pointer_rejects_half_null_and_same_state_revision_bumps(
+    tmp_path: Path,
+    assignment: str,
+) -> None:
+    # Break caught: a malformed identity tuple or no-op state masquerading as a new epoch.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                f"UPDATE active_snapshots SET {assignment} "
+                "WHERE book_id = 'book-alpha'"
+            )
+
+    assert repository.get_active("book-alpha").pointer_version == 1
+
+
+def test_generation_advance_preserves_pointer_epoch(tmp_path: Path) -> None:
+    # Break caught: canonical-book generation movement resetting unrelated pointer state.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    published = repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T2,
+    )
+
+    repository.advance_book_head("book-alpha", 2, BOOK_REF_2, now=T3)
+
+    assert repository.get_active("book-alpha") == published.active
+    next_run = repository.create_or_join(
+        _new_run(
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6J0B",
+            client_idempotency_key="generation-preserves-pointer",
+        ),
+        now=T3,
+    ).record
+    assert next_run.captured_generation == 2
+    assert next_run.expected_active_snapshot_id == SNAPSHOT_A
+    assert next_run.expected_active_pointer_version == 1
+
+
+def test_missing_pointer_register_is_corruption_not_virgin_state(
+    tmp_path: Path,
+) -> None:
+    # Break caught: an absent per-book register being silently fabricated as None/v0.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    with sqlite3.connect(repository.database_path) as connection:
+        has_register = connection.execute(
+            "SELECT 1 FROM active_snapshots WHERE book_id = 'book-alpha'"
+        ).fetchone()
+    if has_register is not None:
+        _execute_without_named_triggers(
+            repository,
+            ("active_pointer_delete_immutable",),
+            "DELETE FROM active_snapshots WHERE book_id = 'book-alpha'",
+            (),
+        )
+
+    with pytest.raises(RunDatabaseError, match="pointer"):
+        repository.create_or_join(
+            _new_run(
+                run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6J0A",
+                client_idempotency_key="missing-register",
+            ),
+            now=T1,
+        )
+    with pytest.raises(RunDatabaseError, match="pointer"):
+        repository.audit_integrity()
+    with pytest.raises(RunDatabaseError):
+        RunRepository(tmp_path).initialize()
+
+
+def test_removed_pointer_rejects_rolled_back_allocation_and_reopens(
+    tmp_path: Path,
+) -> None:
+    # Break caught: deleting the active row erasing the T4 pointer clock, so a T1
+    # request is admitted as though the book had never had an active snapshot.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    repository.recover_active(
+        "book-alpha",
+        verify=lambda snapshot_id: (_ for _ in ()).throw(ValueError("corrupt")),
+        now=T4,
+    )
+
+    assert repository.get_active("book-alpha") is None
+    with pytest.raises(ValueError, match="pointer"):
+        repository.create_or_join(
+            _new_run(
+                run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6J1A",
+                client_idempotency_key="after-removal-rollback",
+            ),
+            now=T1,
+        )
+
+    repository.audit_integrity()
+    reopened = RunRepository(tmp_path)
+    reopened.initialize()
+    assert reopened.get_active("book-alpha") is None
+
+
+def test_pointer_epoch_never_resets_across_remove_publish_cycles(
+    tmp_path: Path,
+) -> None:
+    # Break caught: each removal making the next publication recreate pointer version one.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    repository.recover_active(
+        "book-alpha",
+        verify=lambda snapshot_id: (_ for _ in ()).throw(ValueError("corrupt")),
+        now=T4,
+    )
+
+    second = repository.create_or_join(
+        _new_run(
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6J1B",
+            client_idempotency_key="after-removal-b",
+        ),
+        now=T5,
+    ).record
+    assert second.expected_active_snapshot_id is None
+    assert second.expected_active_pointer_version == 2
+    second = _publishing_run_at(
+        repository,
+        run_id=second.run_id,
+        snapshot_id=SNAPSHOT_B,
+        now=T5,
+        record=second,
+    )
+    published_b = repository.commit_publication(
+        second.run_id,
+        _publication(SNAPSHOT_B, generation=1),
+        expected_version=second.version,
+        now=T5,
+    )
+    assert published_b.active is not None
+    assert published_b.active.pointer_version == 3
+
+    repository.recover_active(
+        "book-alpha",
+        verify=lambda snapshot_id: (_ for _ in ()).throw(ValueError("corrupt")),
+        now=T6,
+    )
+    third = repository.create_or_join(
+        _new_run(
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6J1C",
+            client_idempotency_key="after-removal-c",
+        ),
+        now=T7,
+    ).record
+    assert third.expected_active_snapshot_id is None
+    assert third.expected_active_pointer_version == 4
+    third = _publishing_run_at(
+        repository,
+        run_id=third.run_id,
+        snapshot_id=SNAPSHOT_C,
+        now=T7,
+        record=third,
+    )
+    published_c = repository.commit_publication(
+        third.run_id,
+        _publication(SNAPSHOT_C, generation=1),
+        expected_version=third.version,
+        now=T7,
+    )
+
+    assert published_c.active is not None
+    assert published_c.active.pointer_version == 5
+    repository.audit_integrity()
+    reopened = RunRepository(tmp_path)
+    reopened.initialize()
+    assert reopened.get_active("book-alpha") == published_c.active
+
+
+def test_stale_active_after_removal_inherits_tombstone_clock(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a stale publisher recording T4 even though removal at T5 caused
+    # the lost pointer CAS.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    stale = _publishing_run_at(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6J2A",
+        snapshot_id=SNAPSHOT_B,
+        now=T4,
+    )
+    repository.recover_active(
+        "book-alpha",
+        verify=lambda snapshot_id: (_ for _ in ()).throw(ValueError("corrupt")),
+        now=T5,
+    )
+
+    rejected = repository.commit_publication(
+        stale.run_id,
+        _publication(SNAPSHOT_B, generation=1),
+        expected_version=stale.version,
+        now=T3,
+    )
+
+    assert rejected.rejection_code is RunErrorCode.STALE_ACTIVE_POINTER
+    assert rejected.run.finished_at_utc == T5
+    assert rejected.run.updated_at_utc == T5
+    assert repository.get_active("book-alpha") is None
+    later = _publishing_run_at(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6J2C",
+        snapshot_id=SNAPSHOT_C,
+        now=T6,
+    )
+    repository.commit_publication(
+        later.run_id,
+        _publication(SNAPSHOT_C, generation=1),
+        expected_version=later.version,
+        now=T6,
+    )
+    repository.audit_integrity()
+    RunRepository(tmp_path).initialize()
+
+
+def test_stale_active_removal_clock_corruption_fails_all_audit_boundaries(
+    tmp_path: Path,
+) -> None:
+    # Break caught: coherent scalar timestamps hiding stale-pointer evidence that
+    # predates the durable removal which caused it.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    stale = _publishing_run_at(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6J2B",
+        snapshot_id=SNAPSHOT_B,
+        now=T4,
+    )
+    repository.recover_active(
+        "book-alpha",
+        verify=lambda snapshot_id: (_ for _ in ()).throw(ValueError("corrupt")),
+        now=T5,
+    )
+    repository.commit_publication(
+        stale.run_id,
+        _publication(SNAPSHOT_B, generation=1),
+        expected_version=stale.version,
+        now=T5,
+    )
+    timestamp = "2026-08-20T08:04:00.000000Z"
+    _execute_without_named_triggers(
+        repository,
+        _TERMINAL_RUN_UPDATE_BYPASS,
+        "UPDATE snapshot_runs SET finished_at_utc = ?, updated_at_utc = ? "
+        "WHERE run_id = ?",
+        (timestamp, timestamp, stale.run_id),
+    )
+
+    with pytest.raises(RunDatabaseError, match="pointer"):
+        repository.get(stale.run_id)
+    with pytest.raises(RunDatabaseError, match="pointer"):
+        repository.audit_integrity()
+    with pytest.raises(RunDatabaseError):
+        RunRepository(tmp_path).initialize()
+
+
+def test_recovery_cas_lost_uses_newer_active_pointer_clock(
+    tmp_path: Path,
+) -> None:
+    # Break caught: CAS_LOST evidence persisted at caller T4 after another publisher
+    # durably advanced the pointer at T5.
+    armed = False
+    candidate = None
+
+    def publish_new_active(stage: str) -> None:
+        if armed and stage == "recovery.after_selection":
+            assert candidate is not None
+            RunRepository(tmp_path).commit_publication(
+                candidate.run_id,
+                _publication(SNAPSHOT_C, generation=1),
+                expected_version=candidate.version,
+                now=T5,
+            )
+
+    repository = RunRepository(tmp_path, fault_injector=publish_new_active)
+    repository.initialize()
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T2,
+    )
+    second = _publishing_run_at(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6J3A",
+        snapshot_id=SNAPSHOT_B,
+        now=T3,
+    )
+    repository.commit_publication(
+        second.run_id,
+        _publication(SNAPSHOT_B, generation=1),
+        expected_version=second.version,
+        now=T3,
+    )
+    candidate = _publishing_run_at(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6J3B",
+        snapshot_id=SNAPSHOT_C,
+        now=T4,
+    )
+
+    def verify(snapshot_id: str) -> VerifiedSnapshotV1:
+        if snapshot_id == SNAPSHOT_B:
+            raise ValueError("corrupt active")
+        return _verified(snapshot_id)
+
+    armed = True
+    recovered = repository.recover_active("book-alpha", verify=verify, now=T4)
+
+    assert recovered.decision is ActiveRecoveryDecision.CAS_LOST
+    assert recovered.active is not None
+    assert recovered.active.snapshot_id == SNAPSHOT_C
+    assert recovered.active.updated_at_utc == T5
+    assert recovered.event is not None
+    assert recovered.event.recorded_at_utc == T5
+    repository.audit_integrity()
+    RunRepository(tmp_path).initialize()
+
+
+@pytest.mark.parametrize("resolution", ["fallback", "removal"])
+def test_recovery_clock_rollback_clamps_mutation_and_evidence(
+    tmp_path: Path,
+    resolution: str,
+) -> None:
+    # Break caught: a caller clock older than the active pointer preventing recovery or
+    # moving the replacement/removal transition backward.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    if resolution == "fallback":
+        first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+        repository.commit_publication(
+            first.run_id,
+            _publication(SNAPSHOT_A, generation=1),
+            expected_version=first.version,
+            now=T3,
+        )
+    current = _publishing_run_at(
+        repository,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6J3C",
+        snapshot_id=SNAPSHOT_B,
+        now=T5,
+    )
+    repository.commit_publication(
+        current.run_id,
+        _publication(SNAPSHOT_B, generation=1),
+        expected_version=current.version,
+        now=T5,
+    )
+
+    def verify(snapshot_id: str) -> VerifiedSnapshotV1:
+        if snapshot_id == SNAPSHOT_B or resolution == "removal":
+            raise ValueError("corrupt")
+        return _verified(snapshot_id)
+
+    recovered = repository.recover_active("book-alpha", verify=verify, now=T4)
+
+    assert recovered.decision is (
+        ActiveRecoveryDecision.REPOINTED
+        if resolution == "fallback"
+        else ActiveRecoveryDecision.REMOVED
+    )
+    assert recovered.event is not None
+    assert recovered.event.recorded_at_utc == T5
+    assert recovered.active is None or recovered.active.updated_at_utc == T5
+    repository.audit_integrity()
+
+
+def test_recovery_on_tombstone_is_noop_without_verification_or_event(
+    tmp_path: Path,
+) -> None:
+    # Protective regression: a private tombstone must still look absent to recovery callers.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    repository.recover_active(
+        "book-alpha",
+        verify=lambda snapshot_id: (_ for _ in ()).throw(ValueError("corrupt")),
+        now=T4,
+    )
+    calls = 0
+
+    def verify(snapshot_id: str) -> VerifiedSnapshotV1:
+        nonlocal calls
+        calls += 1
+        return _verified(snapshot_id)
+
+    recovered = repository.recover_active("book-alpha", verify=verify, now=T5)
+
+    assert recovered.decision is ActiveRecoveryDecision.UNCHANGED
+    assert recovered.previous_active is None
+    assert recovered.active is None
+    assert recovered.event is None
+    assert calls == 0
+    assert len(repository.list_recovery_events("book-alpha")) == 1
+
+
+def test_losing_recovery_inherits_concurrent_removal_epoch_and_clock(
+    tmp_path: Path,
+) -> None:
+    # Break caught: R1 appending sequence two at T5 after R2 durably removed the
+    # same pointer and appended sequence one at T6.
+    armed = False
+
+    def remove_concurrently(stage: str) -> None:
+        nonlocal armed
+        if armed and stage == "recovery.after_selection":
+            armed = False
+            other = RunRepository(tmp_path)
+            removed = other.recover_active(
+                "book-alpha",
+                verify=lambda snapshot_id: (_ for _ in ()).throw(
+                    ValueError("corrupt")
+                ),
+                now=T6,
+            )
+            assert removed.decision is ActiveRecoveryDecision.REMOVED
+
+    repository = RunRepository(tmp_path, fault_injector=remove_concurrently)
+    repository.initialize()
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+
+    armed = True
+    losing = repository.recover_active(
+        "book-alpha",
+        verify=lambda snapshot_id: (_ for _ in ()).throw(ValueError("corrupt")),
+        now=T5,
+    )
+
+    assert losing.decision is ActiveRecoveryDecision.CAS_LOST
+    assert losing.active is None
+    assert repository.get_active("book-alpha") is None
+    events = repository.list_recovery_events("book-alpha")
+    assert [event.resolution_action for event in events] == [
+        ActiveRecoveryDecision.REMOVED,
+        ActiveRecoveryDecision.CAS_LOST,
+    ]
+    assert [event.recorded_at_utc for event in events] == [T6, T6]
+    next_run = repository.create_or_join(
+        _new_run(
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3N6J4A",
+            client_idempotency_key="after-concurrent-removal",
+        ),
+        now=T7,
+    ).record
+    assert next_run.expected_active_snapshot_id is None
+    assert next_run.expected_active_pointer_version == 2
+    repository.audit_integrity()
+    reopened = RunRepository(tmp_path)
+    reopened.initialize()
+    assert reopened.get_active("book-alpha") is None
+
+
+def test_recovery_event_clock_regression_after_removal_fails_audit(
+    tmp_path: Path,
+) -> None:
+    # Break caught: append-only sequence order accepting a later CAS_LOST event whose
+    # clock predates the earlier removal which defeated it.
+    repository = _repository(tmp_path)
+    repository.advance_book_head("book-alpha", 1, BOOK_REF_1, now=T0)
+    first = _publishing_run(repository, snapshot_id=SNAPSHOT_A)
+    repository.commit_publication(
+        first.run_id,
+        _publication(SNAPSHOT_A, generation=1),
+        expected_version=first.version,
+        now=T3,
+    )
+    repository.recover_active(
+        "book-alpha",
+        verify=lambda snapshot_id: (_ for _ in ()).throw(ValueError("corrupt")),
+        now=T6,
+    )
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        _insert_raw_recovery_event(
+            connection,
+            rejected_snapshot_id=SNAPSHOT_A,
+            expected_pointer_version=1,
+            recorded_at_utc="2026-08-20T08:06:00.000000Z",
+        )
+    _execute_without_named_triggers(
+        repository,
+        _RECOVERY_EVENT_UPDATE_BYPASS,
+        "UPDATE snapshot_recovery_events SET recorded_at_utc = ? "
+        "WHERE event_sequence = 2",
+        ("2026-08-20T08:05:00.000000Z",),
+    )
+
+    with pytest.raises(RunDatabaseError, match="recovery"):
+        repository.list_recovery_events("book-alpha")
+    with pytest.raises(RunDatabaseError, match="recovery"):
+        repository.audit_integrity()
+    with pytest.raises(RunDatabaseError):
+        RunRepository(tmp_path).initialize()

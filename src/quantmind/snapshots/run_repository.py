@@ -92,11 +92,13 @@ _EXPECTED_SCHEMA_INDEXES = {
     "snapshot_runs_by_identity",
     "snapshot_runs_by_preimage",
     "snapshot_runs_by_book_generation",
+    "snapshot_runs_by_book_pointer_version",
     "snapshot_runs_by_book_requested",
     "blessed_manifest_fallback",
     "snapshot_manifests_by_book_generation",
     "snapshot_manifests_by_book_sequence",
     "recovery_events_by_book_sequence",
+    "recovery_events_by_book_pointer_version",
 }
 _EXPECTED_INDEX_SHAPES = {
     "one_live_idempotency_identity": (
@@ -124,6 +126,9 @@ _EXPECTED_INDEX_SHAPES = {
     "snapshot_runs_by_book_generation": (
         "snapshot_runs", ("book_id", "captured_generation"), 0, 0
     ),
+    "snapshot_runs_by_book_pointer_version": (
+        "snapshot_runs", ("book_id", "expected_active_pointer_version"), 0, 1
+    ),
     "snapshot_runs_by_book_requested": (
         "snapshot_runs", ("book_id", "requested_at_utc", "run_id"), 0, 0
     ),
@@ -138,6 +143,12 @@ _EXPECTED_INDEX_SHAPES = {
     ),
     "recovery_events_by_book_sequence": (
         "snapshot_recovery_events", ("book_id", "event_sequence"), 0, 0
+    ),
+    "recovery_events_by_book_pointer_version": (
+        "snapshot_recovery_events",
+        ("book_id", "expected_pointer_version", "event_sequence"),
+        0,
+        1,
     ),
 }
 _EXPECTED_FOREIGN_KEY_GROUPS = tuple(
@@ -691,10 +702,10 @@ class RunRecordV1(FrozenContractBase):
         )
         if any(book_fields_present) and not all(book_fields_present):
             raise ValueError("durable book identity tuple is incomplete")
-        if self.expected_active_snapshot_id is None:
-            if self.expected_active_pointer_version != 0:
-                raise ValueError("missing active snapshot requires pointer version zero")
-        elif self.expected_active_pointer_version < 1:
+        if (
+            self.expected_active_snapshot_id is not None
+            and self.expected_active_pointer_version < 1
+        ):
             raise ValueError("expected active snapshot requires a positive pointer version")
         if self.book_id is None and (
             self.expected_active_snapshot_id is not None
@@ -879,6 +890,79 @@ class ActiveSnapshotV1(FrozenContractBase):
     @classmethod
     def _snapshot_id_is_full(cls, value: str) -> str:
         return _require_digest(value, "active snapshot ID")
+
+
+class _ActivePointerRegisterV1(FrozenContractBase):
+    book_id: str
+    snapshot_id: str | None
+    book_generation: int | None = Field(ge=0)
+    pointer_version: int = Field(ge=0)
+    updated_at_utc: datetime
+
+    @field_validator("book_id")
+    @classmethod
+    def _book_id_is_normalized(cls, value: str) -> str:
+        normalized = _require_nonblank(value, "book ID")
+        if normalized != value:
+            raise ValueError("stored book ID must already be NFC normalized")
+        return value
+
+    @field_validator("snapshot_id")
+    @classmethod
+    def _snapshot_id_is_full(cls, value: str | None) -> str | None:
+        return None if value is None else _require_digest(value, "active snapshot ID")
+
+    @model_validator(mode="after")
+    def _state_is_coherent(self) -> "_ActivePointerRegisterV1":
+        if (self.snapshot_id is None) != (self.book_generation is None):
+            raise ValueError("pointer identity and generation must be present together")
+        if self.snapshot_id is not None and self.pointer_version < 1:
+            raise ValueError("live active pointer requires a positive version")
+        return self
+
+    def active_snapshot(self) -> ActiveSnapshotV1 | None:
+        if self.snapshot_id is None or self.book_generation is None:
+            return None
+        return ActiveSnapshotV1(
+            book_id=self.book_id,
+            snapshot_id=self.snapshot_id,
+            book_generation=self.book_generation,
+            pointer_version=self.pointer_version,
+            updated_at_utc=self.updated_at_utc,
+        )
+
+
+class _PointerTransitionV1(FrozenContractBase):
+    book_id: str
+    previous_snapshot_id: str | None
+    selected_snapshot_id: str | None
+    pointer_version: int = Field(ge=1)
+    transitioned_at_utc: datetime
+    transition_kind: Literal["PUBLICATION", "REPOINTED", "REMOVED"]
+
+    @field_validator("book_id")
+    @classmethod
+    def _book_id_is_normalized(cls, value: str) -> str:
+        normalized = _require_nonblank(value, "book ID")
+        if normalized != value:
+            raise ValueError("stored book ID must already be NFC normalized")
+        return value
+
+    @field_validator("previous_snapshot_id", "selected_snapshot_id")
+    @classmethod
+    def _snapshot_ids_are_full(cls, value: str | None, info) -> str | None:
+        return None if value is None else _require_digest(value, info.field_name)
+
+    @model_validator(mode="after")
+    def _transition_is_coherent(self) -> "_PointerTransitionV1":
+        if self.transition_kind == "REMOVED":
+            if self.previous_snapshot_id is None or self.selected_snapshot_id is not None:
+                raise ValueError("removal transition is malformed")
+        elif self.selected_snapshot_id is None:
+            raise ValueError("live pointer transition requires a selected snapshot")
+        if self.previous_snapshot_id == self.selected_snapshot_id:
+            raise ValueError("pointer transition must change state")
+        return self
 
 
 class PublicationResultV1(FrozenContractBase):
@@ -1393,7 +1477,7 @@ class RunRepository:
             RunRepository._publication_from_row(row)
             for row in connection.execute("SELECT * FROM snapshot_manifests").fetchall()
         )
-        active_rows = connection.execute(
+        pointer_rows = connection.execute(
             """
             SELECT active.*,
                    publication.snapshot_id AS _bound_snapshot_id,
@@ -1409,8 +1493,8 @@ class RunRepository:
              AND publication.book_generation = active.book_generation
             """
         ).fetchall()
-        active_snapshots = tuple(
-            RunRepository._active_from_row(row) for row in active_rows
+        pointer_registers = tuple(
+            RunRepository._pointer_register_from_row(row) for row in pointer_rows
         )
         recovery_events = tuple(
             RunRepository._recovery_event_from_row(row)
@@ -1420,8 +1504,6 @@ class RunRepository:
         )
         completed_tails: set[tuple[str, str]] = set()
 
-        for head in heads:
-            RunRepository._validate_head_relations(connection, head)
         for run in runs:
             RunRepository._validate_run_relations(
                 connection,
@@ -1434,12 +1516,15 @@ class RunRepository:
                 publication,
                 completed_tails=completed_tails,
             )
-        for active in active_snapshots:
-            RunRepository._validate_active_relations(
+        for head in heads:
+            RunRepository._validate_head_relations(connection, head)
+        for register in pointer_registers:
+            RunRepository._validate_pointer_register_relations(
                 connection,
-                active,
+                register,
                 completed_tails=completed_tails,
             )
+            RunRepository._validate_pointer_history(connection, register)
         for event in recovery_events:
             RunRepository._validate_recovery_event_relations(
                 connection,
@@ -1479,10 +1564,6 @@ class RunRepository:
                             OR head.book_id IS NULL
                             OR run.captured_generation > head.generation
                         )
-                    )
-                    OR (
-                        run.expected_active_snapshot_id IS NULL
-                        AND run.expected_active_pointer_version <> 0
                     )
                     OR (
                         run.expected_active_snapshot_id IS NOT NULL
@@ -1532,6 +1613,23 @@ class RunRepository:
                 """,
             ),
             (
+                "active pointer register ownership is malformed",
+                """
+                SELECT 1
+                FROM book_heads AS head
+                LEFT JOIN active_snapshots AS pointer
+                  ON pointer.book_id = head.book_id
+                WHERE pointer.book_id IS NULL
+                UNION ALL
+                SELECT 1
+                FROM active_snapshots AS pointer
+                LEFT JOIN book_heads AS head
+                  ON head.book_id = pointer.book_id
+                WHERE head.book_id IS NULL
+                LIMIT 1
+                """,
+            ),
+            (
                 "active snapshot provenance is malformed",
                 """
                 SELECT 1
@@ -1542,9 +1640,15 @@ class RunRepository:
                  AND publication.snapshot_id = active.snapshot_id
                  AND publication.book_generation = active.book_generation
                 WHERE head.book_id IS NULL
-                   OR publication.snapshot_id IS NULL
-                   OR active.book_generation > head.generation
-                   OR active.updated_at_utc < publication.published_at_utc
+                   OR (active.snapshot_id IS NULL) <> (active.book_generation IS NULL)
+                   OR (
+                       active.snapshot_id IS NOT NULL
+                       AND (
+                           publication.snapshot_id IS NULL
+                           OR active.book_generation > head.generation
+                           OR active.updated_at_utc < publication.published_at_utc
+                       )
+                   )
                 LIMIT 1
                 """,
             ),
@@ -1720,24 +1824,46 @@ class RunRepository:
             raise RunDatabaseError("publication row violates the v1 schema") from error
 
     @staticmethod
-    def _active_from_row(row: sqlite3.Row) -> ActiveSnapshotV1:
+    def _pointer_register_from_row(row: sqlite3.Row) -> _ActivePointerRegisterV1:
         try:
-            if (
-                row["_bound_snapshot_id"] != row["snapshot_id"]
-                or row["_bound_book_id"] != row["book_id"]
-                or row["_bound_book_generation"] != row["book_generation"]
-            ):
-                raise ValueError("active pointer is not bound to one publication")
-            SnapshotStatus(row["_bound_snapshot_status"])
-            return ActiveSnapshotV1(
+            register = _ActivePointerRegisterV1(
                 book_id=row["book_id"],
                 snapshot_id=row["snapshot_id"],
                 book_generation=row["book_generation"],
                 pointer_version=row["pointer_version"],
                 updated_at_utc=_parse_timestamp(row["updated_at_utc"]),
             )
+            if register.snapshot_id is None:
+                if any(
+                    row[column] is not None
+                    for column in (
+                        "_bound_snapshot_id",
+                        "_bound_book_id",
+                        "_bound_book_generation",
+                        "_bound_snapshot_status",
+                        "_bound_publication_sequence",
+                        "_bound_published_at_utc",
+                    )
+                ):
+                    raise ValueError("pointer tombstone unexpectedly binds a publication")
+            elif (
+                row["_bound_snapshot_id"] != register.snapshot_id
+                or row["_bound_book_id"] != register.book_id
+                or row["_bound_book_generation"] != register.book_generation
+            ):
+                raise ValueError("active pointer is not bound to one publication")
+            else:
+                SnapshotStatus(row["_bound_snapshot_status"])
+            return register
         except (LookupError, TypeError, ValueError) as error:
-            raise RunDatabaseError("active snapshot row violates the v1 schema") from error
+            raise RunDatabaseError("active pointer row violates the v1 schema") from error
+
+    @staticmethod
+    def _active_from_row(row: sqlite3.Row) -> ActiveSnapshotV1:
+        active = RunRepository._pointer_register_from_row(row).active_snapshot()
+        if active is None:
+            raise RunDatabaseError("active pointer row is a tombstone")
+        return active
 
     @staticmethod
     def _recovery_event_from_row(row: sqlite3.Row) -> RecoveryEventV1:
@@ -1754,6 +1880,171 @@ class RunRepository:
             )
         except (LookupError, TypeError, ValueError) as error:
             raise RunDatabaseError("recovery event row violates the v1 schema") from error
+
+    @staticmethod
+    def _pointer_transition_from_row(row: sqlite3.Row) -> _PointerTransitionV1:
+        try:
+            return _PointerTransitionV1(
+                book_id=row["book_id"],
+                previous_snapshot_id=row["previous_snapshot_id"],
+                selected_snapshot_id=row["selected_snapshot_id"],
+                pointer_version=row["pointer_version"],
+                transitioned_at_utc=_parse_timestamp(row["transitioned_at_utc"]),
+                transition_kind=row["transition_kind"],
+            )
+        except (LookupError, TypeError, ValueError) as error:
+            raise RunDatabaseError("active pointer transition is malformed") from error
+
+    @staticmethod
+    def _pointer_transition_rows(
+        connection: sqlite3.Connection,
+        book_id: str,
+        *,
+        pointer_version: int | None = None,
+    ) -> tuple[sqlite3.Row, ...]:
+        version_clause = (
+            "" if pointer_version is None else " AND run.expected_active_pointer_version = ?"
+        )
+        recovery_version_clause = (
+            "" if pointer_version is None else " AND event.expected_pointer_version = ?"
+        )
+        parameters: tuple[object, ...]
+        if pointer_version is None:
+            parameters = (book_id, book_id)
+        else:
+            previous_version = pointer_version - 1
+            parameters = (book_id, previous_version, book_id, previous_version)
+        return tuple(
+            connection.execute(
+                f"""
+                SELECT run.book_id AS book_id,
+                       run.expected_active_snapshot_id AS previous_snapshot_id,
+                       publication.snapshot_id AS selected_snapshot_id,
+                       run.expected_active_pointer_version + 1 AS pointer_version,
+                       publication.published_at_utc AS transitioned_at_utc,
+                       'PUBLICATION' AS transition_kind
+                FROM snapshot_runs AS run
+                JOIN snapshot_manifests AS publication
+                  ON publication.run_id = run.run_id
+                WHERE run.book_id = ?{version_clause}
+                  AND run.run_outcome = 'SUCCEEDED'
+                  AND run.published_snapshot_id IS NOT NULL
+                UNION ALL
+                SELECT event.book_id AS book_id,
+                       event.rejected_snapshot_id AS previous_snapshot_id,
+                       event.selected_snapshot_id AS selected_snapshot_id,
+                       event.expected_pointer_version + 1 AS pointer_version,
+                       event.recorded_at_utc AS transitioned_at_utc,
+                       event.resolution_action AS transition_kind
+                FROM snapshot_recovery_events AS event
+                WHERE event.book_id = ?
+                  AND event.resolution_action IN ('REPOINTED', 'REMOVED')
+                  {recovery_version_clause}
+                """,
+                parameters,
+            ).fetchall()
+        )
+
+    @staticmethod
+    def _pointer_transition_at_version(
+        connection: sqlite3.Connection,
+        book_id: str,
+        pointer_version: int,
+    ) -> _PointerTransitionV1:
+        if pointer_version < 1:
+            raise RunDatabaseError("active pointer transition version is invalid")
+        rows = RunRepository._pointer_transition_rows(
+            connection,
+            book_id,
+            pointer_version=pointer_version,
+        )
+        if len(rows) != 1:
+            raise RunDatabaseError("active pointer transition history is not unique")
+        transition = RunRepository._pointer_transition_from_row(rows[0])
+        if transition.pointer_version != pointer_version:
+            raise RunDatabaseError("active pointer transition version is malformed")
+        return transition
+
+    @staticmethod
+    def _validate_pointer_register_relations(
+        connection: sqlite3.Connection,
+        register: _ActivePointerRegisterV1,
+        *,
+        completed_tails: set[tuple[str, str]] | None = None,
+    ) -> None:
+        head_row = connection.execute(
+            "SELECT * FROM book_heads WHERE book_id = ?", (register.book_id,)
+        ).fetchone()
+        if head_row is None:
+            raise RunDatabaseError("active pointer register has no book head")
+        head = RunRepository._book_head_from_row(head_row)
+        active = register.active_snapshot()
+        if active is not None:
+            if active.book_generation > head.generation:
+                raise RunDatabaseError("book head is older than its active snapshot")
+            RunRepository._validate_active_binding(connection, active)
+        if register.pointer_version == 0:
+            if active is not None or register.updated_at_utc > head.updated_at_utc:
+                raise RunDatabaseError("virgin active pointer register is malformed")
+            if RunRepository._pointer_transition_rows(
+                connection,
+                register.book_id,
+                pointer_version=1,
+            ):
+                raise RunDatabaseError("virgin pointer register has durable history")
+            return
+        transition = RunRepository._pointer_transition_at_version(
+            connection,
+            register.book_id,
+            register.pointer_version,
+        )
+        if (
+            transition.selected_snapshot_id != register.snapshot_id
+            or transition.transitioned_at_utc != register.updated_at_utc
+        ):
+            raise RunDatabaseError("active pointer register does not match its transition")
+
+    @staticmethod
+    def _validate_pointer_history(
+        connection: sqlite3.Connection,
+        register: _ActivePointerRegisterV1,
+    ) -> None:
+        transitions = tuple(
+            RunRepository._pointer_transition_from_row(row)
+            for row in RunRepository._pointer_transition_rows(
+                connection, register.book_id
+            )
+        )
+        by_version: dict[int, _PointerTransitionV1] = {}
+        for transition in transitions:
+            if transition.pointer_version in by_version:
+                raise RunDatabaseError("active pointer transition history is not unique")
+            by_version[transition.pointer_version] = transition
+        if set(by_version) != set(range(1, register.pointer_version + 1)):
+            raise RunDatabaseError("active pointer transition history is not contiguous")
+
+        previous_snapshot_id: str | None = None
+        previous_time: datetime | None = None
+        for pointer_version in range(1, register.pointer_version + 1):
+            transition = by_version[pointer_version]
+            if transition.previous_snapshot_id != previous_snapshot_id:
+                raise RunDatabaseError("active pointer transition predecessor is malformed")
+            if (
+                previous_time is not None
+                and transition.transitioned_at_utc < previous_time
+            ):
+                raise RunDatabaseError("active pointer transition clock moved backward")
+            previous_snapshot_id = transition.selected_snapshot_id
+            previous_time = transition.transitioned_at_utc
+
+        if register.pointer_version == 0:
+            if register.snapshot_id is not None:
+                raise RunDatabaseError("virgin active pointer register is malformed")
+        elif (
+            previous_snapshot_id != register.snapshot_id
+            or previous_time != register.updated_at_utc
+        ):
+            raise RunDatabaseError("active pointer register is not the history tail")
 
     @staticmethod
     def _validate_head_relations(
@@ -1775,12 +2066,11 @@ class RunRepository:
             (head.book_id, head.generation),
         ).fetchone() is not None:
             raise RunDatabaseError("book head is older than publication history")
-        active = connection.execute(
-            "SELECT book_generation FROM active_snapshots WHERE book_id = ?",
-            (head.book_id,),
-        ).fetchone()
-        if active is not None and active["book_generation"] > head.generation:
-            raise RunDatabaseError("book head is older than its active snapshot")
+        pointer_row = RunRepository._pointer_row(connection, head.book_id)
+        if pointer_row is None:
+            raise RunDatabaseError("book head has no active pointer register")
+        register = RunRepository._pointer_register_from_row(pointer_row)
+        RunRepository._validate_pointer_register_relations(connection, register)
 
     @staticmethod
     def _validate_run_head_relation(
@@ -1862,7 +2152,6 @@ class RunRepository:
         completed_tails: set[tuple[str, str]] | None = None,
     ) -> None:
         RunRepository._validate_run_head_relation(connection, record)
-
         owned_row = connection.execute(
             "SELECT * FROM snapshot_manifests WHERE run_id = ?", (record.run_id,)
         ).fetchone()
@@ -1886,6 +2175,37 @@ class RunRepository:
                     expected,
                     completed_tails=completed_tails,
                 )
+
+        if record.book_id is not None:
+            expected_version = record.expected_active_pointer_version
+            if expected_version == 0:
+                if record.expected_active_snapshot_id is not None:
+                    raise RunDatabaseError("virgin pointer capture is malformed")
+            else:
+                captured_pointer = RunRepository._pointer_transition_at_version(
+                    connection,
+                    record.book_id,
+                    expected_version,
+                )
+                if (
+                    captured_pointer.selected_snapshot_id
+                    != record.expected_active_snapshot_id
+                    or captured_pointer.transitioned_at_utc > record.requested_at_utc
+                ):
+                    raise RunDatabaseError("run pointer capture is not causal")
+            if record.error_code is RunErrorCode.STALE_ACTIVE_POINTER:
+                invalidating = RunRepository._pointer_transition_at_version(
+                    connection,
+                    record.book_id,
+                    expected_version + 1,
+                )
+                if (
+                    invalidating.previous_snapshot_id
+                    != record.expected_active_snapshot_id
+                    or record.finished_at_utc is None
+                    or record.finished_at_utc < invalidating.transitioned_at_utc
+                ):
+                    raise RunDatabaseError("stale pointer terminal evidence is not causal")
 
     @staticmethod
     def _validate_publication_relations(
@@ -1941,6 +2261,19 @@ class RunRepository:
         *,
         completed_tails: set[tuple[str, str]] | None = None,
     ) -> ManifestPublicationRecordV1:
+        publication = RunRepository._validate_active_binding(connection, active)
+        RunRepository._validate_publication_relations(
+            connection,
+            publication,
+            completed_tails=completed_tails,
+        )
+        return publication
+
+    @staticmethod
+    def _validate_active_binding(
+        connection: sqlite3.Connection,
+        active: ActiveSnapshotV1,
+    ) -> ManifestPublicationRecordV1:
         publication_row = connection.execute(
             """
             SELECT * FROM snapshot_manifests
@@ -1951,11 +2284,7 @@ class RunRepository:
         if publication_row is None:
             raise RunDatabaseError("active publication is missing")
         publication = RunRepository._publication_from_row(publication_row)
-        RunRepository._validate_publication_relations(
-            connection,
-            publication,
-            completed_tails=completed_tails,
-        )
+        RunRepository._publication_owner(connection, publication)
         head_row = connection.execute(
             "SELECT * FROM book_heads WHERE book_id = ?", (active.book_id,)
         ).fetchone()
@@ -1993,29 +2322,72 @@ class RunRepository:
         )
         if event.recorded_at_utc < rejected_publication.published_at_utc:
             raise RunDatabaseError("recovery evidence predates rejected publication")
-        if event.selected_snapshot_id is None:
-            return
-        selected = connection.execute(
-            """
-            SELECT * FROM snapshot_manifests
-            WHERE book_id = ? AND snapshot_id = ?
-            """,
-            (event.book_id, event.selected_snapshot_id),
-        ).fetchone()
-        if selected is None:
-            raise RunDatabaseError("recovery selected publication is missing")
-        publication = RunRepository._publication_from_row(selected)
-        RunRepository._validate_publication_relations(
+        if event.selected_snapshot_id is not None:
+            selected = connection.execute(
+                """
+                SELECT * FROM snapshot_manifests
+                WHERE book_id = ? AND snapshot_id = ?
+                """,
+                (event.book_id, event.selected_snapshot_id),
+            ).fetchone()
+            if selected is None:
+                raise RunDatabaseError("recovery selected publication is missing")
+            publication = RunRepository._publication_from_row(selected)
+            RunRepository._validate_publication_relations(
+                connection,
+                publication,
+                completed_tails=completed_tails,
+            )
+            if (
+                publication.snapshot_status is not SnapshotStatus.BLESSED
+                or event.selected_snapshot_id == event.rejected_snapshot_id
+                or event.recorded_at_utc < publication.published_at_utc
+            ):
+                raise RunDatabaseError("recovery selected publication is not safe")
+
+        predecessor = RunRepository._pointer_transition_at_version(
             connection,
-            publication,
-            completed_tails=completed_tails,
+            event.book_id,
+            event.expected_pointer_version,
+        )
+        if predecessor.selected_snapshot_id != event.rejected_snapshot_id:
+            raise RunDatabaseError("recovery evidence rejected the wrong pointer revision")
+        invalidating = RunRepository._pointer_transition_at_version(
+            connection,
+            event.book_id,
+            event.expected_pointer_version + 1,
         )
         if (
-            publication.snapshot_status is not SnapshotStatus.BLESSED
-            or event.selected_snapshot_id == event.rejected_snapshot_id
-            or event.recorded_at_utc < publication.published_at_utc
+            invalidating.previous_snapshot_id != event.rejected_snapshot_id
+            or invalidating.transitioned_at_utc > event.recorded_at_utc
         ):
-            raise RunDatabaseError("recovery selected publication is not safe")
+            raise RunDatabaseError("recovery evidence predates its pointer transition")
+        if event.resolution_action in {
+            ActiveRecoveryDecision.REPOINTED,
+            ActiveRecoveryDecision.REMOVED,
+        } and (
+            invalidating.transition_kind != event.resolution_action.value
+            or invalidating.selected_snapshot_id != event.selected_snapshot_id
+            or invalidating.transitioned_at_utc != event.recorded_at_utc
+        ):
+            raise RunDatabaseError("recovery transition evidence is malformed")
+
+        previous_event = connection.execute(
+            """
+            SELECT recorded_at_utc
+            FROM snapshot_recovery_events
+            WHERE book_id = ? AND event_sequence < ?
+            ORDER BY event_sequence DESC
+            LIMIT 1
+            """,
+            (event.book_id, event.event_sequence),
+        ).fetchone()
+        if (
+            previous_event is not None
+            and previous_event["recorded_at_utc"]
+            > _timestamp_text(event.recorded_at_utc, "recovery event time")
+        ):
+            raise RunDatabaseError("recovery event clock is not monotonic")
 
     def advance_book_head(
         self,
@@ -2044,6 +2416,15 @@ class RunRepository:
                     ) VALUES (?, ?, ?, ?, 1)
                     """,
                     (book_id, generation, canonical_book_ref, now_text),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO active_snapshots (
+                        book_id, snapshot_id, book_generation,
+                        pointer_version, updated_at_utc
+                    ) VALUES (?, NULL, NULL, 0, ?)
+                    """,
+                    (book_id, now_text),
                 )
             else:
                 current = self._book_head_from_row(row)
@@ -2145,16 +2526,16 @@ class RunRepository:
                 captured_generation = head.generation
                 if now_text < head_row["updated_at_utc"]:
                     raise ValueError("run request cannot precede its canonical book head")
-                active = self._active_row(connection, request.book_id)
-                if active is not None:
-                    active_record = self._active_from_row(active)
-                    self._validate_active_relations(connection, active_record)
-                    if now_text < active["updated_at_utc"]:
-                        raise ValueError(
-                            "run request cannot precede its active snapshot pointer"
-                        )
-                    expected_active_snapshot_id = active["snapshot_id"]
-                    expected_active_pointer_version = int(active["pointer_version"])
+                pointer_row = self._pointer_row(connection, request.book_id)
+                if pointer_row is None:
+                    raise RunDatabaseError("book head has no active pointer register")
+                pointer = self._pointer_register_from_row(pointer_row)
+                if now_text < pointer_row["updated_at_utc"]:
+                    raise ValueError(
+                        "run request cannot precede its active pointer register"
+                    )
+                expected_active_snapshot_id = pointer.snapshot_id
+                expected_active_pointer_version = pointer.pointer_version
 
             client_key_digest = (
                 None
@@ -2579,7 +2960,7 @@ class RunRepository:
             )
 
     @staticmethod
-    def _active_row(
+    def _pointer_row(
         connection: sqlite3.Connection, book_id: str
     ) -> sqlite3.Row | None:
         return connection.execute(
@@ -2600,6 +2981,13 @@ class RunRepository:
             """,
             (book_id,),
         ).fetchone()
+
+    @staticmethod
+    def _active_row(
+        connection: sqlite3.Connection, book_id: str
+    ) -> sqlite3.Row | None:
+        row = RunRepository._pointer_row(connection, book_id)
+        return None if row is None or row["snapshot_id"] is None else row
 
     @staticmethod
     def _publication_row_for_run(
@@ -2809,28 +3197,22 @@ class RunRepository:
                     rejection_code=RunErrorCode.STALE_BOOK_GENERATION,
                 )
 
-            active_row = self._active_row(connection, publication.book_id)
-            if active_row is not None:
-                active_record = self._active_from_row(active_row)
-                self._validate_active_relations(connection, active_record)
+            pointer_row = self._pointer_row(connection, publication.book_id)
+            if pointer_row is None:
+                raise RunDatabaseError("book head has no active pointer register")
+            pointer = self._pointer_register_from_row(pointer_row)
+            self._validate_pointer_register_relations(connection, pointer)
             expected_active_id = row["expected_active_snapshot_id"]
             expected_pointer_version = row["expected_active_pointer_version"]
             pointer_matches = (
-                active_row is None
-                and expected_active_id is None
-                and expected_pointer_version == 0
-            ) or (
-                active_row is not None
-                and active_row["snapshot_id"] == expected_active_id
-                and active_row["pointer_version"] == expected_pointer_version
+                pointer.snapshot_id == expected_active_id
+                and pointer.pointer_version == expected_pointer_version
             )
             if not pointer_matches:
                 terminal_time_text = max(
                     now_text,
                     row["updated_at_utc"],
-                    active_row["updated_at_utc"]
-                    if active_row is not None
-                    else now_text,
+                    pointer_row["updated_at_utc"],
                 )
                 self._terminalize_publication_rejection(
                     connection,
@@ -2848,7 +3230,7 @@ class RunRepository:
                 )
 
             _require_monotonic_update(row, now_text)
-            if active_row is not None and now_text < active_row["updated_at_utc"]:
+            if now_text < pointer_row["updated_at_utc"]:
                 raise ValueError("publication time cannot precede the active pointer update")
 
             try:
@@ -2899,45 +3281,30 @@ class RunRepository:
             self._inject("db.after_run_update")
 
             new_pointer_version = expected_pointer_version + 1
-            if active_row is None:
-                connection.execute(
-                    """
-                    INSERT INTO active_snapshots (
-                        book_id, snapshot_id, book_generation, pointer_version, updated_at_utc
-                    ) VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        publication.book_id,
-                        publication.snapshot_id,
-                        publication.book_generation,
-                        new_pointer_version,
-                        now_text,
-                    ),
+            updated = connection.execute(
+                """
+                UPDATE active_snapshots
+                SET snapshot_id = ?, book_generation = ?, pointer_version = ?,
+                    updated_at_utc = ?
+                WHERE book_id = ? AND snapshot_id IS ? AND book_generation IS ?
+                  AND pointer_version = ? AND updated_at_utc = ?
+                """,
+                (
+                    publication.snapshot_id,
+                    publication.book_generation,
+                    new_pointer_version,
+                    now_text,
+                    publication.book_id,
+                    pointer.snapshot_id,
+                    pointer.book_generation,
+                    expected_pointer_version,
+                    pointer_row["updated_at_utc"],
+                ),
+            )
+            if updated.rowcount != 1:
+                raise PublicationConflictError(
+                    "active pointer changed during publication"
                 )
-            else:
-                updated = connection.execute(
-                    """
-                    UPDATE active_snapshots
-                    SET snapshot_id = ?, book_generation = ?, pointer_version = ?,
-                        updated_at_utc = ?
-                    WHERE book_id = ? AND snapshot_id = ? AND book_generation = ?
-                      AND pointer_version = ?
-                    """,
-                    (
-                        publication.snapshot_id,
-                        publication.book_generation,
-                        new_pointer_version,
-                        now_text,
-                        publication.book_id,
-                        expected_active_id,
-                        active_row["book_generation"],
-                        expected_pointer_version,
-                    ),
-                )
-                if updated.rowcount != 1:
-                    raise PublicationConflictError(
-                        "active pointer changed during publication"
-                    )
             self._inject("db.after_active_cas")
             self._publication_result_from_connection(
                 connection,
@@ -2980,15 +3347,33 @@ class RunRepository:
     def get_active(self, book_id: str) -> ActiveSnapshotV1 | None:
         book_id = _require_nonblank(book_id, "book ID")
         with self._read_connection() as connection:
-            row = self._active_row(connection, book_id)
+            row = self._pointer_row(connection, book_id)
             if row is None:
+                if connection.execute(
+                    "SELECT 1 FROM book_heads WHERE book_id = ?", (book_id,)
+                ).fetchone() is not None:
+                    raise RunDatabaseError("book head has no active pointer register")
                 return None
-            active = self._active_from_row(row)
-            self._validate_active_relations(connection, active)
+            register = self._pointer_register_from_row(row)
+            active = register.active_snapshot()
+            if active is not None:
+                self._validate_active_relations(connection, active)
+            self._validate_pointer_register_relations(connection, register)
             return active
 
     def list_active(self) -> tuple[ActiveSnapshotV1, ...]:
         with self._read_connection() as connection:
+            if connection.execute(
+                """
+                SELECT 1
+                FROM book_heads AS head
+                LEFT JOIN active_snapshots AS pointer
+                  ON pointer.book_id = head.book_id
+                WHERE pointer.book_id IS NULL
+                LIMIT 1
+                """
+            ).fetchone() is not None:
+                raise RunDatabaseError("book head has no active pointer register")
             rows = connection.execute(
                 """
                 SELECT active.*,
@@ -3006,15 +3391,29 @@ class RunRepository:
                 ORDER BY active.book_id ASC
                 """
             ).fetchall()
-            active_records = tuple(self._active_from_row(row) for row in rows)
+            registers = tuple(
+                self._pointer_register_from_row(row) for row in rows
+            )
+            active_records = tuple(
+                register.active_snapshot() for register in registers
+            )
             completed_tails: set[tuple[str, str]] = set()
-            for active in active_records:
-                self._validate_active_relations(
+            for register in registers:
+                active = register.active_snapshot()
+                if active is not None:
+                    self._validate_active_relations(
+                        connection,
+                        active,
+                        completed_tails=completed_tails,
+                    )
+                self._validate_pointer_register_relations(
                     connection,
-                    active,
+                    register,
                     completed_tails=completed_tails,
                 )
-            return active_records
+            return tuple(
+                active for active in active_records if active is not None
+            )
 
     def list_publications(
         self, book_id: str
@@ -3178,12 +3577,22 @@ class RunRepository:
         now_text = _timestamp_text(now, "active recovery time")
         with self._read_connection() as connection:
             completed_tails: set[tuple[str, str]] = set()
-            previous_row = self._active_row(connection, book_id)
-            previous_active = (
-                None
-                if previous_row is None
-                else self._active_from_row(previous_row)
-            )
+            previous_row = self._pointer_row(connection, book_id)
+            if previous_row is None:
+                if connection.execute(
+                    "SELECT 1 FROM book_heads WHERE book_id = ?", (book_id,)
+                ).fetchone() is not None:
+                    raise RunDatabaseError("book head has no active pointer register")
+                previous_pointer = None
+                previous_active = None
+            else:
+                previous_pointer = self._pointer_register_from_row(previous_row)
+                self._validate_pointer_register_relations(
+                    connection,
+                    previous_pointer,
+                    completed_tails=completed_tails,
+                )
+                previous_active = previous_pointer.active_snapshot()
             if previous_active is None:
                 active_publication = None
                 fallbacks: tuple[ManifestPublicationRecordV1, ...] = ()
@@ -3223,11 +3632,11 @@ class RunRepository:
                 active=None,
                 event=None,
             )
+        if previous_pointer is None or previous_row is None:
+            raise RunDatabaseError("active pointer register disappeared during recovery")
         previous_updated_text = _timestamp_text(
             previous_active.updated_at_utc, "active pointer update time"
         )
-        if now_text < previous_updated_text:
-            raise ValueError("active recovery time cannot move backward")
         if active_publication is None:
             raise RunDatabaseError("active snapshot has no publication metadata")
         expected_publications = {
@@ -3241,18 +3650,18 @@ class RunRepository:
         )
         if resolution.resolved_snapshot_id == previous_active.snapshot_id:
             with self._read_connection() as connection:
-                current_row = self._active_row(connection, book_id)
-                current_active = (
-                    None
-                    if current_row is None
-                    else self._active_from_row(current_row)
-                )
+                current_row = self._pointer_row(connection, book_id)
+                if current_row is None:
+                    raise RunDatabaseError("book head has no active pointer register")
+                current_pointer = self._pointer_register_from_row(current_row)
+                self._validate_pointer_register_relations(connection, current_pointer)
+                current_active = current_pointer.active_snapshot()
                 current_publication = (
                     None
                     if current_active is None
                     else self._validate_active_relations(connection, current_active)
                 )
-            if current_active != previous_active:
+            if current_pointer != previous_pointer:
                 return ActiveRecoveryResultV1(
                     decision=ActiveRecoveryDecision.CAS_LOST,
                     previous_active=previous_active,
@@ -3274,12 +3683,10 @@ class RunRepository:
         self._inject("recovery.after_selection")
         with self._write_transaction() as connection:
             completed_tails: set[tuple[str, str]] = set()
-            current_row = self._active_row(connection, book_id)
-            current_active = (
-                None
-                if current_row is None
-                else self._active_from_row(current_row)
-            )
+            current_row = self._pointer_row(connection, book_id)
+            if current_row is None:
+                raise RunDatabaseError("book head has no active pointer register")
+            current_pointer = self._pointer_register_from_row(current_row)
             rejected_row = connection.execute(
                 """
                 SELECT * FROM snapshot_manifests
@@ -3303,7 +3710,7 @@ class RunRepository:
                 raise PublicationConflictError(
                     "rejected publication metadata changed before resolution"
                 )
-            pointer_matches = current_active == previous_active
+            pointer_matches = current_pointer == previous_pointer
             selected_id = resolution.resolved_snapshot_id
             selected_publication: ManifestPublicationRecordV1 | None = None
             if selected_id is not None:
@@ -3323,12 +3730,11 @@ class RunRepository:
                     raise PublicationConflictError(
                         "verified fallback publication metadata changed before resolution"
                     )
-            if current_active is not None:
-                self._validate_active_relations(
-                    connection,
-                    current_active,
-                    completed_tails=completed_tails,
-                )
+            self._validate_pointer_register_relations(
+                connection,
+                current_pointer,
+                completed_tails=completed_tails,
+            )
             self._validate_publication_relations(
                 connection,
                 rejected_publication,
@@ -3340,43 +3746,63 @@ class RunRepository:
                     selected_publication,
                     completed_tails=completed_tails,
                 )
+            latest_event_row = connection.execute(
+                """
+                SELECT recorded_at_utc
+                FROM snapshot_recovery_events
+                WHERE book_id = ?
+                ORDER BY event_sequence DESC
+                LIMIT 1
+                """,
+                (book_id,),
+            ).fetchone()
+            event_time_text = max(
+                now_text,
+                current_row["updated_at_utc"],
+                _timestamp_text(
+                    rejected_publication.published_at_utc,
+                    "rejected publication time",
+                ),
+                (
+                    _timestamp_text(
+                        selected_publication.published_at_utc,
+                        "selected publication time",
+                    )
+                    if selected_publication is not None
+                    else now_text
+                ),
+                (
+                    latest_event_row["recorded_at_utc"]
+                    if latest_event_row is not None
+                    else now_text
+                ),
+            )
             if not pointer_matches:
                 decision = ActiveRecoveryDecision.CAS_LOST
-            elif selected_id is None:
-                deleted = connection.execute(
-                    """
-                    DELETE FROM active_snapshots
-                    WHERE book_id = ? AND snapshot_id = ? AND book_generation = ?
-                      AND pointer_version = ? AND updated_at_utc = ?
-                    """,
-                    (
-                        book_id,
-                        previous_active.snapshot_id,
-                        previous_active.book_generation,
-                        previous_active.pointer_version,
-                        previous_updated_text,
-                    ),
-                )
+            else:
                 decision = (
                     ActiveRecoveryDecision.REMOVED
-                    if deleted.rowcount == 1
-                    else ActiveRecoveryDecision.CAS_LOST
+                    if selected_id is None
+                    else ActiveRecoveryDecision.REPOINTED
                 )
-            else:
-                expected_publication = expected_publications[selected_id]
+                selected_generation = (
+                    None
+                    if selected_publication is None
+                    else selected_publication.book_generation
+                )
                 updated = connection.execute(
                     """
                     UPDATE active_snapshots
                     SET snapshot_id = ?, book_generation = ?, pointer_version = ?,
                         updated_at_utc = ?
-                    WHERE book_id = ? AND snapshot_id = ? AND book_generation = ?
+                    WHERE book_id = ? AND snapshot_id IS ? AND book_generation IS ?
                       AND pointer_version = ? AND updated_at_utc = ?
                     """,
                     (
                         selected_id,
-                        expected_publication.book_generation,
+                        selected_generation,
                         previous_active.pointer_version + 1,
-                        now_text,
+                        event_time_text,
                         book_id,
                         previous_active.snapshot_id,
                         previous_active.book_generation,
@@ -3385,9 +3811,7 @@ class RunRepository:
                     ),
                 )
                 if updated.rowcount != 1:
-                    decision = ActiveRecoveryDecision.CAS_LOST
-                else:
-                    decision = ActiveRecoveryDecision.REPOINTED
+                    raise RunDatabaseError("active pointer changed during recovery")
 
             cursor = connection.execute(
                 """
@@ -3403,25 +3827,23 @@ class RunRepository:
                     decision.value,
                     selected_id,
                     detail_json,
-                    now_text,
+                    event_time_text,
                 ),
             )
             event_row = connection.execute(
                 "SELECT * FROM snapshot_recovery_events WHERE event_sequence = ?",
                 (cursor.lastrowid,),
             ).fetchone()
-            new_active_row = self._active_row(connection, book_id)
-            new_active = (
-                None
-                if new_active_row is None
-                else self._active_from_row(new_active_row)
+            new_pointer_row = self._pointer_row(connection, book_id)
+            if new_pointer_row is None:
+                raise RunDatabaseError("active pointer register disappeared during recovery")
+            new_pointer = self._pointer_register_from_row(new_pointer_row)
+            self._validate_pointer_register_relations(
+                connection,
+                new_pointer,
+                completed_tails=completed_tails,
             )
-            if new_active is not None:
-                self._validate_active_relations(
-                    connection,
-                    new_active,
-                    completed_tails=completed_tails,
-                )
+            new_active = new_pointer.active_snapshot()
             event = self._recovery_event_from_row(event_row)
             self._validate_recovery_event_relations(
                 connection,

@@ -153,7 +153,7 @@ CREATE TABLE snapshot_runs (
             book_id IS NOT NULL
             AND (
                 (expected_active_snapshot_id IS NULL
-                    AND expected_active_pointer_version = 0)
+                    AND expected_active_pointer_version >= 0)
                 OR (expected_active_snapshot_id IS NOT NULL
                     AND expected_active_pointer_version >= 1)
             )
@@ -230,6 +230,12 @@ CREATE INDEX snapshot_runs_by_preimage
 
 CREATE INDEX snapshot_runs_by_book_generation
     ON snapshot_runs(book_id, captured_generation);
+
+CREATE INDEX snapshot_runs_by_book_pointer_version
+    ON snapshot_runs(book_id, expected_active_pointer_version)
+    WHERE book_id IS NOT NULL
+      AND run_outcome = 'SUCCEEDED'
+      AND published_snapshot_id IS NOT NULL;
 
 CREATE INDEX snapshot_runs_by_book_requested
     ON snapshot_runs(book_id, requested_at_utc DESC, run_id DESC);
@@ -373,17 +379,59 @@ END;
 
 CREATE TABLE active_snapshots (
     book_id TEXT NOT NULL PRIMARY KEY REFERENCES book_heads(book_id),
-    snapshot_id TEXT NOT NULL,
-    book_generation INTEGER NOT NULL CHECK (book_generation >= 0),
-    pointer_version INTEGER NOT NULL CHECK (pointer_version >= 1),
+    snapshot_id TEXT CHECK (
+        snapshot_id IS NULL
+        OR (
+            length(snapshot_id) = 64
+            AND snapshot_id NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    book_generation INTEGER CHECK (book_generation >= 0),
+    pointer_version INTEGER NOT NULL CHECK (pointer_version >= 0),
     updated_at_utc TEXT NOT NULL CHECK (
         length(updated_at_utc) = 27
         AND updated_at_utc GLOB
             '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
     ),
+    CHECK (
+        (snapshot_id IS NULL AND book_generation IS NULL)
+        OR (
+            snapshot_id IS NOT NULL
+            AND book_generation IS NOT NULL
+            AND pointer_version >= 1
+        )
+    ),
     FOREIGN KEY (book_id, snapshot_id, book_generation)
         REFERENCES snapshot_manifests(book_id, snapshot_id, book_generation)
 );
+
+CREATE TRIGGER active_pointer_identity_collision_on_insert
+BEFORE INSERT ON active_snapshots
+WHEN EXISTS (
+    SELECT 1 FROM active_snapshots WHERE book_id = NEW.book_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'active pointer register identity is immutable');
+END;
+
+CREATE TRIGGER active_pointer_transition_guard
+BEFORE UPDATE ON active_snapshots
+WHEN NEW.book_id IS NOT OLD.book_id
+  OR NEW.pointer_version <> OLD.pointer_version + 1
+  OR NEW.updated_at_utc < OLD.updated_at_utc
+  OR (
+      NEW.snapshot_id IS OLD.snapshot_id
+      AND NEW.book_generation IS OLD.book_generation
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'active pointer transition is not monotonic');
+END;
+
+CREATE TRIGGER active_pointer_delete_immutable
+BEFORE DELETE ON active_snapshots
+BEGIN
+    SELECT RAISE(ABORT, 'active pointer register is immutable');
+END;
 
 CREATE TABLE snapshot_recovery_events (
     event_sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (event_sequence > 0),
@@ -429,6 +477,10 @@ CREATE TABLE snapshot_recovery_events (
 CREATE INDEX recovery_events_by_book_sequence
     ON snapshot_recovery_events(book_id, event_sequence);
 
+CREATE INDEX recovery_events_by_book_pointer_version
+    ON snapshot_recovery_events(book_id, expected_pointer_version, event_sequence)
+    WHERE resolution_action IN ('REPOINTED', 'REMOVED');
+
 CREATE TRIGGER recovery_event_identity_collision_on_insert
 BEFORE INSERT ON snapshot_recovery_events
 WHEN NEW.event_sequence > 0
@@ -459,6 +511,40 @@ WHEN EXISTS (
  )
 BEGIN
     SELECT RAISE(ABORT, 'recovery event predates its publication');
+END;
+
+CREATE TRIGGER recovery_event_pointer_causal_on_insert
+BEFORE INSERT ON snapshot_recovery_events
+WHEN NOT EXISTS (
+    SELECT 1
+    FROM active_snapshots AS pointer
+    WHERE pointer.book_id = NEW.book_id
+      AND (
+          (
+              NEW.resolution_action IN ('REPOINTED', 'REMOVED')
+              AND pointer.pointer_version = NEW.expected_pointer_version + 1
+              AND pointer.snapshot_id IS NEW.selected_snapshot_id
+              AND pointer.updated_at_utc = NEW.recorded_at_utc
+          )
+          OR (
+              NEW.resolution_action = 'CAS_LOST'
+              AND pointer.pointer_version > NEW.expected_pointer_version
+              AND pointer.updated_at_utc <= NEW.recorded_at_utc
+          )
+      )
+)
+ OR COALESCE(
+    (
+        SELECT previous.recorded_at_utc
+        FROM snapshot_recovery_events AS previous
+        WHERE previous.book_id = NEW.book_id
+        ORDER BY previous.event_sequence DESC
+        LIMIT 1
+    ) > NEW.recorded_at_utc,
+    0
+)
+BEGIN
+    SELECT RAISE(ABORT, 'recovery event is not causally ordered');
 END;
 
 CREATE TRIGGER recovery_event_update_immutable
