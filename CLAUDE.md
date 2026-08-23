@@ -1,9 +1,10 @@
 # QuantMind
 
-Personal quant laboratory: Python core (`src/quantmind/`) + FastAPI backend (planned) + React frontend (planned), IBKR via ib_async behind a broker interface, DuckDB/Parquet cache. Design doc: `~/.gstack/projects/ionutnodis-quant-mind/nodisionut-ibkr-quant-dashboard-design-design-20260725-111258.md`.
+Local-first quant workbench: Python core (`src/quantmind/`), FastAPI backend, and React frontend. IBKR remains behind a read-only broker interface; the cache uses DuckDB/Parquet. Product and responsive-design decisions live in [DESIGN.md](DESIGN.md); the committed API contract is [openapi.json](openapi.json).
 
 ## Testing
-- Framework: pytest (`uv run pytest`). E2E paper-Gateway tests are opt-in: `uv run pytest -m e2e --override-ini addopts=''` (needs IB Gateway on port 4002).
+- Backend: `uv run pytest`. E2E paper-Gateway tests are opt-in: `uv run pytest -m e2e --override-ini addopts=''` (needs IB Gateway on port 4002).
+- Frontend: from `web/`, run `bunx vitest run`, `bun run build`, and `bunx playwright test`. See [web/README.md](web/README.md) for the local run and generated-type workflow.
 - TDD is the law here: no production code without a failing test first. Risk-math modules test against hand-computed/golden values.
 
 ## Engineering constraints (full list in the design doc)
