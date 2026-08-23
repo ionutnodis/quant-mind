@@ -10,6 +10,8 @@ structured 422, never a 500 (repo-wide policy, pattern: routers/whatif.py).
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -74,6 +76,33 @@ def test_pin_unknown_symbol_is_422(store):
     r = client.post("/api/book/pin", json={"positions": [{"symbol": "NOPE", "qty": 1}]})
     assert r.status_code == 422
     assert "NOPE" in r.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("qty", float("nan")),
+        ("qty", float("inf")),
+        ("qty", float("-inf")),
+        ("strike", float("nan")),
+        ("multiplier", float("inf")),
+    ],
+)
+def test_pin_rejects_nonfinite_position_terms_before_persisting(store, field, value):
+    # An API boundary must never mint a persisted book whose quantity or
+    # option terms poison downstream calculations and serialize as null.
+    client = _client(store)
+    position = {"symbol": "SPY", "qty": 1, field: value}
+
+    response = client.post(
+        "/api/book/pin",
+        content=json.dumps({"positions": [position]}, allow_nan=True),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert "finite" in response.json()["detail"][0]["msg"]
+    assert not (store.root / "books").exists()
 
 
 def test_pin_no_broker_no_positions_is_503_and_does_not_persist(store):

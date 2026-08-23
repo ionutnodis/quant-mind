@@ -115,6 +115,13 @@ class PositionIn(BaseModel):
             raise ValueError("qty must be nonzero")
         return v
 
+    @field_validator("qty", "strike", "multiplier")
+    @classmethod
+    def _numeric_terms_are_finite(cls, v: float | None, info) -> float | None:
+        if v is not None and not math.isfinite(v):
+            raise ValueError(f"{info.field_name} must be finite")
+        return v
+
     @field_validator("expiry")
     @classmethod
     def _normalize_expiry(cls, v: str | None) -> str | None:

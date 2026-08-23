@@ -14,6 +14,8 @@ import secrets
 import numpy as np
 import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from quantmind.brief import build_brief
@@ -27,6 +29,19 @@ def _clean(x: float | None) -> float | None:
     if x is None or (isinstance(x, float) and not math.isfinite(x)):
         return None
     return float(x)
+
+
+def _json_safe_validation_detail(value):
+    """Make malformed request evidence safe for strict JSON responses."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _json_safe_validation_detail(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_validation_detail(item) for item in value]
+    if isinstance(value, BaseException):
+        return str(value)
+    return value
 
 
 class Tile(BaseModel):
@@ -94,7 +109,17 @@ def create_app(
     broker=None,
     allowed_origins: tuple[str, ...] | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="QuantMind API", version="0.1.0")
+    app = FastAPI(title="QuantMind API", version="0.3.0.0")
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_error(_request: Request, error: RequestValidationError):
+        # Pydantic correctly rejects NaN/Inf, but its raw validation evidence can
+        # itself contain those values. JSONResponse must never turn a client 422
+        # into a server 500 while serializing that evidence.
+        return JSONResponse(
+            status_code=422,
+            content={"detail": _json_safe_validation_detail(error.errors())},
+        )
     # Shared state for domain routers (routers/*.py): read via request.app.state
     app.state.store = store
     app.state.benchmark = benchmark
