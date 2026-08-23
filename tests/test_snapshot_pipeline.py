@@ -5,10 +5,13 @@ import importlib
 import multiprocessing
 import os
 import pickle
+import sqlite3
+import threading
+import unicodedata
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType
 
 import pytest
 
@@ -37,7 +40,9 @@ from quantmind.snapshots.manifest import (
     create_manifest,
 )
 from quantmind.snapshots.run_repository import (
+    ManifestPublicationV1,
     NewRunV1,
+    PublicationResultV1,
     RunDatabaseError,
     RunErrorCode,
     RunFailureV1,
@@ -49,6 +54,9 @@ from quantmind.snapshots.store import (
     ArtifactNotFoundError,
     SnapshotStore,
     SnapshotStoreError,
+    SnapshotVerificationError,
+    StoredManifestV1,
+    VerifiedSnapshotV1,
 )
 
 
@@ -264,6 +272,37 @@ def _publisher_case(
     return publisher_module, repository, store, run, authority, candidate
 
 
+def _candidate_storage_path(
+    root: Path,
+    candidate,
+    target: str,
+) -> Path:
+    manifest = create_manifest(candidate.manifest_body)
+    if target == "manifest":
+        return (
+            root
+            / "snapshots"
+            / "manifests"
+            / "analytical_snapshot_manifest_v1"
+            / manifest.snapshot_id[:2]
+            / f"{manifest.snapshot_id}.json"
+        )
+    references = {
+        "canonical_book": manifest.body.canonical_book_ref,
+        "input": manifest.body.input_artifacts[0].object_ref,
+        "output": manifest.body.outputs[0].object_ref,
+    }
+    reference = references[target]
+    return (
+        root
+        / "snapshots"
+        / "objects"
+        / "sha256"
+        / reference.digest[:2]
+        / reference.digest
+    )
+
+
 def _cancelled_publication_rejection_case(tmp_path: Path, *, run_id: str):
     module, repository, store, run, authority, candidate = _publisher_case(
         tmp_path,
@@ -310,6 +349,155 @@ def _recover_interrupted_in_new_process(root: str, expected_run_id: str) -> None
     recovered = RunRepository(Path(root)).recover_interrupted(now=T6)
     if recovered != (expected_run_id,):
         os._exit(75)
+
+
+def _payload_for_stage(payload, stage: RunStage):
+    pipeline_module = importlib.import_module("quantmind.snapshots.pipeline")
+    return pipeline_module.StagePayloadV1(
+        **{
+            **payload.model_dump(mode="python"),
+            "stage": stage,
+        }
+    )
+
+
+def _pipeline_ingest(payload):
+    return _payload_for_stage(payload, RunStage.INGESTING)
+
+
+def _pipeline_reconcile(payload):
+    return _payload_for_stage(payload, RunStage.RECONCILING)
+
+
+def _pipeline_validate(payload):
+    pipeline_module = importlib.import_module("quantmind.snapshots.pipeline")
+    publisher_module = importlib.import_module("quantmind.snapshots.publisher")
+    candidate = publisher_module.SnapshotCandidateV1.model_validate_json(payload.payload)
+    body = candidate.manifest_body
+    decision = (
+        pipeline_module.ValidationDecision.PASS
+        if body.snapshot_status is SnapshotStatus.BLESSED
+        else pipeline_module.ValidationDecision.DEGRADED
+    )
+    return pipeline_module.ValidationResultV1(
+        decision=decision,
+        validated_payload=_payload_for_stage(payload, RunStage.VALIDATING),
+        gates=body.gates,
+        policy_evidence=body.policy_evidence,
+        warnings=body.warnings,
+        refused_outputs=body.refused_outputs,
+    )
+
+
+def _pipeline_model(model_input):
+    publisher_module = importlib.import_module("quantmind.snapshots.publisher")
+    return publisher_module.SnapshotCandidateV1.model_validate_json(
+        model_input.validated_payload.payload
+    )
+
+
+def _queued_pipeline_case(
+    tmp_path: Path,
+    *,
+    run_id: str,
+    body_transform=None,
+    repository: RunRepository | None = None,
+):
+    pipeline_module = importlib.import_module("quantmind.snapshots.pipeline")
+    publisher_module = importlib.import_module("quantmind.snapshots.publisher")
+    repository = RunRepository(tmp_path) if repository is None else repository
+    repository.initialize()
+    store = SnapshotStore(tmp_path)
+    canonical_book_ref = store.put_bytes(
+        b'{"schema_version":"canonical_book_v1"}',
+        media_type="application/json",
+        schema_version="canonical_book_v1",
+    )
+    input_ref = store.put_bytes(
+        b'{"marks":"synthetic"}',
+        media_type="application/json",
+        schema_version="normalized_marks_v1",
+    )
+    input_binding = _input_binding(input_ref)
+    output_payload = b'{"xray":"published"}'
+    output_ref = _artifact_ref(
+        output_payload,
+        media_type="application/json",
+        schema_version="xray_read_model_v1",
+    )
+    body = _manifest_body(
+        canonical_book_ref=canonical_book_ref,
+        input_binding=input_binding,
+        output_ref=output_ref,
+    )
+    if body_transform is not None:
+        body = body_transform(body)
+    repository.advance_book_head(
+        "book-alpha",
+        1,
+        canonical_book_ref.digest,
+        now=T0,
+    )
+    run = repository.create_or_join(
+        NewRunV1(
+            run_id=run_id,
+            run_kind="ANALYTICAL_SNAPSHOT",
+            request_fingerprint="a" * 64,
+            client_idempotency_key="pipeline-refresh",
+            book_id="book-alpha",
+            target_cut_utc=T0,
+        ),
+        now=T1,
+    ).record
+    candidate = publisher_module.SnapshotCandidateV1(
+        manifest_body=body,
+        outputs=(
+            publisher_module.OutputArtifactCandidateV1(
+                logical_role="XRAY_READ_MODEL",
+                logical_id="xray",
+                payload=output_payload,
+                media_type="application/json",
+                schema_version="xray_read_model_v1",
+                model_version="xray-v1",
+            ),
+        ),
+    )
+    candidate_payload = candidate.model_dump_json().encode("utf-8")
+    initial_payload = pipeline_module.StagePayloadV1(
+        stage=RunStage.QUEUED,
+        run_id=run.run_id,
+        request_fingerprint=run.request_fingerprint,
+        book_id=run.book_id,
+        book_generation=run.captured_generation,
+        target_cut_utc=run.target_cut_utc,
+        analytical_config_hash=body.analytical_config_hash,
+        schema_version="snapshot_candidate_fixture_v1",
+        payload_sha256=hashlib.sha256(candidate_payload).hexdigest(),
+        payload=candidate_payload,
+    )
+    request = pipeline_module.SnapshotPipelineRequestV1(
+        run_id=run.run_id,
+        request_fingerprint=run.request_fingerprint,
+        analytical_config_hash=body.analytical_config_hash,
+        canonical_book_ref=canonical_book_ref,
+        input_artifacts=(input_binding,),
+        valuation_cut=body.valuation_cut,
+        initial_payload=initial_payload,
+    )
+    publisher = publisher_module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    )
+    return (
+        pipeline_module,
+        repository,
+        store,
+        run,
+        request,
+        candidate,
+        publisher,
+    )
 
 
 def test_publisher_happy_path_persists_verified_bytes_and_one_atomic_publication(
@@ -527,14 +715,17 @@ def test_publisher_refuses_candidate_that_diverges_from_controller_authority(
     "bypass",
     ["stored_path", "stored_digest", "stored_status", "verified_snapshot"],
 )
-def test_publisher_revalidates_store_results_before_catalog_mutation(
+def test_publisher_ignores_untrusted_store_result_overrides(
     tmp_path: Path,
     bypass: str,
 ) -> None:
-    # Break caught: a malicious/bypassed SnapshotStore subclass returning fields that
-    # look usable without satisfying the frozen StoredManifest/VerifiedSnapshot contract.
+    # Break caught: dispatching writes or verification through an injected store adapter
+    # that can fabricate otherwise plausible result contracts.
+    override_calls: list[str] = []
+
     class BypassingStore(SnapshotStore):
         def put_verified_manifest(self, manifest):
+            override_calls.append("put_verified_manifest")
             stored = super().put_verified_manifest(manifest)
             if bypass == "stored_path":
                 return stored.model_copy(
@@ -547,16 +738,13 @@ def test_publisher_revalidates_store_results_before_catalog_mutation(
             return stored
 
         def verify_snapshot(self, snapshot_id, *, required_output_roles=()):
+            override_calls.append("verify_snapshot")
             verified = super().verify_snapshot(
                 snapshot_id,
                 required_output_roles=required_output_roles,
             )
             if bypass == "verified_snapshot":
-                return SimpleNamespace(
-                    snapshot_id=verified.snapshot_id,
-                    status=verified.status,
-                    manifest=verified.manifest,
-                )
+                return object()
             return verified
 
     module, repository, _store, run, authority, candidate = _publisher_case(
@@ -571,26 +759,31 @@ def test_publisher_revalidates_store_results_before_catalog_mutation(
     ).publish(run.run_id, candidate, authority=authority)
 
     durable = repository.get(run.run_id)
-    assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
-    assert result.publication_result is None
+    expected_manifest = create_manifest(candidate.manifest_body)
+    assert override_calls == []
+    assert result.result_code is module.PublisherResultCode.CATALOG_RESULT
+    assert result.published is True
     assert durable == result.run
-    assert durable.run_outcome is RunOutcome.FAILED
-    assert durable.error_code is RunErrorCode.SERIALIZATION_FAILED
-    assert durable.candidate_snapshot_id is None
-    assert repository.list_publications("book-alpha") == ()
-    assert repository.get_active("book-alpha") is None
+    assert durable.run_outcome is RunOutcome.SUCCEEDED
+    assert durable.published_snapshot_id == expected_manifest.snapshot_id
+    assert SnapshotStore(tmp_path).verify_snapshot(
+        expected_manifest.snapshot_id
+    ).manifest == expected_manifest
+    assert repository.get_active("book-alpha").snapshot_id == expected_manifest.snapshot_id
 
 
-def test_publisher_refuses_valid_manifest_substitution_from_store(
+def test_publisher_prevents_valid_manifest_substitution_by_store_adapter(
     tmp_path: Path,
 ) -> None:
-    # Break caught: trusting an internally valid StoredManifest returned for a different
-    # manifest than the publisher's locally created candidate identity.
+    # Break caught: letting an injected store adapter substitute a different, internally
+    # valid manifest for the publisher's locally created candidate identity.
     substituted_manifest = None
+    override_called = False
 
     class ValidManifestSubstitutingStore(SnapshotStore):
         def put_verified_manifest(self, manifest):
-            nonlocal substituted_manifest
+            nonlocal override_called, substituted_manifest
+            override_called = True
             substituted_manifest = create_manifest(
                 manifest.body.model_copy(
                     update={"application_build_id": "hostile-store-substitution"}
@@ -611,20 +804,22 @@ def test_publisher_refuses_valid_manifest_substitution_from_store(
         clock=lambda: T3,
     ).publish(run.run_id, candidate, authority=authority)
 
-    assert substituted_manifest is not None
+    assert override_called is False
+    assert substituted_manifest is None
     assert SnapshotStore(tmp_path).verify_snapshot(
-        substituted_manifest.snapshot_id
-    ).manifest == substituted_manifest
-    assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
-    assert result.publication_result is None
-    assert result.run.run_outcome is RunOutcome.FAILED
-    assert result.run.error_code is RunErrorCode.SERIALIZATION_FAILED
-    assert result.run.candidate_snapshot_id is None
-    assert result.run.published_snapshot_id is None
-    assert result.run.candidate_snapshot_id != local_manifest.snapshot_id
+        local_manifest.snapshot_id
+    ).manifest == local_manifest
+    assert result.result_code is module.PublisherResultCode.CATALOG_RESULT
+    assert result.published is True
+    assert result.run.run_outcome is RunOutcome.SUCCEEDED
+    assert result.run.candidate_snapshot_id == local_manifest.snapshot_id
+    assert result.run.published_snapshot_id == local_manifest.snapshot_id
     assert repository.get(run.run_id) == result.run
-    assert repository.list_publications("book-alpha") == ()
-    assert repository.get_active("book-alpha") is None
+    assert tuple(
+        publication.snapshot_id
+        for publication in repository.list_publications("book-alpha")
+    ) == (local_manifest.snapshot_id,)
+    assert repository.get_active("book-alpha").snapshot_id == local_manifest.snapshot_id
 
 
 @pytest.mark.parametrize("forgery", ["request_fingerprint", "analytical_config"])
@@ -690,6 +885,58 @@ def test_publication_authority_caps_total_nested_canonical_bytes(tmp_path: Path)
             **{
                 **authority.model_dump(mode="python"),
                 "input_artifacts": (oversized_binding,),
+            }
+        )
+
+
+def test_publication_authority_caps_aggregate_input_artifact_bytes(
+    tmp_path: Path,
+) -> None:
+    # Break caught: individually valid input references claiming an unbounded total
+    # read budget immediately before publication acquires its SQLite write lock.
+    module, _repository, _store, _run, authority, _candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B0L",
+    )
+    base = authority.input_artifacts[0]
+
+    def input_with_size(logical_id: str, byte_length: int) -> InputArtifactBindingV1:
+        return base.model_copy(
+            update={
+                "logical_id": logical_id,
+                "object_ref": base.object_ref.model_copy(
+                    update={"byte_length": byte_length}
+                ),
+            }
+        )
+
+    bounded_inputs = (
+        input_with_size("marks", 32 * 1024 * 1024),
+        input_with_size("marks-2", 31 * 1024 * 1024),
+    )
+    bounded_canonical = authority.canonical_book_ref.model_copy(
+        update={"byte_length": 1 * 1024 * 1024}
+    )
+    accepted = module.PublicationAuthorityV1(
+        **{
+            **authority.model_dump(mode="python"),
+            "canonical_book_ref": bounded_canonical,
+            "input_artifacts": bounded_inputs,
+        }
+    )
+    assert accepted.canonical_book_ref.byte_length + sum(
+        binding.object_ref.byte_length for binding in accepted.input_artifacts
+    ) == 64 * 1024 * 1024
+
+    with pytest.raises(ValueError, match="artifact read bytes.*bound"):
+        module.PublicationAuthorityV1(
+            **{
+                **authority.model_dump(mode="python"),
+                "canonical_book_ref": bounded_canonical,
+                "input_artifacts": (
+                    input_with_size("marks", 33 * 1024 * 1024),
+                    input_with_size("marks-2", 31 * 1024 * 1024),
+                ),
             }
         )
 
@@ -1113,7 +1360,7 @@ def test_terminal_succeeded_retry_reverifies_existing_snapshot_bytes(
         store=store,
         clock=lambda: T3,
     )
-    with pytest.raises(SnapshotStoreError):
+    with pytest.raises(SnapshotVerificationError):
         publisher.publish(run.run_id, candidate, authority=authority)
 
     assert repository.get(run.run_id) == first.run
@@ -1156,6 +1403,306 @@ def test_repository_active_cas_fault_rolls_back_catalog_and_retains_orphan_candi
     assert durable.candidate_snapshot_id == expected_manifest.snapshot_id
     assert RunRepository(tmp_path).list_publications("book-alpha") == ()
     assert RunRepository(tmp_path).get_active("book-alpha") is None
+
+
+@pytest.mark.parametrize(
+    ("stored_target", "corruption"),
+    [
+        ("manifest", "missing"),
+        ("canonical_book", "tampered"),
+        ("input", "missing"),
+        ("output", "tampered"),
+    ],
+)
+def test_publisher_precommit_reopens_manifest_and_every_reference_before_success(
+    tmp_path: Path,
+    stored_target: str,
+    corruption: str,
+) -> None:
+    # Break caught: the publisher's final callback changing already-verified canonical
+    # bytes and the catalog still committing a false SUCCEEDED/active publication.
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3C0G",
+    )
+
+    def corrupt_after_publisher_verification(stage) -> None:
+        if stage is not module.PublisherFaultStage.BEFORE_REPOSITORY_COMMIT:
+            return
+        target_path = _candidate_storage_path(tmp_path, candidate, stored_target)
+        if corruption == "missing":
+            target_path.unlink()
+        else:
+            target_path.write_bytes(b"tampered after publisher verification")
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+        fault_injector=corrupt_after_publisher_verification,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
+    assert result.publication_result is None
+    assert result.run.run_outcome is RunOutcome.FAILED
+    assert result.run.error_code is RunErrorCode.DISK_WRITE_FAILED
+    assert repository.get(run.run_id) == result.run
+    assert repository.list_publications("book-alpha") == ()
+    assert repository.get_active("book-alpha") is None
+
+
+@pytest.mark.parametrize("stored_target", ["input", "output"])
+def test_publisher_precommit_reopens_nonfirst_manifest_references(
+    tmp_path: Path,
+    stored_target: str,
+) -> None:
+    # Break caught: final verification checking only the first input/output reference
+    # and allowing corruption of a later manifest-bound object before catalog success.
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3C0R",
+    )
+    second_input_ref = store.put_bytes(
+        b'{"marks":"secondary"}',
+        media_type="application/json",
+        schema_version="normalized_marks_v1",
+    )
+    second_input = candidate.manifest_body.input_artifacts[0].model_copy(
+        update={
+            "logical_id": "marks-2",
+            "object_ref": second_input_ref,
+        }
+    )
+    second_output_payload = b'{"xray":"secondary"}'
+    second_output_ref = _artifact_ref(
+        second_output_payload,
+        media_type="application/json",
+        schema_version="xray_read_model_v1",
+    )
+    second_output_binding = candidate.manifest_body.outputs[0].model_copy(
+        update={
+            "logical_id": "xray-2",
+            "object_ref": second_output_ref,
+        }
+    )
+    second_policy_evidence = candidate.manifest_body.policy_evidence[0].model_copy(
+        update={"subject_id": "xray-2"}
+    )
+    candidate = module.SnapshotCandidateV1(
+        manifest_body=candidate.manifest_body.model_copy(
+            update={
+                "input_artifacts": (
+                    candidate.manifest_body.input_artifacts[0],
+                    second_input,
+                ),
+                "outputs": (
+                    candidate.manifest_body.outputs[0],
+                    second_output_binding,
+                ),
+                "policy_evidence": (
+                    candidate.manifest_body.policy_evidence[0],
+                    second_policy_evidence,
+                ),
+            }
+        ),
+        outputs=(
+            candidate.outputs[0],
+            module.OutputArtifactCandidateV1(
+                logical_role="XRAY_READ_MODEL",
+                logical_id="xray-2",
+                payload=second_output_payload,
+                media_type="application/json",
+                schema_version="xray_read_model_v1",
+                model_version="xray-v1",
+            ),
+        ),
+    )
+    authority = authority.model_copy(
+        update={
+            "input_artifacts": candidate.manifest_body.input_artifacts,
+            "policy_evidence": candidate.manifest_body.policy_evidence,
+        }
+    )
+    target_ref = (
+        second_input_ref if stored_target == "input" else second_output_ref
+    )
+    target_path = (
+        tmp_path
+        / "snapshots"
+        / "objects"
+        / "sha256"
+        / target_ref.digest[:2]
+        / target_ref.digest
+    )
+
+    def corrupt_nonfirst_reference(stage) -> None:
+        if stage is module.PublisherFaultStage.BEFORE_REPOSITORY_COMMIT:
+            target_path.write_bytes(b"tampered nonfirst reference")
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+        fault_injector=corrupt_nonfirst_reference,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
+    assert result.run.run_outcome is RunOutcome.FAILED
+    assert result.run.error_code is RunErrorCode.DISK_WRITE_FAILED
+    assert repository.list_publications("book-alpha") == ()
+    assert repository.get_active("book-alpha") is None
+
+
+def test_final_filesystem_validation_precedes_sqlite_write_transaction(
+    tmp_path: Path,
+) -> None:
+    # Break caught: acquiring a SQLite write transaction before final filesystem
+    # validation, which can hold the catalog writer while large inputs are read.
+    transaction_stages: list[str] = []
+
+    def record_database_stage(stage: str) -> None:
+        transaction_stages.append(stage)
+
+    repository = RunRepository(tmp_path, fault_injector=record_database_stage)
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3C0H",
+        repository=repository,
+    )
+    def corrupt_before_final_validation(stage) -> None:
+        if stage is module.PublisherFaultStage.BEFORE_REPOSITORY_COMMIT:
+            _candidate_storage_path(tmp_path, candidate, "output").unlink()
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+        fault_injector=corrupt_before_final_validation,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
+    assert result.run.run_outcome is RunOutcome.FAILED
+    assert result.run.error_code is RunErrorCode.DISK_WRITE_FAILED
+    assert repository.list_publications("book-alpha") == ()
+    assert repository.get_active("book-alpha") is None
+    assert "db.before_begin" not in transaction_stages
+
+
+def test_publisher_rejects_subclass_validator_override() -> None:
+    # Break caught: a publisher subclass overriding the protected validator with a
+    # no-op and bypassing final canonical-byte verification before catalog success.
+    module = importlib.import_module("quantmind.snapshots.publisher")
+
+    with pytest.raises(TypeError, match="does not support subclassing"):
+
+        class NoOpValidatorPublisher(module.SnapshotPublisher):
+            def _validate_publication_precommit(self, publication) -> None:
+                del publication
+
+
+def test_publisher_rejects_subclass_store_attribute_redirect() -> None:
+    # Break caught: an overriding __getattribute__ redirecting the exact base validator
+    # to a clean mirror store after the real canonical manifest was deleted.
+    module = importlib.import_module("quantmind.snapshots.publisher")
+
+    with pytest.raises(TypeError, match="does not support subclassing"):
+
+        class RedirectedStorePublisher(module.SnapshotPublisher):
+            def __init__(self, *, redirected_store: SnapshotStore, **kwargs) -> None:
+                self._redirected_store = redirected_store
+
+            def __getattribute__(self, name: str):
+                if name == "_store":
+                    return object.__getattribute__(self, "_redirected_store")
+                return super().__getattribute__(name)
+
+
+def test_publisher_rejects_subclass_repository_attribute_redirect() -> None:
+    # Break caught: an overriding __getattribute__ redirecting the transaction seam
+    # from the captured run catalog to a forged but internally coherent mirror catalog.
+    module = importlib.import_module("quantmind.snapshots.publisher")
+
+    with pytest.raises(TypeError, match="does not support subclassing"):
+
+        class RedirectedRepositoryPublisher(module.SnapshotPublisher):
+            def __init__(
+                self,
+                *,
+                redirected_repository: RunRepository,
+                **kwargs,
+            ) -> None:
+                self._redirected_repository = redirected_repository
+
+            def __getattribute__(self, name: str):
+                if name == "_repository":
+                    return object.__getattribute__(self, "_redirected_repository")
+                return super().__getattribute__(name)
+
+
+def test_precommit_corruption_keeps_concurrent_cancellation_precedence(
+    tmp_path: Path,
+) -> None:
+    # Break caught: filesystem validation masking a cancellation that the catalog
+    # observes before deciding whether this publication may become successful.
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3C0J",
+    )
+
+    def corrupt_and_cancel_before_commit(stage) -> None:
+        if stage is module.PublisherFaultStage.BEFORE_REPOSITORY_COMMIT:
+            _candidate_storage_path(tmp_path, candidate, "manifest").unlink()
+            repository.request_cancel(run.run_id, now=T3)
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+        fault_injector=corrupt_and_cancel_before_commit,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
+    assert result.publication_result is None
+    assert result.run.run_outcome is RunOutcome.CANCELLED
+    assert result.run.error_code is RunErrorCode.CANCELLED_BY_USER
+    assert repository.list_publications("book-alpha") == ()
+    assert repository.get_active("book-alpha") is None
+
+
+@pytest.mark.parametrize("stored_target", ["manifest", "output"])
+def test_succeeded_retry_surfaces_typed_final_verification_corruption_without_mutation(
+    tmp_path: Path,
+    stored_target: str,
+) -> None:
+    # Break caught: an idempotent retry re-verifying before its last callback, then
+    # returning historical success after that callback corrupts canonical bytes.
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3C0K",
+    )
+    first = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    def corrupt_after_retry_verification(stage) -> None:
+        if stage is module.PublisherFaultStage.BEFORE_REPOSITORY_COMMIT:
+            _candidate_storage_path(tmp_path, candidate, stored_target).write_bytes(
+                b"tampered on idempotent retry"
+            )
+
+    with pytest.raises(SnapshotStoreError):
+        module.SnapshotPublisher(
+            repository=repository,
+            store=store,
+            clock=lambda: T3,
+            fault_injector=corrupt_after_retry_verification,
+        ).publish(run.run_id, candidate, authority=authority)
+
+    assert repository.get(run.run_id) == first.run
+    assert repository.list_publications("book-alpha") == (first.publication,)
+    assert repository.get_active("book-alpha") == first.active
 
 
 def test_repository_after_commit_fault_is_resolved_as_durable_success(
@@ -1387,30 +1934,22 @@ def test_publisher_returns_tagged_durable_failure_without_catalog_visibility(
     assert repository.get_active("book-alpha") is None
 
 
-@pytest.mark.parametrize("value_error_source", ["repository", "publisher_hook"])
+@pytest.mark.parametrize("value_error_source", ["clock", "publisher_hook"])
 def test_publisher_does_not_misclassify_infrastructure_value_errors(
     tmp_path: Path,
     value_error_source: str,
 ) -> None:
-    # Break caught: a broad ValueError catch turning repository, clock, or test-hook
-    # defects into false SERIALIZATION_FAILED evidence.
-    armed = False
-
-    class OneShotValueErrorRepository(RunRepository):
-        def get(self, run_id):
-            nonlocal armed
-            if armed and value_error_source == "repository":
-                armed = False
-                raise ValueError("injected repository adapter defect")
-            return super().get(run_id)
-
-    repository = OneShotValueErrorRepository(tmp_path)
+    # Break caught: a broad ValueError catch turning clock or publisher-hook defects
+    # into false SERIALIZATION_FAILED evidence.
     module, repository, store, run, authority, candidate = _publisher_case(
         tmp_path,
         run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B0N",
-        repository=repository,
     )
-    armed = True
+
+    def clock() -> datetime:
+        if value_error_source == "clock":
+            raise ValueError("injected publisher clock defect")
+        return T3
 
     def fail_publisher_hook(stage) -> None:
         if (
@@ -1423,7 +1962,7 @@ def test_publisher_does_not_misclassify_infrastructure_value_errors(
         module.SnapshotPublisher(
             repository=repository,
             store=store,
-            clock=lambda: T3,
+            clock=clock,
             fault_injector=fail_publisher_hook,
         ).publish(run.run_id, candidate, authority=authority)
 
@@ -1439,28 +1978,19 @@ def test_publisher_failure_terminalization_retries_to_cancellation_precedence(
 ) -> None:
     # Break caught: a cancellation CAS racing failure evidence losing to a generic
     # failure or leaving the run non-terminal after the first stale version.
-    race_armed = False
-
-    class CancellationRaceRepository(RunRepository):
-        def mark_failed(self, run_id, failure, *, expected_version, now):
-            nonlocal race_armed
-            if race_armed:
-                race_armed = False
-                self.request_cancel(run_id, now=now)
-            return super().mark_failed(
-                run_id,
-                failure,
-                expected_version=expected_version,
-                now=now,
-            )
-
-    repository = CancellationRaceRepository(tmp_path)
     module, repository, store, run, authority, candidate = _publisher_case(
         tmp_path,
         run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B0P",
-        repository=repository,
     )
     race_armed = True
+
+    def cancel_during_terminalization() -> datetime:
+        nonlocal race_armed
+        if race_armed:
+            race_armed = False
+            repository.request_cancel(run.run_id, now=T3)
+        return T3
+
     bad_output = candidate.outputs[0].model_copy(
         update={"payload": b'{"xray":"tampered"}'}
     )
@@ -1472,7 +2002,7 @@ def test_publisher_failure_terminalization_retries_to_cancellation_precedence(
     result = module.SnapshotPublisher(
         repository=repository,
         store=store,
-        clock=lambda: T3,
+        clock=cancel_during_terminalization,
     ).publish(run.run_id, forged, authority=authority)
 
     assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
@@ -1517,21 +2047,21 @@ def test_publisher_propagates_repository_error_while_recording_failure(
 ) -> None:
     # Break caught: claiming a terminal failure result when durable failure evidence
     # could not be recorded because the catalog operation itself failed.
-    armed = False
-
-    class FailingEvidenceRepository(RunRepository):
-        def mark_failed(self, *args, **kwargs):
-            if armed:
-                raise RunDatabaseError("injected failure-evidence database fault")
-            return super().mark_failed(*args, **kwargs)
-
-    repository = FailingEvidenceRepository(tmp_path)
     module, repository, store, run, authority, candidate = _publisher_case(
         tmp_path,
         run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B0Q",
-        repository=repository,
     )
-    armed = True
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_failure_evidence
+            BEFORE UPDATE OF run_outcome ON snapshot_runs
+            WHEN NEW.run_outcome = 'FAILED'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected failure-evidence database fault');
+            END
+            """
+        )
     bad_output = candidate.outputs[0].model_copy(
         update={"payload": b'{"xray":"tampered"}'}
     )
@@ -1540,7 +2070,7 @@ def test_publisher_propagates_repository_error_while_recording_failure(
         outputs=(bad_output,),
     )
 
-    with pytest.raises(RunDatabaseError, match="failure-evidence"):
+    with pytest.raises(RunDatabaseError, match="database mutation failed"):
         module.SnapshotPublisher(
             repository=repository,
             store=store,
@@ -1744,41 +2274,33 @@ def test_failure_terminalization_converges_concurrent_terminal_truth(
 ) -> None:
     # Break caught: durable terminal truth winning after failure's read but before
     # mark_failed escaping as TerminalRunMutationError instead of being returned exactly.
-    armed = False
-
-    class CancelBeforeFailureRepository(RunRepository):
-        def mark_failed(self, run_id, failure, *, expected_version, now):
-            nonlocal armed
-            if armed:
-                armed = False
-                if terminal_winner == "cancelled":
-                    cancel = self.request_cancel(run_id, now=now)
-                    self.acknowledge_cancel(
-                        run_id,
-                        expected_version=cancel.version,
-                        now=now,
-                    )
-                else:
-                    super().mark_failed(
-                        run_id,
-                        RunFailureV1(code=RunErrorCode.WORKER_FAILED),
-                        expected_version=expected_version,
-                        now=now,
-                    )
-            return super().mark_failed(
-                run_id,
-                failure,
-                expected_version=expected_version,
-                now=now,
-            )
-
-    repository = CancelBeforeFailureRepository(tmp_path)
     module, repository, store, run, authority, candidate = _publisher_case(
         tmp_path,
         run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B2C",
-        repository=repository,
     )
     armed = True
+
+    def terminalize_during_publisher_clock() -> datetime:
+        nonlocal armed
+        if armed:
+            armed = False
+            durable = repository.get(run.run_id)
+            if terminal_winner == "cancelled":
+                cancel = repository.request_cancel(run.run_id, now=T3)
+                repository.acknowledge_cancel(
+                    run.run_id,
+                    expected_version=cancel.version,
+                    now=T3,
+                )
+            else:
+                repository.mark_failed(
+                    run.run_id,
+                    RunFailureV1(code=RunErrorCode.WORKER_FAILED),
+                    expected_version=durable.version,
+                    now=T3,
+                )
+        return T3
+
     bad_output = candidate.outputs[0].model_copy(
         update={"payload": b'{"xray":"tampered"}'}
     )
@@ -1790,7 +2312,7 @@ def test_failure_terminalization_converges_concurrent_terminal_truth(
     result = module.SnapshotPublisher(
         repository=repository,
         store=store,
-        clock=lambda: T3,
+        clock=terminalize_during_publisher_clock,
     ).publish(run.run_id, forged, authority=authority)
 
     assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
@@ -1810,41 +2332,31 @@ def test_stale_attachment_reread_converges_acknowledged_cancellation(
 ) -> None:
     # Break caught: stale attachment CAS rereading terminal cancellation and then
     # falling through to commit, which leaks a terminal-mutation exception.
-    armed = False
-
-    class StaleThenCancelledRepository(RunRepository):
-        def attach_candidate(self, run_id, snapshot_id, *, expected_version, now):
-            nonlocal armed
-            if armed:
-                armed = False
-                cancel = self.request_cancel(run_id, now=now)
-                self.acknowledge_cancel(
-                    run_id,
-                    expected_version=cancel.version,
-                    now=now,
-                )
-                raise StaleRunVersionError("injected stale attachment response")
-            return super().attach_candidate(
-                run_id,
-                snapshot_id,
-                expected_version=expected_version,
-                now=now,
-            )
-
-    repository = StaleThenCancelledRepository(tmp_path)
     module, repository, store, run, authority, candidate = _publisher_case(
         tmp_path,
         run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B2D",
-        repository=repository,
     )
     armed = True
+
+    def cancel_before_attachment(stage) -> None:
+        nonlocal armed
+        if stage is module.PublisherFaultStage.BEFORE_CANDIDATE_ATTACH and armed:
+            armed = False
+            cancel = repository.request_cancel(run.run_id, now=T3)
+            repository.acknowledge_cancel(
+                run.run_id,
+                expected_version=cancel.version,
+                now=T3,
+            )
 
     result = module.SnapshotPublisher(
         repository=repository,
         store=store,
         clock=lambda: T3,
+        fault_injector=cancel_before_attachment,
     ).publish(run.run_id, candidate, authority=authority)
 
+    assert armed is False
     assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
     assert result.publication_result is None
     assert result.run.run_outcome is RunOutcome.CANCELLED
@@ -1901,37 +2413,31 @@ def test_failure_terminalization_converges_attachment_then_cancellation_stales(
 ) -> None:
     # Break caught: a fixed retry budget exhausting after two distinct legal
     # PUBLISHING mutations and leaking stale-version uncertainty instead of cancellation.
-    mark_attempts = 0
+    race_steps = 0
     candidate_snapshot_id: str | None = None
-
-    class CompoundRaceRepository(RunRepository):
-        def mark_failed(self, run_id, failure, *, expected_version, now):
-            nonlocal mark_attempts
-            mark_attempts += 1
-            if mark_attempts == 1:
-                assert candidate_snapshot_id is not None
-                self.attach_candidate(
-                    run_id,
-                    candidate_snapshot_id,
-                    expected_version=expected_version,
-                    now=now,
-                )
-            elif mark_attempts == 2:
-                self.request_cancel(run_id, now=now)
-            return super().mark_failed(
-                run_id,
-                failure,
-                expected_version=expected_version,
-                now=now,
-            )
-
-    repository = CompoundRaceRepository(tmp_path)
     module, repository, store, run, authority, candidate = _publisher_case(
         tmp_path,
         run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B3B",
-        repository=repository,
     )
     candidate_snapshot_id = create_manifest(candidate.manifest_body).snapshot_id
+
+    def mutate_during_terminalization() -> datetime:
+        nonlocal race_steps
+        durable = repository.get(run.run_id)
+        if race_steps == 0:
+            assert candidate_snapshot_id is not None
+            repository.attach_candidate(
+                run.run_id,
+                candidate_snapshot_id,
+                expected_version=durable.version,
+                now=T3,
+            )
+            race_steps += 1
+        elif race_steps == 1:
+            repository.request_cancel(run.run_id, now=T3)
+            race_steps += 1
+        return T3
+
     forged = module.SnapshotCandidateV1(
         manifest_body=candidate.manifest_body,
         outputs=(
@@ -1944,10 +2450,10 @@ def test_failure_terminalization_converges_attachment_then_cancellation_stales(
     result = module.SnapshotPublisher(
         repository=repository,
         store=store,
-        clock=lambda: T3,
+        clock=mutate_during_terminalization,
     ).publish(run.run_id, forged, authority=authority)
 
-    assert mark_attempts == 2
+    assert race_steps == 2
     assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
     assert result.publication_result is None
     assert result.run.run_outcome is RunOutcome.CANCELLED
@@ -2319,3 +2825,1197 @@ def test_terminal_retry_refuses_ineligible_or_unverifiable_history(
     assert repository.get(run.run_id) == durable_before
     assert repository.list_publications("book-alpha") == publications_before
     assert repository.get_active("book-alpha") == active_before
+
+
+@pytest.mark.skip(reason="T3 pipeline remains intentionally unshipped")
+def test_pipeline_happy_path_runs_exact_stage_order_and_publishes_blessed(
+    tmp_path: Path,
+) -> None:
+    # Break caught: an orchestration path skipping durable stage transitions, losing
+    # controller authority, or publishing before all frozen stage results are accepted.
+    (
+        module,
+        repository,
+        _store,
+        run,
+        request,
+        candidate,
+        publisher,
+    ) = _queued_pipeline_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B3A",
+    )
+    observed_stages: list[RunStage] = []
+
+    def recording_runner(stage, function, frozen_input):
+        observed_stages.append(stage)
+        return function(frozen_input)
+
+    result = module.SnapshotPipeline(
+        repository=repository,
+        publisher=publisher,
+        clock=lambda: T3,
+        stage_runner=recording_runner,
+        ingest_stage=_pipeline_ingest,
+        reconcile_stage=_pipeline_reconcile,
+        validate_stage=_pipeline_validate,
+        model_stage=_pipeline_model,
+    ).run(request)
+
+    assert observed_stages == [
+        RunStage.INGESTING,
+        RunStage.RECONCILING,
+        RunStage.VALIDATING,
+        RunStage.MODELING,
+    ]
+    assert result.result_code is module.PipelineResultCode.PUBLICATION_RESULT
+    assert result.publication_result is not None
+    assert result.run == result.publication_result.run
+    assert result.run.run_outcome is RunOutcome.SUCCEEDED
+    assert result.publication_result.published is True
+    assert result.publication_result.publication is not None
+    assert result.publication_result.publication.snapshot_status is SnapshotStatus.BLESSED
+    assert result.run.candidate_snapshot_id == create_manifest(
+        candidate.manifest_body
+    ).snapshot_id
+    assert repository.get(run.run_id) == result.run
+    assert (
+        repository.get_active("book-alpha").snapshot_id
+        == result.run.published_snapshot_id
+    )
+
+
+@pytest.mark.skip(reason="T3 pipeline remains intentionally unshipped")
+def test_pipeline_hard_validation_failure_stops_before_modeling_and_publication(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a hard validation gate reaching modeling/publication or leaving
+    # the durable run live without exact HARD_GATE_FAILED evidence.
+    (
+        module,
+        repository,
+        _store,
+        run,
+        request,
+        _candidate,
+        publisher,
+    ) = _queued_pipeline_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B3B",
+    )
+    model_calls = 0
+    publish_calls = 0
+
+    def hard_fail_validation(payload):
+        failed_gate = GateEvidenceV1(
+            gate_code="BOOK_RECONCILIATION",
+            status=GateStatus.FAILED,
+            recovery_class=RecoveryClass.USER_RESOLVABLE,
+            evidence=("book mismatch remains",),
+            recovery_action="Resolve the book mismatch",
+        )
+        return module.ValidationResultV1(
+            decision=module.ValidationDecision.HARD_FAIL,
+            validated_payload=_payload_for_stage(payload, RunStage.VALIDATING),
+            gates=(failed_gate,),
+            policy_evidence=(),
+            warnings=(),
+            refused_outputs=(),
+        )
+
+    def forbidden_model(_validation):
+        nonlocal model_calls
+        model_calls += 1
+        raise AssertionError("hard validation must not invoke modeling")
+
+    original_publish = publisher.publish
+
+    def forbidden_publish(*args, **kwargs):
+        nonlocal publish_calls
+        publish_calls += 1
+        return original_publish(*args, **kwargs)
+
+    publisher.publish = forbidden_publish
+
+    result = module.SnapshotPipeline(
+        repository=repository,
+        publisher=publisher,
+        clock=lambda: T3,
+        stage_runner=lambda _stage, function, frozen_input: function(frozen_input),
+        ingest_stage=_pipeline_ingest,
+        reconcile_stage=_pipeline_reconcile,
+        validate_stage=hard_fail_validation,
+        model_stage=forbidden_model,
+    ).run(request)
+
+    assert result.result_code is module.PipelineResultCode.TERMINAL_RUN
+    assert result.publication_result is None
+    assert result.run.run_outcome is RunOutcome.FAILED
+    assert result.run.run_stage is RunStage.VALIDATING
+    assert result.run.error_code is RunErrorCode.HARD_GATE_FAILED
+    assert repository.get(run.run_id) == result.run
+    assert model_calls == 0
+    assert publish_calls == 0
+    assert repository.list_publications("book-alpha") == ()
+    assert repository.get_active("book-alpha") is None
+
+
+@pytest.mark.parametrize(
+    ("cancel_checkpoint", "expected_stage", "expected_calls"),
+    [
+        ("entry", RunStage.QUEUED, ()),
+        ("ingesting", RunStage.INGESTING, (RunStage.INGESTING,)),
+        (
+            "reconciling",
+            RunStage.RECONCILING,
+            (RunStage.INGESTING, RunStage.RECONCILING),
+        ),
+        (
+            "validating",
+            RunStage.VALIDATING,
+            (RunStage.INGESTING, RunStage.RECONCILING, RunStage.VALIDATING),
+        ),
+        (
+            "modeling",
+            RunStage.MODELING,
+            (
+                RunStage.INGESTING,
+                RunStage.RECONCILING,
+                RunStage.VALIDATING,
+                RunStage.MODELING,
+            ),
+        ),
+        (
+            "publishing",
+            RunStage.PUBLISHING,
+            (
+                RunStage.INGESTING,
+                RunStage.RECONCILING,
+                RunStage.VALIDATING,
+                RunStage.MODELING,
+            ),
+        ),
+    ],
+)
+@pytest.mark.skip(reason="T3 pipeline remains intentionally unshipped")
+def test_pipeline_acknowledges_cancellation_at_every_controller_checkpoint(
+    tmp_path: Path,
+    cancel_checkpoint: str,
+    expected_stage: RunStage,
+    expected_calls: tuple[RunStage, ...],
+) -> None:
+    # Break caught: durable cancellation intent allowing the next worker stage or
+    # publisher call to start, or being mislabeled as an ordinary failure.
+    run_id = f"run_01J5X5S8J5J8P7KQ4Y0T3T3B4{len(expected_calls)}"
+
+    class PublishingCancelRepository(RunRepository):
+        def advance_stage(self, current_run_id, stage, *, expected_version, now):
+            advanced = super().advance_stage(
+                current_run_id,
+                stage,
+                expected_version=expected_version,
+                now=now,
+            )
+            if cancel_checkpoint == "publishing" and stage is RunStage.PUBLISHING:
+                self.request_cancel(current_run_id, now=now)
+            return advanced
+
+    repository = PublishingCancelRepository(tmp_path)
+    (
+        module,
+        repository,
+        _store,
+        run,
+        request,
+        _candidate,
+        publisher,
+    ) = _queued_pipeline_case(
+        tmp_path,
+        run_id=run_id,
+        repository=repository,
+    )
+    observed: list[RunStage] = []
+    publish_calls = 0
+
+    def cancelling_runner(stage, function, frozen_input):
+        observed.append(stage)
+        value = function(frozen_input)
+        if cancel_checkpoint == stage.value.lower():
+            repository.request_cancel(run.run_id, now=T3)
+        return value
+
+    original_publish = publisher.publish
+
+    def recording_publish(*args, **kwargs):
+        nonlocal publish_calls
+        publish_calls += 1
+        return original_publish(*args, **kwargs)
+
+    publisher.publish = recording_publish
+    if cancel_checkpoint == "entry":
+        repository.request_cancel(run.run_id, now=T3)
+
+    result = module.SnapshotPipeline(
+        repository=repository,
+        publisher=publisher,
+        clock=lambda: T3,
+        stage_runner=cancelling_runner,
+        ingest_stage=_pipeline_ingest,
+        reconcile_stage=_pipeline_reconcile,
+        validate_stage=_pipeline_validate,
+        model_stage=_pipeline_model,
+    ).run(request)
+
+    assert tuple(observed) == expected_calls
+    assert publish_calls == 0
+    assert result.result_code is module.PipelineResultCode.TERMINAL_RUN
+    assert result.publication_result is None
+    assert result.run.run_outcome is RunOutcome.CANCELLED
+    assert result.run.run_stage is expected_stage
+    assert result.run.error_code is RunErrorCode.CANCELLED_BY_USER
+    assert repository.get(run.run_id) == result.run
+    assert repository.list_publications("book-alpha") == ()
+    assert repository.get_active("book-alpha") is None
+
+
+def test_publisher_uses_exact_catalog_head_instead_of_adapter_override(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a same-generation durable canonical head B being hidden by an
+    # adapter that reports head A, allowing an A-bound manifest into the B catalog.
+    class ForgedHeadRepository(RunRepository):
+        reported_head = None
+
+        def get_book_head(self, book_id):
+            if self.reported_head is not None:
+                return self.reported_head
+            return super().get_book_head(book_id)
+
+    repository = ForgedHeadRepository(tmp_path)
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3C0A",
+        repository=repository,
+    )
+    repository.reported_head = RunRepository.get_book_head(
+        repository,
+        "book-alpha",
+    )
+    assert repository.reported_head is not None
+    durable_ref = "f" * 64
+    assert durable_ref != authority.canonical_book_ref.digest
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute(
+            """
+            UPDATE book_heads
+            SET canonical_book_ref = ?
+            WHERE book_id = 'book-alpha' AND generation = 1
+            """,
+            (durable_ref,),
+        )
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    durable = RunRepository(tmp_path)
+    assert durable.get_book_head("book-alpha").canonical_book_ref == durable_ref
+    assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
+    assert result.run.error_code is RunErrorCode.SERIALIZATION_FAILED
+    assert durable.list_publications("book-alpha") == ()
+    assert durable.get_active("book-alpha") is None
+
+
+@pytest.mark.parametrize("terminal_method", ["mark_failed", "acknowledge_cancel"])
+def test_publisher_returns_only_persisted_terminal_adapter_evidence(
+    tmp_path: Path,
+    terminal_method: str,
+) -> None:
+    # Break caught: an adapter returning a coherent terminal record without persisting
+    # it, while the publisher reports that invented record as durable truth.
+    class FalseTerminalRepository(RunRepository):
+        def mark_failed(self, run_id, failure, *, expected_version, now):
+            if terminal_method != "mark_failed":
+                return super().mark_failed(
+                    run_id,
+                    failure,
+                    expected_version=expected_version,
+                    now=now,
+                )
+            current = RunRepository.get(self, run_id)
+            return type(current).model_validate(
+                current.model_copy(
+                    update={
+                        "run_outcome": RunOutcome.FAILED,
+                        "finished_at_utc": now,
+                        "updated_at_utc": now,
+                        "error_code": failure.code,
+                        "error_message": "result serialization failed",
+                        "version": current.version + 1,
+                    }
+                ).model_dump(mode="python", warnings=False)
+            )
+
+        def acknowledge_cancel(self, run_id, *, expected_version, now):
+            if terminal_method != "acknowledge_cancel":
+                return super().acknowledge_cancel(
+                    run_id,
+                    expected_version=expected_version,
+                    now=now,
+                )
+            current = RunRepository.get(self, run_id)
+            return type(current).model_validate(
+                current.model_copy(
+                    update={
+                        "run_outcome": RunOutcome.CANCELLED,
+                        "finished_at_utc": now,
+                        "updated_at_utc": now,
+                        "error_code": RunErrorCode.CANCELLED_BY_USER,
+                        "error_message": "cancelled by user",
+                        "version": current.version + 1,
+                    }
+                ).model_dump(mode="python", warnings=False)
+            )
+
+    repository = FalseTerminalRepository(tmp_path)
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id=(
+            "run_01J5X5S8J5J8P7KQ4Y0T3T3C0B"
+            if terminal_method == "mark_failed"
+            else "run_01J5X5S8J5J8P7KQ4Y0T3T3C0C"
+        ),
+        repository=repository,
+    )
+    if terminal_method == "acknowledge_cancel":
+        repository.request_cancel(run.run_id, now=T3)
+    else:
+        candidate = module.SnapshotCandidateV1(
+            manifest_body=candidate.manifest_body,
+            outputs=(
+                candidate.outputs[0].model_copy(
+                    update={"payload": b'{"xray":"tampered"}'}
+                ),
+            ),
+        )
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    durable = RunRepository(tmp_path).get(run.run_id)
+    assert result.result_code is module.PublisherResultCode.TERMINAL_FAILURE
+    assert durable == result.run
+    expected_terminal = {
+        "mark_failed": (
+            RunOutcome.FAILED,
+            RunErrorCode.SERIALIZATION_FAILED,
+        ),
+        "acknowledge_cancel": (
+            RunOutcome.CANCELLED,
+            RunErrorCode.CANCELLED_BY_USER,
+        ),
+    }[terminal_method]
+    assert (durable.run_outcome, durable.error_code) == expected_terminal
+
+
+def test_publisher_rejects_repository_store_root_mismatch(tmp_path: Path) -> None:
+    # Break caught: committing a catalog row whose manifest path names bytes that were
+    # written under a different ordinary store root.
+    module = importlib.import_module("quantmind.snapshots.publisher")
+    catalog_root = tmp_path / "catalog"
+    store_root = tmp_path / "store"
+    repository = RunRepository(catalog_root)
+    repository.initialize()
+
+    with pytest.raises(ValueError, match="root"):
+        module.SnapshotPublisher(
+            repository=repository,
+            store=SnapshotStore(store_root),
+            clock=lambda: T3,
+        )
+
+
+def test_publisher_rejects_repository_database_outside_construction_root(
+    tmp_path: Path,
+) -> None:
+    # Protective boundary: a mutable adapter view cannot redirect the exact catalog
+    # clone away from the base repository's normalized construction root.
+    module = importlib.import_module("quantmind.snapshots.publisher")
+    repository = RunRepository(tmp_path / "catalog")
+    repository.database_path = tmp_path / "other" / "runs.sqlite3"
+
+    with pytest.raises(ValueError, match="database path"):
+        module.SnapshotPublisher(
+            repository=repository,
+            store=SnapshotStore(tmp_path / "catalog"),
+            clock=lambda: T3,
+        )
+
+
+@pytest.mark.parametrize("alias_kind", ["parent_segment", "symlink"])
+def test_publisher_accepts_canonically_equal_repository_and_store_roots(
+    tmp_path: Path,
+    alias_kind: str,
+) -> None:
+    # Protective boundary: spelling the same catalog root through ``..`` or a
+    # symlink must not look like a split repository/store configuration.
+    module = importlib.import_module("quantmind.snapshots.publisher")
+    catalog_root = tmp_path / "catalog"
+    catalog_root.mkdir()
+    if alias_kind == "parent_segment":
+        nested = catalog_root / "nested"
+        nested.mkdir()
+        store_root = nested / ".."
+    else:
+        store_root = tmp_path / "catalog-alias"
+        store_root.symlink_to(catalog_root, target_is_directory=True)
+
+    publisher = module.SnapshotPublisher(
+        repository=RunRepository(catalog_root),
+        store=SnapshotStore(store_root),
+        clock=lambda: T3,
+    )
+
+    assert publisher is not None
+
+
+def test_publisher_constructor_does_not_create_catalog_storage(tmp_path: Path) -> None:
+    # Protective boundary: trusted collaborators are configured at construction,
+    # but opening/initializing their filesystem remains a publish-time concern.
+    module = importlib.import_module("quantmind.snapshots.publisher")
+    catalog_root = tmp_path / "not-created"
+    aliased_root = catalog_root / "missing-child" / ".."
+
+    publisher = module.SnapshotPublisher(
+        repository=RunRepository(aliased_root),
+        store=SnapshotStore(catalog_root),
+        clock=lambda: T3,
+    )
+
+    assert publisher is not None
+    assert not catalog_root.exists()
+
+
+def test_publisher_preserves_repository_and_store_construction_fault_hooks(
+    tmp_path: Path,
+) -> None:
+    # Protective boundary: rebuilding exact collaborators must preserve the explicit
+    # construction-time observability/fault seams used by crash-consistency tests.
+    repository_stages: list[str] = []
+    store_stages: list[str] = []
+    repository = RunRepository(
+        tmp_path,
+        fault_injector=repository_stages.append,
+    )
+    module, repository, _store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3C0F",
+        repository=repository,
+    )
+    repository_stages.clear()
+    store = SnapshotStore(
+        tmp_path,
+        fault_injector=lambda stage, _path: store_stages.append(stage),
+    )
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert result.published is True
+    assert "db.before_begin" in repository_stages
+    assert "db.after_manifest_insert" in repository_stages
+    assert "before_file_fsync" in store_stages
+
+
+def test_publisher_uses_exact_store_and_reopens_every_published_snapshot(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a same-root store subclass fabricating valid return contracts while
+    # writing no output or manifest bytes, followed by a catalog success.
+    class NoWriteStore(SnapshotStore):
+        def put_bytes(self, payload, *, media_type, schema_version):
+            return _artifact_ref(
+                payload,
+                media_type=media_type,
+                schema_version=schema_version,
+            )
+
+        def put_verified_manifest(self, manifest):
+            payload = canonical_json_bytes(manifest)
+            return StoredManifestV1(
+                snapshot_id=manifest.snapshot_id,
+                manifest_relpath=(
+                    "snapshots/manifests/analytical_snapshot_manifest_v1/"
+                    f"{manifest.snapshot_id[:2]}/{manifest.snapshot_id}.json"
+                ),
+                envelope_sha256=hashlib.sha256(payload).hexdigest(),
+                envelope_byte_length=len(payload),
+                status=manifest.body.snapshot_status,
+                manifest=manifest,
+            )
+
+        def verify_snapshot(self, snapshot_id, *, required_output_roles=()):
+            del required_output_roles
+            manifest = create_manifest(candidate.manifest_body)
+            assert snapshot_id == manifest.snapshot_id
+            return VerifiedSnapshotV1(
+                snapshot_id=snapshot_id,
+                status=manifest.body.snapshot_status,
+                manifest=manifest,
+            )
+
+    module, repository, _store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3C0D",
+    )
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=NoWriteStore(tmp_path),
+        clock=lambda: T3,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert result.published is True
+    assert result.publication is not None
+    reopened = SnapshotStore(tmp_path).verify_snapshot(
+        result.publication.snapshot_id
+    )
+    assert reopened.manifest == create_manifest(candidate.manifest_body)
+
+
+def test_publisher_uses_repository_construction_root_not_overrideable_view(
+    tmp_path: Path,
+) -> None:
+    # Break caught: a repository constructed against catalog A later reporting root B,
+    # causing the publisher to commit and return B while lifecycle reads came from A.
+    class MisreportedRootRepository(RunRepository):
+        def __init__(self, actual_root: Path, reported_root: Path) -> None:
+            self._reported_root: Path | None = None
+            super().__init__(actual_root)
+            self._reported_root = reported_root
+
+        @property
+        def root(self) -> Path:
+            if self._reported_root is None:
+                return self.__dict__["_construction_root"]
+            return self._reported_root
+
+        @root.setter
+        def root(self, value: Path) -> None:
+            self.__dict__["_construction_root"] = Path(value)
+
+    root_a = tmp_path / "catalog-a"
+    root_b = tmp_path / "catalog-b"
+    run_id = "run_01J5X5S8J5J8P7KQ4Y0T3T3C0E"
+    _module, repository_b, _store_b, run_b, _authority_b, candidate_b = (
+        _publisher_case(root_b, run_id=run_id)
+    )
+    snapshot_id = create_manifest(candidate_b.manifest_body).snapshot_id
+    run_b = repository_b.attach_candidate(
+        run_b.run_id,
+        snapshot_id,
+        expected_version=run_b.version,
+        now=T2,
+    )
+    deceptive = MisreportedRootRepository(root_a, root_b)
+    module, repository_a, store_a, run_a, authority_a, candidate_a = _publisher_case(
+        root_a,
+        run_id=run_id,
+        repository=deceptive,
+    )
+    assert repository_a.database_path == root_a / "snapshots" / "runs.sqlite3"
+    assert repository_a.root == root_b
+
+    result = module.SnapshotPublisher(
+        repository=repository_a,
+        store=store_a,
+        clock=lambda: T3,
+    ).publish(run_a.run_id, candidate_a, authority=authority_a)
+
+    durable_a = RunRepository(root_a).get(run_id)
+    durable_b = RunRepository(root_b).get(run_id)
+    assert result.published is True
+    assert result.run == durable_a
+    assert durable_a.run_outcome is RunOutcome.SUCCEEDED
+    assert durable_b == run_b
+
+
+@pytest.mark.parametrize("collaborator", ["repository", "store", "both"])
+def test_publisher_captures_base_instance_dict_without_subclass_descriptor_dispatch(
+    tmp_path: Path,
+    collaborator: str,
+) -> None:
+    # Break caught: object.__getattribute__(instance, "__dict__") still invoking a
+    # malicious subclass descriptor and forging the base constructor's exact state.
+    forged_root = tmp_path / "forged-root"
+
+    class ForgedDictRepository(RunRepository):
+        @property
+        def __dict__(self):
+            return {
+                "_configured_root": forged_root,
+                "database_path": forged_root / "snapshots" / "runs.sqlite3",
+                "_configured_fault_injector": None,
+            }
+
+    class ForgedDictStore(SnapshotStore):
+        @property
+        def __dict__(self):
+            return {
+                "_configured_root": forged_root,
+                "_configured_fault_injector": None,
+            }
+
+    repository = (
+        ForgedDictRepository(tmp_path)
+        if collaborator in {"repository", "both"}
+        else RunRepository(tmp_path)
+    )
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3C0M",
+        repository=repository,
+    )
+    if collaborator in {"store", "both"}:
+        store = ForgedDictStore(tmp_path)
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert result.published is True
+    assert RunRepository(tmp_path).get(run.run_id) == result.run
+    assert not (forged_root / "snapshots" / "runs.sqlite3").exists()
+
+
+@pytest.mark.parametrize(
+    "forgery",
+    ["metadata", "missing_active", "future_active", "already_published"],
+)
+def test_publisher_ignores_forged_commit_return_and_resolves_durable_truth(
+    tmp_path: Path,
+    forgery: str,
+) -> None:
+    class HostileCommitRepository(RunRepository):
+        def commit_publication(self, *args, **kwargs):
+            durable = super().commit_publication(*args, **kwargs)
+            assert durable.publication is not None
+            assert durable.active is not None
+            if forgery == "metadata":
+                forged_publication = durable.publication.model_copy(
+                    update={
+                        "publication_sequence": 999,
+                        "snapshot_status": SnapshotStatus.DEGRADED,
+                        "envelope_sha256": "f" * 64,
+                        "envelope_byte_length": 1,
+                    }
+                )
+                return durable.model_copy(update={"publication": forged_publication})
+            if forgery == "missing_active":
+                return durable.model_copy(update={"active": None})
+            if forgery == "already_published":
+                return durable.model_copy(update={"already_published": True})
+            return durable.model_copy(
+                update={
+                    "active": durable.active.model_copy(
+                        update={"pointer_version": 99, "updated_at_utc": T6}
+                    )
+                }
+            )
+
+    repository = HostileCommitRepository(tmp_path)
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B5A",
+        repository=repository,
+    )
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, candidate, authority=authority)
+    durable = RunRepository(tmp_path)
+    durable.initialize()
+    truth = durable.resolve_publication_result(
+        run.run_id, already_published=False
+    )
+
+    assert result.publication_result == truth
+    assert result.publication == truth.publication
+    assert result.active == truth.active
+
+
+def test_concurrent_publishers_preserve_call_local_idempotency_flags(
+    tmp_path: Path,
+) -> None:
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B5G",
+    )
+    barrier = threading.Barrier(2)
+    results = []
+    errors: list[BaseException] = []
+
+    def synchronize_commits(stage) -> None:
+        if stage is module.PublisherFaultStage.BEFORE_REPOSITORY_COMMIT:
+            barrier.wait(timeout=10)
+
+    def publish() -> None:
+        try:
+            results.append(
+                module.SnapshotPublisher(
+                    repository=repository,
+                    store=store,
+                    clock=lambda: T3,
+                    fault_injector=synchronize_commits,
+                ).publish(run.run_id, candidate, authority=authority)
+            )
+        except BaseException as error:  # pragma: no cover - asserted below
+            errors.append(error)
+
+    threads = [threading.Thread(target=publish) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert sorted(result.already_published for result in results) == [False, True]
+    assert all(result.published for result in results)
+    assert len(repository.list_publications("book-alpha")) == 1
+
+
+@pytest.mark.parametrize(
+    "forgery",
+    ["foreign_run", "sequence", "missing_active", "future_active"],
+)
+def test_succeeded_retry_ignores_overridden_resolver_and_uses_trusted_truth(
+    tmp_path: Path,
+    forgery: str,
+) -> None:
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B5H",
+    )
+    first = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, candidate, authority=authority)
+    assert first.publication is not None
+    assert first.active is not None
+
+    class HostileResolverRepository(RunRepository):
+        def resolve_publication_result(self, run_id, *, already_published):
+            durable = super().resolve_publication_result(
+                run_id, already_published=already_published
+            )
+            assert durable.publication is not None
+            assert durable.active is not None
+            if forgery == "foreign_run":
+                foreign_run_id = "run_01J5X5S8J5J8P7KQ4Y0T3T3BZZ"
+                return durable.model_copy(
+                    update={
+                        "run": durable.run.model_copy(
+                            update={"run_id": foreign_run_id}
+                        ),
+                        "publication": durable.publication.model_copy(
+                            update={"run_id": foreign_run_id}
+                        ),
+                    }
+                )
+            if forgery == "sequence":
+                return durable.model_copy(
+                    update={
+                        "publication": durable.publication.model_copy(
+                            update={"publication_sequence": 999}
+                        )
+                    }
+                )
+            if forgery == "missing_active":
+                return durable.model_copy(update={"active": None})
+            return durable.model_copy(
+                update={
+                    "active": durable.active.model_copy(
+                        update={"pointer_version": 99, "updated_at_utc": T6}
+                    )
+                }
+            )
+
+    hostile = HostileResolverRepository(tmp_path)
+    hostile.initialize()
+    retried = module.SnapshotPublisher(
+        repository=hostile,
+        store=store,
+        clock=lambda: T4,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    truth = RunRepository(tmp_path).resolve_publication_result(
+        run.run_id,
+        already_published=True,
+    )
+    assert retried.publication_result == truth
+
+
+def test_publisher_ignores_hostile_resolver_manifest_projection(
+    tmp_path: Path,
+) -> None:
+    class HostileResolverRepository(RunRepository):
+        def resolve_publication_result(self, run_id, *, already_published):
+            durable = super().resolve_publication_result(
+                run_id, already_published=already_published
+            )
+            assert durable.publication is not None
+            return durable.model_copy(
+                update={
+                    "publication": durable.publication.model_copy(
+                        update={
+                            "snapshot_status": SnapshotStatus.DEGRADED,
+                            "envelope_sha256": "f" * 64,
+                            "envelope_byte_length": 1,
+                        }
+                    )
+                }
+            )
+
+    repository = HostileResolverRepository(tmp_path)
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B5B",
+        repository=repository,
+    )
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    truth = RunRepository(tmp_path).resolve_publication_result(
+        run.run_id,
+        already_published=False,
+    )
+    assert result.publication_result == truth
+
+
+def test_publisher_ignores_instance_bound_resolver_shadow(tmp_path: Path) -> None:
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B5J",
+    )
+
+    def forged_resolver(self, run_id, *, already_published):
+        durable = RunRepository.resolve_publication_result(
+            self,
+            run_id,
+            already_published=already_published,
+        )
+        assert durable.publication is not None
+        return durable.model_copy(
+            update={
+                "publication": durable.publication.model_copy(
+                    update={"publication_sequence": 999}
+                )
+            }
+        )
+
+    repository.resolve_publication_result = MethodType(  # type: ignore[method-assign]
+        forged_resolver,
+        repository,
+    )
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    truth = RunRepository(tmp_path).resolve_publication_result(
+        run.run_id,
+        already_published=False,
+    )
+    assert result.publication_result == truth
+
+
+def test_publisher_ignores_protected_publication_decoder_override(
+    tmp_path: Path,
+) -> None:
+    class HostileDecoderRepository(RunRepository):
+        @staticmethod
+        def _publication_from_row(row):
+            durable = RunRepository._publication_from_row(row)
+            return durable.model_copy(update={"publication_sequence": 999})
+
+    repository = HostileDecoderRepository(tmp_path)
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B5K",
+        repository=repository,
+    )
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    truth = RunRepository(tmp_path).resolve_publication_result(
+        run.run_id,
+        already_published=False,
+    )
+    assert result.publication_result == truth
+
+
+def test_later_pointer_advance_cannot_create_resolver_comparison_toctou(
+    tmp_path: Path,
+) -> None:
+    class OldResultResolverRepository(RunRepository):
+        old_result: PublicationResultV1 | None = None
+
+        def resolve_publication_result(self, run_id, *, already_published):
+            if self.old_result is not None:
+                return self.old_result.model_copy(
+                    update={"already_published": already_published}
+                )
+            return super().resolve_publication_result(
+                run_id,
+                already_published=already_published,
+            )
+
+    repository = OldResultResolverRepository(tmp_path)
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B5L",
+        repository=repository,
+    )
+    advanced = False
+
+    def advance_after_commit(stage) -> None:
+        nonlocal advanced
+        if stage is not module.PublisherFaultStage.AFTER_REPOSITORY_COMMIT:
+            return
+        repository.old_result = RunRepository.resolve_publication_result(
+            repository,
+            run.run_id,
+            already_published=False,
+        )
+        advancer = RunRepository(tmp_path)
+        second = _publishing_run(
+            advancer,
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B5M",
+            requested_at=T3,
+            stage_at=T3,
+        )
+        second_snapshot_id = "b" * 64
+        second = advancer.attach_candidate(
+            second.run_id,
+            second_snapshot_id,
+            expected_version=second.version,
+            now=T4,
+        )
+        first_publication = repository.old_result.publication
+        assert first_publication is not None
+        RunRepository.commit_publication(
+            advancer,
+            second.run_id,
+            ManifestPublicationV1(
+                snapshot_id=second_snapshot_id,
+                book_id="book-alpha",
+                book_generation=1,
+                snapshot_status=SnapshotStatus.BLESSED,
+                schema_version="analytical_snapshot_manifest_v1",
+                hash_algorithm="sha256",
+                manifest_relpath=(
+                    "snapshots/manifests/analytical_snapshot_manifest_v1/"
+                    f"{second_snapshot_id[:2]}/{second_snapshot_id}.json"
+                ),
+                envelope_sha256="d" * 64,
+                envelope_byte_length=4_096,
+            ),
+            expected_version=second.version,
+            now=T4,
+        )
+        advanced = True
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+        fault_injector=advance_after_commit,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert advanced is True
+    assert result.published is True
+    assert RunRepository(tmp_path).get_active("book-alpha").snapshot_id == "b" * 64
+
+
+def test_publisher_floors_commit_clock_to_an_identical_attached_candidate(
+    tmp_path: Path,
+) -> None:
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B5C",
+    )
+    snapshot_id = create_manifest(candidate.manifest_body).snapshot_id
+    attached = None
+
+    def attach_identical_candidate_at_t4(stage) -> None:
+        nonlocal attached
+        if stage is module.PublisherFaultStage.BEFORE_CANDIDATE_ATTACH:
+            current = repository.get(run.run_id)
+            attached = repository.attach_candidate(
+                run.run_id,
+                snapshot_id,
+                expected_version=current.version,
+                now=T4,
+            )
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+        fault_injector=attach_identical_candidate_at_t4,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert attached is not None
+    assert result.published is True
+    assert result.run.finished_at_utc == attached.updated_at_utc
+    assert result.run.updated_at_utc == attached.updated_at_utc
+    assert result.publication is not None
+    assert result.publication.published_at_utc == attached.updated_at_utc
+
+
+def test_publisher_compares_manifest_identity_after_canonical_unicode_reparse(
+    tmp_path: Path,
+) -> None:
+    module, repository, store, run, authority, candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B5D",
+    )
+    decomposed = "Cafe\u0301-build"
+    assert decomposed != unicodedata.normalize("NFC", decomposed)
+    decomposed_source = "se\u0301lective-feed"
+    assert decomposed_source != unicodedata.normalize("NFC", decomposed_source)
+    input_binding = candidate.manifest_body.input_artifacts[0].model_copy(
+        update={"source": decomposed_source}
+    )
+    body = candidate.manifest_body.model_copy(
+        update={
+            "application_build_id": decomposed,
+            "input_artifacts": (input_binding,),
+        }
+    )
+    candidate = module.SnapshotCandidateV1(
+        manifest_body=body,
+        outputs=candidate.outputs,
+    )
+    authority = authority.model_copy(update={"input_artifacts": (input_binding,)})
+
+    result = module.SnapshotPublisher(
+        repository=repository,
+        store=store,
+        clock=lambda: T3,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert result.published is True
+    assert result.publication is not None
+    verified = store.verify_snapshot(result.publication.snapshot_id)
+    assert verified.manifest.body.application_build_id == unicodedata.normalize(
+        "NFC", decomposed
+    )
+    assert verified.manifest.body.input_artifacts[0].source == unicodedata.normalize(
+        "NFC", decomposed_source
+    )
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    [RunErrorCode.WORKER_FAILED, RunErrorCode.STALE_BOOK_GENERATION],
+)
+def test_publisher_catalog_result_rejects_open_or_candidate_free_model_construct(
+    tmp_path: Path,
+    error_code: RunErrorCode,
+) -> None:
+    module, repository, _store, run, _authority, _candidate = _publisher_case(
+        tmp_path,
+        run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B5E",
+    )
+    failed = repository.mark_failed(
+        run.run_id,
+        RunFailureV1(code=RunErrorCode.WORKER_FAILED),
+        expected_version=run.version,
+        now=T3,
+    )
+    if error_code is RunErrorCode.STALE_BOOK_GENERATION:
+        failed = failed.model_copy(
+            update={
+                "error_code": error_code,
+                "error_message": (
+                    "canonical book generation changed before publication"
+                ),
+            }
+        )
+    publication_result = PublicationResultV1.model_construct(
+        run=failed,
+        publication=None,
+        active=None,
+        published=False,
+        already_published=False,
+        rejection_code=error_code,
+    )
+    forged = module.SnapshotPublisherResultV1.model_construct(
+        result_code=module.PublisherResultCode.CATALOG_RESULT,
+        run=failed,
+        publication_result=publication_result,
+    )
+
+    with pytest.raises(ValueError, match="publication|rejection|stale|open"):
+        module.SnapshotPublisherResultV1.model_validate(
+            forged.model_dump(mode="python", warnings=False)
+        )
+
+
+def test_terminal_publication_retry_uses_run_scoped_atomic_resolver(
+    tmp_path: Path,
+) -> None:
+    module, _repository, store, run, authority, candidate = (
+        _cancelled_publication_rejection_case(
+            tmp_path,
+            run_id="run_01J5X5S8J5J8P7KQ4Y0T3T3B5F",
+        )
+    )
+
+    class ResolverOnlyRepository(RunRepository):
+        resolver_calls = 0
+
+        def get_active(self, _book_id):
+            raise AssertionError("terminal retry must not assemble split-read evidence")
+
+        def resolve_publication_result(self, run_id, *, already_published):
+            self.resolver_calls += 1
+            return super().resolve_publication_result(
+                run_id, already_published=already_published
+            )
+
+    resolver = ResolverOnlyRepository(tmp_path)
+    resolver.initialize()
+    result = module.SnapshotPublisher(
+        repository=resolver,
+        store=store,
+        clock=lambda: T4,
+    ).publish(run.run_id, candidate, authority=authority)
+
+    assert result.result_code is module.PublisherResultCode.CATALOG_RESULT
+    assert result.rejection_code is RunErrorCode.CANCELLED_BY_USER
+    assert result.run == run
+    assert resolver.resolver_calls == 0
