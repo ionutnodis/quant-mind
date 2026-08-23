@@ -39,7 +39,6 @@ from quantmind.snapshots.run_repository import (
     IllegalRunTransitionError,
     ManifestPublicationRecordV1,
     ManifestPublicationV1,
-    PublicationPrecommitValidationError,
     PublicationResultV1,
     RunDatabaseError,
     RunErrorCode,
@@ -61,6 +60,7 @@ from quantmind.snapshots.store import (
 _MAX_OUTPUTS: Final = 64
 _MAX_INPUTS: Final = 256
 _MAX_ARTIFACT_BYTES: Final = 64 * 1024 * 1024
+_MAX_AGGREGATE_INPUT_BYTES: Final = 64 * 1024 * 1024
 _MAX_AGGREGATE_OUTPUT_BYTES: Final = 64 * 1024 * 1024
 _MAX_MANIFEST_BODY_BYTES: Final = 1024 * 1024
 _MAX_AUTHORITY_BYTES: Final = 1024 * 1024
@@ -204,6 +204,12 @@ class PublicationAuthorityV1(FrozenContractBase):
             raise ValueError("authoritative input role/ID pairs must be unique")
         if keys != tuple(sorted(keys)):
             raise ValueError("authoritative inputs must be sorted by logical role and ID")
+        if (
+            canonical.byte_length
+            + sum(binding.object_ref.byte_length for binding in inputs)
+            > _MAX_AGGREGATE_INPUT_BYTES
+        ):
+            raise ValueError("authoritative artifact read bytes exceeds its bound")
         gate_codes = tuple(gate.gate_code for gate in gates)
         if len(gate_codes) != len(set(gate_codes)) or gate_codes != tuple(
             sorted(gate_codes)
@@ -875,6 +881,12 @@ class SnapshotPublisher:
         commit_time = max(self._now(), before_commit.updated_at_utc)
         self._inject(PublisherFaultStage.BEFORE_REPOSITORY_COMMIT)
         try:
+            # This is deliberately outside the SQLite write transaction: verification
+            # may read up to the bounded input set, while the repository owns only the
+            # short catalog mutation. The private-alpha trust boundary is the local
+            # SnapshotStore owner; unsupported direct filesystem writers are detected
+            # on read, but are not a cross-filesystem/SQLite atomicity guarantee.
+            SnapshotPublisher._validate_publication_precommit(self, publication)
             committed = self._revalidate_publication_result(
                 RunRepository.commit_publication(
                     self._repository,
@@ -882,15 +894,9 @@ class SnapshotPublisher:
                     publication,
                     expected_version=expected_version,
                     now=commit_time,
-                    _precommit_validator=lambda pending: (
-                        SnapshotPublisher._validate_publication_precommit(
-                            self,
-                            pending,
-                        )
-                    ),
                 )
             )
-        except PublicationPrecommitValidationError:
+        except (SnapshotStoreError, ManifestError, OSError):
             durable = RunRepository.get(self._repository, run_id)
             if durable.run_outcome is RunOutcome.SUCCEEDED:
                 raise

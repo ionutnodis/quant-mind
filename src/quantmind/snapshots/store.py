@@ -135,7 +135,12 @@ def _require_full_digest(value: str, label: str) -> str:
 
 
 class SnapshotStore:
-    """One no-clobber writer for content-addressed objects and manifests."""
+    """One product-owned no-clobber writer for content-addressed snapshot data.
+
+    The local private-alpha boundary trusts this store as the sole supported writer.
+    Direct same-user filesystem mutation is outside that boundary: reads detect it,
+    but cannot atomically coordinate it with the separate SQLite catalog.
+    """
 
     def __init__(
         self,
