@@ -2,13 +2,13 @@
 // spine) — Hedge's string-qty row variant as base (kept as text while
 // editing so a half-typed qty like "-" or "" doesn't get coerced to 0
 // mid-keystroke). WhatIf and Hedge both swap their bespoke row builders for
-// this component. A "Load current book" button pulls GET /api/book/current
-// (lib/book.ts) and hands the resulting snapshot to the parent via
+// this component. A "Load current book" button explicitly pins the live book
+// via POST /api/book/pin (lib/book.ts) and hands the snapshot to the parent via
 // `onUseCurrentBook` — the parent decides whether to populate rows for
 // display, remember the book_ref, or both (WhatIf/Hedge do both: show the
 // live positions AND submit by book_ref rather than re-deriving them).
 import { useMutation } from "@tanstack/react-query";
-import { getCurrentBook, type BookSnapshotOut } from "../lib/book";
+import { pinCurrentBook, type BookSnapshotOut } from "../lib/book";
 
 export interface BookRow {
   key: number;
@@ -50,7 +50,7 @@ interface BookBuilderProps {
 
 export function BookBuilder({ rows, onRowsChange, onUseCurrentBook, datalistId, label = "Book" }: BookBuilderProps) {
   const loadCurrent = useMutation({
-    mutationFn: getCurrentBook,
+    mutationFn: pinCurrentBook,
     onSuccess: onUseCurrentBook,
   });
 

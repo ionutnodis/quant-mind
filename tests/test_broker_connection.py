@@ -1,6 +1,5 @@
 import pytest
 
-from quantmind.broker.base import ExecutionDisabledError
 from quantmind.broker.connection import ConnectionManager
 
 
@@ -76,11 +75,10 @@ async def test_reconnects_after_drop():
     assert len(ib.connect_calls) == 2
 
 
-def test_place_order_is_disabled_in_v1():
+def test_read_only_broker_exposes_no_order_execution_surface():
     from quantmind.broker.base import ReadOnlyBroker
 
     class Stub(ReadOnlyBroker):
         pass
 
-    with pytest.raises(ExecutionDisabledError):
-        Stub().place_order(object())
+    assert not hasattr(Stub(), "place_order")

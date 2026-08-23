@@ -15,10 +15,9 @@ ids are content hashes (`BookSnapshot.create`), so re-pinning the identical
 book at the identical valuation_ts is just a no-op rewrite of the same file
 — never a race, never a partial write.
 
-`GET /api/book/current` reads the live broker's book and auto-pins it (wave-3
-plan: "live broker read + auto-pin") so a single request both answers "what's
-in the book right now" and hands back a `book_ref` usable immediately by
-whatif/hedge.
+`GET /api/book/current` is a read-only preview of the live broker book.
+`POST /api/book/pin` is the only operation that persists a snapshot and mints
+a `book_ref` usable by downstream analysis.
 """
 
 from __future__ import annotations
@@ -49,9 +48,9 @@ _BOOK_REF_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 class BookPinRequest(BaseModel):
-    # None -> pin the live broker's current book (or an empty book if no
-    # broker is configured). A posted list pins that instead — the "build a
-    # hypothetical book, then pin it" path.
+    # None -> pin the live broker's current book. A posted list pins that
+    # instead — including [] when the caller explicitly confirms an empty
+    # hypothetical book.
     positions: list[PositionIn] | None = None
 
 
@@ -71,6 +70,14 @@ class BookPositionOut(BaseModel):
 
 class BookSnapshotOut(BaseModel):
     snapshot_id: str
+    valuation_ts: str
+    base_currency: str
+    positions: list[BookPositionOut]
+
+
+class CurrentBookOut(BaseModel):
+    """A live broker preview. It is deliberately not a persisted snapshot."""
+
     valuation_ts: str
     base_currency: str
     positions: list[BookPositionOut]
@@ -103,7 +110,7 @@ def write_book(store, snapshot: BookSnapshot, legs: list[PositionIn] | None = No
     builds one `Position` per `PositionIn` in list order), carrying
     strike/expiry/right that `Position` itself doesn't have room for
     (Engineering Constraint 9's one Portfolio type). `None` (the live-broker
-    auto-pin path — a broker `Portfolio` was never built from `PositionIn`s)
+    pin path — a broker `Portfolio` was never built from `PositionIn`s)
     persists null option fields for every leg, even an OPT one; see
     `read_book_positions`'s honest-refusal guard for why that's the safe
     default rather than a silent stock mispricing (final-fix-wave finding 1)."""
@@ -160,7 +167,7 @@ def read_book_positions(store, snapshot_id: str) -> list[PositionIn]:
     given inline or via book_ref.
 
     A persisted OPT leg (`sec_type == "OPT"`) with a null strike/expiry can
-    only come from the live-broker auto-pin path (see `write_book`'s
+    only come from the live-broker pin path (see `write_book`'s
     docstring) — there is no way to price it correctly, and silently
     treating it as a bare underlier position would be exactly the silent
     wrong-numbers bug this fix wave exists to close. Refuse it honestly
@@ -198,11 +205,31 @@ def _snapshot_out(payload: dict) -> BookSnapshotOut:
     )
 
 
-async def _live_portfolio(request: Request, valuation_ts: str) -> Portfolio:
+async def _live_portfolio(request: Request) -> Portfolio:
     broker = request.app.state.broker
     if broker is None:
-        return Portfolio(positions=(), as_of=valuation_ts)
+        raise HTTPException(
+            503,
+            detail="broker unavailable; connect a broker or provide positions explicitly",
+        )
     return await broker.get_portfolio()
+
+
+def _current_out(portfolio: Portfolio, valuation_ts: str) -> CurrentBookOut:
+    return CurrentBookOut(
+        valuation_ts=valuation_ts,
+        base_currency="USD",
+        positions=[
+            BookPositionOut(
+                symbol=p.symbol,
+                qty=p.qty,
+                con_id=p.con_id,
+                sec_type=p.sec_type,
+                multiplier=p.multiplier,
+            )
+            for p in portfolio.positions
+        ],
+    )
 
 
 def _portfolio_from_positions(store, positions: list[PositionIn], valuation_ts: str) -> Portfolio:
@@ -257,16 +284,15 @@ async def pin_book(request: Request, req: BookPinRequest) -> BookSnapshotOut:
         portfolio = _portfolio_from_positions(store, req.positions, valuation_ts)
         return _pin_and_respond(store, portfolio, valuation_ts, legs=req.positions)
 
-    portfolio = await _live_portfolio(request, valuation_ts)
+    portfolio = await _live_portfolio(request)
     return _pin_and_respond(store, portfolio, valuation_ts)
 
 
-@router.get("/book/current", response_model=BookSnapshotOut)
-async def get_current_book(request: Request) -> BookSnapshotOut:
-    store = request.app.state.store
+@router.get("/book/current", response_model=CurrentBookOut)
+async def get_current_book(request: Request) -> CurrentBookOut:
     valuation_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    portfolio = await _live_portfolio(request, valuation_ts)
-    return _pin_and_respond(store, portfolio, valuation_ts)  # auto-pin (wave-3 plan)
+    portfolio = await _live_portfolio(request)
+    return _current_out(portfolio, valuation_ts)
 
 
 @router.get("/book/{snapshot_id}", response_model=BookSnapshotOut)

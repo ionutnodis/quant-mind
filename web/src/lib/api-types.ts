@@ -723,6 +723,18 @@ export interface components {
             universe: string;
         };
         /**
+         * CurrentBookOut
+         * @description A live broker preview. It is deliberately not a persisted snapshot.
+         */
+        CurrentBookOut: {
+            /** Base Currency */
+            base_currency: string;
+            /** Positions */
+            positions: components["schemas"]["BookPositionOut"][];
+            /** Valuation Ts */
+            valuation_ts: string;
+        };
+        /**
          * ExpiryBucketsOut
          * @description Requirement 5: option legs bucketed by days-to-expiry. Only legs that
          *     resolved to a priceable BookLeg (matching cached-chain IV) are bucketed —
@@ -1663,7 +1675,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BookSnapshotOut"];
+                    "application/json": components["schemas"]["CurrentBookOut"];
                 };
             };
         };

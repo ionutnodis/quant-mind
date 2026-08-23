@@ -421,6 +421,59 @@ def test_hedge_book_ref_resolves_to_the_same_result_as_inline_book(client):
     assert r_ref.json() == r_inline.json()
 
 
+def test_hedge_refuses_inline_option_legs_until_contract_repricing_exists(client):
+    r = client.post(
+        "/api/hedge",
+        json={
+            "book": [
+                {
+                    "symbol": "SPY",
+                    "qty": -1,
+                    "strike": 100,
+                    "expiry": "20260918",
+                    "right": "C",
+                    "multiplier": 100,
+                }
+            ],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["QQQ"],
+            "years": 1,
+        },
+    )
+    assert r.status_code == 422
+    assert "cannot value option" in r.json()["detail"].lower()
+
+
+def test_hedge_refuses_option_legs_resolved_from_book_ref(client):
+    pinned = client.post(
+        "/api/book/pin",
+        json={
+            "positions": [
+                {
+                    "symbol": "SPY",
+                    "qty": -1,
+                    "strike": 100,
+                    "expiry": "20260918",
+                    "right": "P",
+                    "multiplier": 100,
+                }
+            ]
+        },
+    ).json()
+
+    r = client.post(
+        "/api/hedge",
+        json={
+            "book_ref": pinned["snapshot_id"],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["QQQ"],
+            "years": 1,
+        },
+    )
+    assert r.status_code == 422
+    assert "cannot value option" in r.json()["detail"].lower()
+
+
 def test_hedge_unknown_book_ref_is_422(client):
     r = client.post(
         "/api/hedge",
@@ -469,6 +522,26 @@ def test_leverage_single_name_has_no_diversification_ratio(client):
     r = client.post("/api/leverage", json={"book": [{"symbol": "QQQ", "qty": 10}]})
     assert r.status_code == 200, r.text
     assert r.json()["diversification_ratio"] is None  # needs >= 2 instruments
+
+
+def test_leverage_refuses_option_legs_until_contract_repricing_exists(client):
+    r = client.post(
+        "/api/leverage",
+        json={
+            "book": [
+                {
+                    "symbol": "SPY",
+                    "qty": 1,
+                    "strike": 100,
+                    "expiry": "20260918",
+                    "right": "C",
+                    "multiplier": 100,
+                }
+            ]
+        },
+    )
+    assert r.status_code == 422
+    assert "cannot value option" in r.json()["detail"].lower()
 
 
 def test_leverage_unknown_symbol_is_422(client):

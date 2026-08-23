@@ -7,7 +7,7 @@
 //
 // Book builder (wave-3 Task A1's book-flow spine): the shared BookBuilder
 // component replaces WhatIf's bespoke row builder — "Load current book"
-// pulls GET /api/book/current and submits by `book_ref` so the backend
+// explicitly pins the live book and submits by `book_ref` so the backend
 // reads the authoritative pinned snapshot directly; editing any row after a
 // load reverts to submitting the edited `positions` inline (see
 // `handleRowsChange` below).

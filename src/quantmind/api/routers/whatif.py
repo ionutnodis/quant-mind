@@ -20,7 +20,14 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
-from quantmind.api.routers._shared import PositionIn, clean, iso, read_close_series, weighted_portfolio_returns
+from quantmind.api.routers._shared import (
+    PositionIn,
+    clean,
+    iso,
+    read_close_series,
+    refuse_unsupported_contract_legs,
+    weighted_portfolio_returns,
+)
 from quantmind.api.routers.book import read_book_positions
 from quantmind.risk.montecarlo import simulate_terminal_returns
 from quantmind.risk.returns import (
@@ -127,6 +134,7 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
         raise HTTPException(422, detail="book_ref resolved to an empty book")
     if len(positions) > _MAX_POSITIONS:
         raise HTTPException(422, detail=f"book has {len(positions)} positions; max {_MAX_POSITIONS}")
+    refuse_unsupported_contract_legs(positions, route_name="What-If")
 
     requested = [p.symbol for p in positions]
     unique_needed = list(dict.fromkeys(requested))

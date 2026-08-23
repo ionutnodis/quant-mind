@@ -116,6 +116,36 @@ def test_forged_host_header_is_rejected(client):
     assert r2.status_code == 403
 
 
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Origin": "https://evil.example.com"},
+        {"Sec-Fetch-Site": "cross-site"},
+        {"Origin": "null"},
+    ],
+)
+def test_cross_site_browser_requests_are_rejected_even_with_valid_token(client, headers):
+    r = client.get("/api/health", headers=headers)
+    assert r.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    ],
+)
+def test_allowed_local_browser_origins_are_accepted(client, origin):
+    r = client.get(
+        "/api/health",
+        headers={"Origin": origin, "Sec-Fetch-Site": "same-origin"},
+    )
+    assert r.status_code == 200
+
+
 def test_simulate_bounds_reject_resource_exhaustion(client):
     fit = client.post("/api/models/ou/fit", json={"symbol": "SPY", "years": 1}).json()
     r = client.post(

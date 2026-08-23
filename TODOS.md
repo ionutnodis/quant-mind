@@ -1,12 +1,13 @@
 # TODOS
 
-## Unified options-aware ES (v2)
+## Unified options-aware ES (M3)
 - **What:** Replace the two-view M1 risk report (returns-based ES + separate options stress grid) with one total-book distribution: simulate joint spot/vol paths and reprice option legs on each path.
 - **Why:** M1's two views are honest but not additive; a single distribution is the only true "portfolio ES" for a book with an options overlay.
 - **Pros:** ES/Monte Carlo numbers become decision-grade for the whole book, not just the equity sleeve.
 - **Cons:** Needs vol-surface dynamics assumptions and meaningful compute; easy to build wrong — validate against the stress grid first.
 - **Context:** Design doc "Outside-voice hardening" item 13 (Codex finding #4). Prereq: M1 stress grid and Monte Carlo working and trusted.
-- **Depends on:** M1 risk core complete; QuantLib repricing validated.
+- **Depends on:** M1.5 deterministic whole-book scenario and local American/dividend-aware
+  pricer validated; sufficient rights-cleared volatility-factor history.
 
 ## Liquidity/borrow/tax-aware hedge costs
 - **What:** Extend v1 hedge sizing (integer contracts, spread-aware cost, IBKR what-if margin) with open interest/liquidity screens, borrow costs for shorts, and tax-lot awareness.
@@ -40,20 +41,6 @@
 - **Context:** Design doc Open Question 9.
 - **Depends on:** Options chain ingestion working (to know exactly which IV series to backfill).
 
-## In-app sync action (design-review deferred, 2026-07-25)
-- **What:** POST /api/sync endpoint (job-manager backed, subprocess or in-process broker) + a sync button in the Today staleness banner and empty state.
-- **Why:** The UI currently tells the user to run a terminal command — poor workbench utility language (design-review FINDING-005).
-- **Depends on:** JobManager (exists); decide subprocess vs in-process broker connect.
-
-## Responsive layout pass (design-review deferred, 2026-07-25)
-- **What:** Breakpoint behavior for sidebar, tile strip, and panels below ~1024px.
-- **Why:** Desktop-first is deliberate (personal tool, external monitor), but a laptop-width squeeze currently gets no accommodations.
-
-## Pre-wave-3 consolidation pass (final-review mandated, 2026-07-25)
-- **What:** Extract shared `api/routers/_shared.py` (`_clean`, `_iso`, `_read_close_series`, the qty-nonzero PositionIn model — currently 7/4/2/2 duplicated copies); shared `BookBuilder` React component (Hedge's string-qty variant as base — WhatIf and Hedge have diverging row-builders); align Hedge's degenerate-input 422s (gross<=0, non-finite closes) with WhatIf's named-422 policy; narrow the Engle-Granger broad except.
-- **Why:** Wave-2's exclusive-file-ownership rules tripled helper duplication (right tradeoff then, wrong to keep); any NaN-policy change now needs 7 edits; a third row-builder copy in wave 3 locks in drift.
-- **Context:** Wave-2 final whole-branch review M1/M2/M5; ledger history in git (docs/plans/2026-07-25-wave2.md).
-
 ## Black-Litterman / MVO allocation lens (eng-review deferred, 2026-07-26)
 - **What:** Reverse-optimized equilibrium weights vs current weights, with optional view injection (Black-Litterman); mean-variance efficient frontier + QP as a later add.
 - **Why:** A "does my tilt agree with equilibrium + my views" sanity check. Deferred from the dashboard-expansion program (scope B): heaviest subsystem for the lightest stated purpose (a lens, not an execution target) for a discretionary options book.
@@ -61,11 +48,3 @@
 - **Cons:** Needs a covariance estimator (Ledoit-Wolf), a market proxy (Roll's critique), and a QP dep; decorative unless you actually rebalance toward weights.
 - **Context:** Design doc `nodisionut-expand-dashboard-from-video-design-*.md` (D1, NOT-in-scope). Sibling video #100.
 - **Depends on:** analytics core (returns/covariance) shipped; a real desire for an allocation lens.
-
-## Return-on-equity base + options-aware total-book analytics (eng-review deferred, 2026-07-26)
-- **What:** A true return-on-equity denominator (cash/margin/net-liquidation) and options-aware total-book returns, so vol-drag CAGR, drawdown, and leverage-headroom reflect real equity, not per-gross-dollar equity-sleeve P&L.
-- **Why:** `weighted_portfolio_returns` (`_shared.py:135`) is per-gross-dollar; `BookBuilder` is equity-only. v1 survival views are honest but equity-sleeve; a levered/short/options book needs an equity base to be decision-grade (Codex outside voice H2/H3).
-- **Pros:** Makes CAGR/drawdown/leverage numbers real for the actual book.
-- **Cons:** Needs account NAV/cash/margin data and option-leg return modeling; overlaps the options-aware ES v2 work.
-- **Context:** Design doc H2/H3. Bundle with "Unified options-aware ES (v2)" above.
-- **Depends on:** v1 equity-sleeve survival views shipped and used; account-equity data path.

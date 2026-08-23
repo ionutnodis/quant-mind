@@ -10,6 +10,8 @@ structured 422, never a 500 (repo-wide policy, pattern: routers/whatif.py).
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -76,12 +78,46 @@ def test_pin_unknown_symbol_is_422(store):
     assert "NOPE" in r.json()["detail"]
 
 
-def test_pin_no_broker_no_positions_is_empty_book(store):
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("qty", float("nan")),
+        ("qty", float("inf")),
+        ("qty", float("-inf")),
+        ("strike", float("nan")),
+        ("multiplier", float("inf")),
+    ],
+)
+def test_pin_rejects_nonfinite_position_terms_before_persisting(store, field, value):
+    # An API boundary must never mint a persisted book whose quantity or
+    # option terms poison downstream calculations and serialize as null.
+    client = _client(store)
+    position = {"symbol": "SPY", "qty": 1, field: value}
+
+    response = client.post(
+        "/api/book/pin",
+        content=json.dumps({"positions": [position]}, allow_nan=True),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert "finite" in response.json()["detail"][0]["msg"]
+    assert not (store.root / "books").exists()
+
+
+def test_pin_no_broker_no_positions_is_503_and_does_not_persist(store):
     client = _client(store, broker=None)
     r = client.post("/api/book/pin", json={})
+    assert r.status_code == 503
+    assert "broker" in r.json()["detail"].lower()
+    assert not (store.root / "books").exists()
+
+
+def test_pin_explicit_empty_positions_is_a_confirmed_empty_book(store):
+    client = _client(store, broker=None)
+    r = client.post("/api/book/pin", json={"positions": []})
     assert r.status_code == 200
-    body = r.json()
-    assert body["positions"] == []
+    assert r.json()["positions"] == []
 
 
 def test_pin_option_leg_defaults_multiplier_100(store):
@@ -121,19 +157,15 @@ def test_get_unknown_book_id_is_422(store):
     assert "does-not-exist" in r.json()["detail"]
 
 
-def test_current_book_with_no_broker_is_empty_and_auto_pinned(store):
+def test_current_book_with_no_broker_is_503_and_does_not_persist(store):
     client = _client(store, broker=None)
     r = client.get("/api/book/current")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["positions"] == []
-    # auto-pinned: the same id resolves via GET /api/book/{id}.
-    r2 = client.get(f"/api/book/{body['snapshot_id']}")
-    assert r2.status_code == 200
-    assert r2.json() == body
+    assert r.status_code == 503
+    assert "broker" in r.json()["detail"].lower()
+    assert not (store.root / "books").exists()
 
 
-def test_current_book_with_broker_reads_live_positions_and_auto_pins(store):
+def test_current_book_with_broker_is_a_read_only_preview(store):
     portfolio = Portfolio(
         positions=(Position(con_id=1, symbol="SPY", qty=7, sec_type="STK", multiplier=1.0),),
         as_of="2026-07-24T00:00:00Z",
@@ -145,10 +177,22 @@ def test_current_book_with_broker_reads_live_positions_and_auto_pins(store):
     assert len(body["positions"]) == 1
     assert body["positions"][0]["symbol"] == "SPY"
     assert body["positions"][0]["qty"] == 7
+    assert "snapshot_id" not in body
+    assert not (store.root / "books").exists()
 
-    r2 = client.get(f"/api/book/{body['snapshot_id']}")
-    assert r2.status_code == 200
-    assert r2.json() == body
+
+def test_pin_current_book_with_broker_persists_a_resolvable_snapshot(store):
+    portfolio = Portfolio(
+        positions=(Position(con_id=1, symbol="SPY", qty=7, sec_type="STK", multiplier=1.0),),
+        as_of="2026-07-24T00:00:00Z",
+    )
+    client = _client(store, broker=FakeBroker(portfolio))
+    pinned = client.post("/api/book/pin", json={})
+    assert pinned.status_code == 200
+
+    r = client.get(f"/api/book/{pinned.json()['snapshot_id']}")
+    assert r.status_code == 200
+    assert r.json() == pinned.json()
 
 
 def test_repinning_identical_content_at_the_same_valuation_ts_is_idempotent(store):
@@ -282,14 +326,14 @@ def test_expiry_rejects_unparseable_form(store):
 def test_broker_sourced_option_leg_without_strike_is_422_on_book_ref_resolution(store):
     # A live broker Position carries no strike/expiry/right (portfolio.py's
     # Position type doesn't have those fields) — if it happens to be an OPT
-    # leg, auto-pinning it must not silently let downstream consumers treat
+    # leg, pinning it must not silently let downstream consumers treat
     # it as a bare stock position (finding 1.iv: honest refusal).
     portfolio = Portfolio(
         positions=(Position(con_id=1, symbol="SPY", qty=2, sec_type="OPT", multiplier=100.0),),
         as_of="2026-07-24T00:00:00Z",
     )
     client = _client(store, broker=FakeBroker(portfolio))
-    r = client.get("/api/book/current")
+    r = client.post("/api/book/pin", json={})
     assert r.status_code == 200
     snapshot_id = r.json()["snapshot_id"]
 

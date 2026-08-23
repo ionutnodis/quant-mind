@@ -1,0 +1,33 @@
+{
+  "schema_version": "linear_book_risk_v1",
+  "covariance": {
+    "schema_version": "production_covariance_v1",
+    "risk_entities": [
+      {"risk_entity_id": "TECH_USD", "return_basis": "BASE_CURRENCY_SIMPLE_RETURN"},
+      {"risk_entity_id": "ENERGY_EUR", "return_basis": "BASE_CURRENCY_SIMPLE_RETURN"}
+    ],
+    "factor_names": ["MARKET", "SEMI_THEME"],
+    "loadings": [[1.0, 0.5], [0.8, -0.2]],
+    "factor_covariance": [[0.0001, 0.0], [0.0, 0.0004]],
+    "residual_covariance": [[0.0001, 0.00002], [0.00002, 0.00009]],
+    "production_covariance": [[0.0003, 0.00006], [0.00006, 0.00017]],
+    "covariance_unit": "DAILY_SIMPLE_RETURN_COVARIANCE",
+    "annualization_factor": 252,
+    "model_version": "synthetic_factor_model_v1"
+  },
+  "exposures": [
+    {"risk_entity_id":"TECH_USD","signed_delta_equivalent_amount":600000.0,"nlv":1000000.0,"per_nlv_exposure":0.6,"amount_unit":"BASE_CURRENCY_DELTA_EQUIVALENT","nlv_unit":"BASE_CURRENCY_NLV","per_nlv_unit":"BASE_CURRENCY_DELTA_EQUIVALENT_PER_NLV"},
+    {"risk_entity_id":"ENERGY_EUR","signed_delta_equivalent_amount":-200000.0,"nlv":1000000.0,"per_nlv_exposure":-0.2,"amount_unit":"BASE_CURRENCY_DELTA_EQUIVALENT","nlv_unit":"BASE_CURRENCY_NLV","per_nlv_unit":"BASE_CURRENCY_DELTA_EQUIVALENT_PER_NLV"}
+  ],
+  "total_modeled_variance": 0.0001004,
+  "total_modeled_variance_unit": "PER_NLV_DAILY_SIMPLE_RETURN_VARIANCE",
+  "factor_variance_contributions": [
+    {"factor_name":"MARKET","variance_contribution":0.00001936,"unit":"PER_NLV_DAILY_SIMPLE_RETURN_VARIANCE"},
+    {"factor_name":"SEMI_THEME","variance_contribution":0.00004624,"unit":"PER_NLV_DAILY_SIMPLE_RETURN_VARIANCE"}
+  ],
+  "unexplained_residual": {"factor_name":"UNEXPLAINED_RESIDUAL","variance_contribution":0.0000348,"unit":"PER_NLV_DAILY_SIMPLE_RETURN_VARIANCE"},
+  "entity_variance_shares": [
+    {"risk_entity_id":"TECH_USD","variance_share":1.0039840637450199,"unit":"FRACTION_OF_TOTAL_MODELED_VARIANCE"},
+    {"risk_entity_id":"ENERGY_EUR","variance_share":-0.00398406374501992,"unit":"FRACTION_OF_TOTAL_MODELED_VARIANCE"}
+  ]
+}

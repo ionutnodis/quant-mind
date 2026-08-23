@@ -177,7 +177,7 @@ test("422 detail surfaces instead of crashing", async () => {
 });
 
 // --- book_ref (wave-3 Task A1's book-flow spine): "Load current book" ---
-// Generous findBy timeout below: resolving GET /api/book/current through
+// Generous findBy timeout below: resolving POST /api/book/pin through
 // MSW's fetch interceptor can take longer than testing-library's 1000ms
 // default in this environment, unlike a same-tick state update.
 const BOOK_FETCH_TIMEOUT = { timeout: 5000 };
@@ -191,7 +191,10 @@ const CURRENT_BOOK = {
 
 test("load current book populates rows and runs by book_ref", async () => {
   server.use(
-    http.get("/api/book/current", () => HttpResponse.json(CURRENT_BOOK)),
+    http.post("/api/book/pin", async ({ request }) => {
+      expect(await request.json()).toEqual({});
+      return HttpResponse.json(CURRENT_BOOK);
+    }),
     http.post("/api/hedge", async ({ request }) => {
       const body = (await request.json()) as { book_ref?: string; book?: unknown };
       expect(body.book_ref).toBe("snap-abc123");
@@ -213,7 +216,10 @@ test("load current book populates rows and runs by book_ref", async () => {
 
 test("editing a row after loading the current book reverts to inline positions", async () => {
   server.use(
-    http.get("/api/book/current", () => HttpResponse.json(CURRENT_BOOK)),
+    http.post("/api/book/pin", async ({ request }) => {
+      expect(await request.json()).toEqual({});
+      return HttpResponse.json(CURRENT_BOOK);
+    }),
     http.post("/api/hedge", async ({ request }) => {
       const body = (await request.json()) as { book_ref?: string; book?: { symbol: string; qty: number }[] };
       expect(body.book_ref).toBeUndefined();

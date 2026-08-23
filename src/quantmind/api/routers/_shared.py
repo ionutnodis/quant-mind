@@ -100,9 +100,9 @@ class PositionIn(BaseModel):
 
     symbol: str = Field(..., min_length=1)
     qty: float
-    # Optional option-leg fields (wave-3 Task A3 coordination point) — unused
-    # by whatif/hedge/book today, present so A3's book-greeks endpoint never
-    # needs to edit this file to extend the shared request contract.
+    # Optional option-leg fields (wave-3 Task A3 coordination point). Legacy
+    # linear routes inspect them only to fail closed until contract repricing
+    # exists; book-greeks consumes the full contract.
     strike: float | None = None
     expiry: str | None = None
     right: Literal["C", "P"] | None = None
@@ -113,6 +113,13 @@ class PositionIn(BaseModel):
     def _qty_nonzero(cls, v: float) -> float:
         if v == 0:
             raise ValueError("qty must be nonzero")
+        return v
+
+    @field_validator("qty", "strike", "multiplier")
+    @classmethod
+    def _numeric_terms_are_finite(cls, v: float | None, info) -> float | None:
+        if v is not None and not math.isfinite(v):
+            raise ValueError(f"{info.field_name} must be finite")
         return v
 
     @field_validator("expiry")
@@ -130,6 +137,35 @@ class PositionIn(BaseModel):
             except ValueError:
                 continue
         raise ValueError(f"expiry must be YYYYMMDD or YYYY-MM-DD, got {v!r}")
+
+
+def refuse_unsupported_contract_legs(
+    positions: Sequence[PositionIn], *, route_name: str
+) -> None:
+    """Stop legacy share-return routes from silently treating contracts as stock.
+
+    These routes do not consume option terms or multipliers. Until they use a
+    validated contract pricer, any option-shaped leg or non-unit multiplier
+    makes the whole result unsupported rather than partially correct.
+    """
+    unsupported = sorted(
+        {
+            p.symbol
+            for p in positions
+            if p.right is not None
+            or p.strike is not None
+            or p.expiry is not None
+            or (p.multiplier is not None and not math.isclose(p.multiplier, 1.0))
+        }
+    )
+    if unsupported:
+        raise HTTPException(
+            422,
+            detail=(
+                f"{route_name} cannot value option contracts or non-unit-multiplier legs "
+                f"with the legacy share-return model: {unsupported}"
+            ),
+        )
 
 
 def weighted_portfolio_returns(returns: pd.DataFrame, symbols: list[str], weights: np.ndarray) -> pd.Series:

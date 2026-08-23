@@ -69,7 +69,14 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
 from quantmind.analytics.correlation import rolling_correlation
-from quantmind.api.routers._shared import PositionIn, clean, iso, read_close_series, weighted_portfolio_returns
+from quantmind.api.routers._shared import (
+    PositionIn,
+    clean,
+    iso,
+    read_close_series,
+    refuse_unsupported_contract_legs,
+    weighted_portfolio_returns,
+)
 from quantmind.api.routers.book import read_book_positions
 from quantmind.hedge.core import diversification_ratio, leverage_headroom, max_drawdown
 from quantmind.risk.returns import InsufficientDataError, historical_es, rolling_beta
@@ -195,6 +202,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         raise HTTPException(422, detail="book_ref resolved to an empty book")
     if len(book_positions) > _MAX_BOOK_POSITIONS:
         raise HTTPException(422, detail=f"book has {len(book_positions)} positions; max {_MAX_BOOK_POSITIONS}")
+    refuse_unsupported_contract_legs(book_positions, route_name="Hedge")
 
     unique_book = list(dict.fromkeys(p.symbol for p in book_positions))
     qtys: dict[str, float] = {}
@@ -390,6 +398,7 @@ def leverage(request: Request, req: LeverageRequest) -> LeverageResponse:
         raise HTTPException(422, detail="book_ref resolved to an empty book")
     if len(book_positions) > _MAX_BOOK_POSITIONS:
         raise HTTPException(422, detail=f"book has {len(book_positions)} positions; max {_MAX_BOOK_POSITIONS}")
+    refuse_unsupported_contract_legs(book_positions, route_name="Leverage")
 
     unique_book = list(dict.fromkeys(p.symbol for p in book_positions))
     qtys: dict[str, float] = {}
