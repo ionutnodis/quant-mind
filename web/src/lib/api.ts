@@ -2,6 +2,8 @@
 // backend usually runs tokenless. Types are hand-minimal until the
 // openapi-typescript generation step replaces them (drift test guards it).
 
+import type { components } from "./api-types";
+
 export interface Tile {
   symbol: string;
   last_close: number;
@@ -53,8 +55,11 @@ export interface ModelSchema {
   factor?: { kind: string; units: string; dt: number };
 }
 
+export type SetupStatus = components["schemas"]["SetupStatus"];
+
 export const api = {
   brief: () => get<Brief>("/api/brief"),
   health: () => get<{ status: string }>("/api/health"),
   models: () => get<ModelSchema[]>("/api/models"),
+  setupStatus: () => get<SetupStatus>("/api/setup/status"),
 };

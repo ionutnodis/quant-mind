@@ -30,7 +30,11 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
 from quantmind.api.routers._shared import PositionIn, clean, iso
-from quantmind.api.routers.book import read_book_positions
+from quantmind.api.routers.book import (
+    read_book,
+    read_book_positions,
+    validate_pinned_book_scope,
+)
 from quantmind.datastore.options_store import OptionsStore
 from quantmind.exposure.book_greeks import (
     BookLeg,
@@ -214,7 +218,7 @@ def _spot(store, symbol_map: dict[str, int], symbol: str) -> tuple[float, pd.Tim
         raise HTTPException(422, detail=f"unknown symbol: {symbol!r}")
     try:
         bars, _ = store.read_bars(con_id=symbol_map[symbol], bar_size="1d")
-    except FileNotFoundError:
+    except (FileNotFoundError, KeyError, OSError, ValueError):
         raise HTTPException(422, detail=f"symbol {symbol!r} has no cached bars")
     if bars.empty:
         raise HTTPException(422, detail=f"symbol {symbol!r} has no cached history")
@@ -225,18 +229,36 @@ def _spot(store, symbol_map: dict[str, int], symbol: str) -> tuple[float, pd.Tim
     return last, close.index[-1]
 
 
-def _find_quote_row(df: pd.DataFrame, expiry: str, strike: float, right: str) -> pd.Series | None:
+def _find_quote_row(
+    df: pd.DataFrame,
+    expiry: str,
+    strike: float,
+    right: str,
+    con_id: int | None = None,
+) -> pd.Series | None:
     mask = (
         (df["expiry"].astype(str) == expiry)
         & (df["right"].astype(str) == right)
         & np.isclose(df["strike"].astype(float), strike, atol=1e-6)
     )
     matched = df.loc[mask]
-    return matched.iloc[0] if not matched.empty else None
+    if matched.empty:
+        return None
+    if con_id is not None:
+        if "con_id" not in matched.columns:
+            return None
+        contract_ids = pd.to_numeric(matched["con_id"], errors="coerce")
+        exact = matched.loc[contract_ids == con_id]
+        return exact.iloc[0] if len(exact) == 1 else None
+    return matched.iloc[0] if len(matched) == 1 else None
 
 
 def _leg_to_book_leg(
-    p: PositionIn, options_store: OptionsStore, spot: float, as_of: date
+    p: PositionIn,
+    options_store: OptionsStore,
+    spot: float,
+    as_of: date,
+    contract_con_id: int | None = None,
 ) -> BookLeg:
     if p.right is None:
         return BookLeg(underlier=p.symbol, qty=p.qty, is_option=False, spot=spot, r=_RISK_FREE_RATE)
@@ -251,7 +273,13 @@ def _leg_to_book_leg(
             422, detail=f"no cached option chain for underlier {p.symbol!r} — run options_sync_cli first"
         )
     chain_df, _ = options_store.read_chain(p.symbol)
-    row = _find_quote_row(chain_df, expiry=p.expiry, strike=p.strike, right=p.right)
+    row = _find_quote_row(
+        chain_df,
+        expiry=p.expiry,
+        strike=p.strike,
+        right=p.right,
+        con_id=contract_con_id,
+    )
     if row is None:
         raise HTTPException(
             422,
@@ -299,7 +327,30 @@ def book_greeks(request: Request, req: BookGreeksRequest) -> BookGreeksResponse:
     store = request.app.state.store
     options_store = _options_store(request)
 
-    positions = req.positions if req.positions is not None else read_book_positions(store, req.book_ref)
+    use_persisted_contract_ids = False
+    if req.positions is not None:
+        positions = req.positions
+    else:
+        pinned = read_book(store, req.book_ref)
+        validate_pinned_book_scope(request.app.state, pinned)
+        positions = read_book_positions(store, req.book_ref)
+        use_persisted_contract_ids = pinned["source"] == "live_ibkr"
+
+    unsupported_security_types = sorted(
+        {
+            getattr(position, "sec_type", "STK")
+            for position in positions
+            if getattr(position, "sec_type", "STK") not in {"STK", "OPT"}
+        }
+    )
+    if unsupported_security_types:
+        raise HTTPException(
+            422,
+            detail=(
+                "book Greeks do not support security types: "
+                f"{unsupported_security_types}"
+            ),
+        )
 
     symbol_map = store.read_symbol_map()
     as_of = date.today()
@@ -311,7 +362,18 @@ def book_greeks(request: Request, req: BookGreeksRequest) -> BookGreeksResponse:
             spots[p.symbol] = spot
             latest_dates.append(last_date)
 
-    legs = [_leg_to_book_leg(p, options_store, spots[p.symbol], as_of) for p in positions]
+    legs = [
+        _leg_to_book_leg(
+            p,
+            options_store,
+            spots[p.symbol],
+            as_of,
+            contract_con_id=(
+                getattr(p, "con_id", None) if use_persisted_contract_ids else None
+            ),
+        )
+        for p in positions
+    ]
 
     underlyings = compute_book_greeks(legs, betas=req.betas)
     grid = aggregate_book_stress_grid(legs)

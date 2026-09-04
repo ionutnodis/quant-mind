@@ -14,6 +14,10 @@
             ],
             "title": "Buying Power"
           },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
           "gross_position_value": {
             "anyOf": [
               {
@@ -52,9 +56,29 @@
           "net_liquidation",
           "total_cash_value",
           "gross_position_value",
-          "buying_power"
+          "buying_power",
+          "currency"
         ],
         "title": "AccountOut",
+        "type": "object"
+      },
+      "ApiReadiness": {
+        "properties": {
+          "status": {
+            "const": "ready",
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "version"
+        ],
+        "title": "ApiReadiness",
         "type": "object"
       },
       "AttributionOut": {
@@ -491,6 +515,28 @@
             ],
             "title": "Con Id"
           },
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
+          "exchange": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exchange"
+          },
           "expiry": {
             "anyOf": [
               {
@@ -555,11 +601,187 @@
         "title": "BookPositionOut",
         "type": "object"
       },
+      "BookReadiness": {
+        "properties": {
+          "account_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Fingerprint"
+          },
+          "age_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Age Days"
+          },
+          "broker_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "paper",
+                  "live",
+                  "custom"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Broker Mode"
+          },
+          "latest_snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Snapshot Id"
+          },
+          "option_positions": {
+            "title": "Option Positions",
+            "type": "integer"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "empty_book",
+                  "stale_snapshot",
+                  "invalid_timestamp",
+                  "legacy_scope",
+                  "account_mismatch",
+                  "mode_mismatch",
+                  "unsupported_currency",
+                  "unsupported_security_type"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "snapshot_count": {
+            "title": "Snapshot Count",
+            "type": "integer"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "live_ibkr",
+                  "manual",
+                  "legacy"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "status": {
+            "enum": [
+              "not_pinned",
+              "stale",
+              "unsupported",
+              "ready"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "unsupported_currencies": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unsupported Currencies",
+            "type": "array"
+          },
+          "unsupported_security_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unsupported Security Types",
+            "type": "array"
+          },
+          "valuation_ts": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valuation Ts"
+          }
+        },
+        "required": [
+          "status",
+          "snapshot_count",
+          "latest_snapshot_id",
+          "valuation_ts",
+          "option_positions",
+          "age_days",
+          "source",
+          "account_fingerprint",
+          "broker_mode",
+          "unsupported_currencies",
+          "unsupported_security_types",
+          "reason"
+        ],
+        "title": "BookReadiness",
+        "type": "object"
+      },
       "BookSnapshotOut": {
         "properties": {
+          "account_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Fingerprint"
+          },
           "base_currency": {
             "title": "Base Currency",
             "type": "string"
+          },
+          "broker_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "paper",
+                  "live",
+                  "custom"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Broker Mode"
           },
           "positions": {
             "items": {
@@ -570,6 +792,16 @@
           },
           "snapshot_id": {
             "title": "Snapshot Id",
+            "type": "string"
+          },
+          "source": {
+            "default": "legacy",
+            "enum": [
+              "live_ibkr",
+              "manual",
+              "legacy"
+            ],
+            "title": "Source",
             "type": "string"
           },
           "valuation_ts": {
@@ -635,6 +867,59 @@
           "as_of"
         ],
         "title": "BriefResponse",
+        "type": "object"
+      },
+      "BrokerReadiness": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "paper",
+                  "live",
+                  "custom"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "provider": {
+            "const": "IBKR",
+            "default": "IBKR",
+            "title": "Provider",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "connecting",
+              "connected",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "mode",
+          "error"
+        ],
+        "title": "BrokerReadiness",
         "type": "object"
       },
       "Candle": {
@@ -2132,6 +2417,83 @@
         "title": "LeverageResponse",
         "type": "object"
       },
+      "MacroDataReadiness": {
+        "properties": {
+          "age_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Age Days"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "corrupt_series": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Corrupt Series",
+            "type": "array"
+          },
+          "missing_series": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Series",
+            "type": "array"
+          },
+          "ready_series": {
+            "title": "Ready Series",
+            "type": "integer"
+          },
+          "required_series": {
+            "title": "Required Series",
+            "type": "integer"
+          },
+          "stale_series": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Stale Series",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "empty",
+              "incomplete",
+              "stale",
+              "ready"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "required_series",
+          "ready_series",
+          "missing_series",
+          "stale_series",
+          "corrupt_series",
+          "as_of",
+          "age_days"
+        ],
+        "title": "MacroDataReadiness",
+        "type": "object"
+      },
       "MacroResponse": {
         "properties": {
           "as_of": {
@@ -2196,6 +2558,88 @@
           "missing"
         ],
         "title": "MacroResponse",
+        "type": "object"
+      },
+      "MarketDataReadiness": {
+        "properties": {
+          "age_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Age Days"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "corrupt_symbols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Corrupt Symbols",
+            "type": "array"
+          },
+          "missing_symbols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Symbols",
+            "type": "array"
+          },
+          "ready_symbols": {
+            "title": "Ready Symbols",
+            "type": "integer"
+          },
+          "series": {
+            "title": "Series",
+            "type": "integer"
+          },
+          "stale_symbols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Stale Symbols",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "empty",
+              "incomplete",
+              "stale",
+              "ready"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "symbols": {
+            "title": "Symbols",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "symbols",
+          "ready_symbols",
+          "missing_symbols",
+          "stale_symbols",
+          "corrupt_symbols",
+          "series",
+          "as_of",
+          "age_days"
+        ],
+        "title": "MarketDataReadiness",
         "type": "object"
       },
       "MonteCarloOut": {
@@ -2615,12 +3059,123 @@
         "title": "OptionQuoteOut",
         "type": "object"
       },
+      "OptionsDataReadiness": {
+        "properties": {
+          "chain_age_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chain Age Days"
+          },
+          "chain_as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chain As Of"
+          },
+          "missing_contracts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Contracts",
+            "type": "array"
+          },
+          "priced_positions": {
+            "title": "Priced Positions",
+            "type": "integer"
+          },
+          "stale_chains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Stale Chains",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "not_required",
+              "missing",
+              "partial",
+              "stale",
+              "ready"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "total_positions": {
+            "title": "Total Positions",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "total_positions",
+          "priced_positions",
+          "missing_contracts",
+          "stale_chains",
+          "chain_as_of",
+          "chain_age_days"
+        ],
+        "title": "OptionsDataReadiness",
+        "type": "object"
+      },
       "OptionsSleeveOut": {
-        "description": "Requirement 3: per-underlying net Gamma/vega/theta + the spot x vol\nstress grid \u2014 renders only when option positions AND priceable chain\ndata exist; the two honest-empty `reason`s are documented on the module\ndocstring above.",
+        "description": "Requirement 3: per-underlying net Gamma/vega/theta + the spot x vol\nstress grid \u2014 renders only when option positions AND priceable chain\ndata exist. Completeness counts legs with an exact usable mark, IV, and\nunderlier spot \u2014 every input required by the sleeve analytics.",
         "properties": {
           "available": {
             "title": "Available",
             "type": "boolean"
+          },
+          "chain_age_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chain Age Days"
+          },
+          "chain_as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chain As Of"
+          },
+          "chain_stale": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chain Stale"
+          },
+          "missing_positions": {
+            "title": "Missing Positions",
+            "type": "integer"
+          },
+          "priced_positions": {
+            "title": "Priced Positions",
+            "type": "integer"
           },
           "reason": {
             "anyOf": [
@@ -2633,6 +3188,15 @@
             ],
             "title": "Reason"
           },
+          "status": {
+            "enum": [
+              "complete",
+              "partial",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
           "stress_grid": {
             "anyOf": [
               {
@@ -2642,6 +3206,10 @@
                 "type": "null"
               }
             ]
+          },
+          "total_positions": {
+            "title": "Total Positions",
+            "type": "integer"
           },
           "underlyings": {
             "items": {
@@ -2653,6 +3221,13 @@
         },
         "required": [
           "available",
+          "status",
+          "total_positions",
+          "priced_positions",
+          "missing_positions",
+          "chain_as_of",
+          "chain_age_days",
+          "chain_stale",
           "reason",
           "underlyings",
           "stress_grid"
@@ -2814,6 +3389,28 @@
       "PositionIn": {
         "description": "A book leg: qty != 0 shares/contracts of `symbol`. See module\ndocstring for the option-leg fields' optionality/defaulting convention.",
         "properties": {
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
+          "exchange": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exchange"
+          },
           "expiry": {
             "anyOf": [
               {
@@ -3667,6 +4264,63 @@
         "title": "SeriesPoint",
         "type": "object"
       },
+      "SetupStatus": {
+        "properties": {
+          "api": {
+            "$ref": "#/components/schemas/ApiReadiness"
+          },
+          "book": {
+            "$ref": "#/components/schemas/BookReadiness"
+          },
+          "broker": {
+            "$ref": "#/components/schemas/BrokerReadiness"
+          },
+          "macro_data": {
+            "$ref": "#/components/schemas/MacroDataReadiness"
+          },
+          "market_data": {
+            "$ref": "#/components/schemas/MarketDataReadiness"
+          },
+          "next_action": {
+            "enum": [
+              "configure_account",
+              "start_gateway",
+              "wait_for_gateway",
+              "sync_market_data",
+              "sync_option_data",
+              "pin_book",
+              "resolve_currency",
+              "resolve_instruments",
+              "ready"
+            ],
+            "title": "Next Action",
+            "type": "string"
+          },
+          "options_data": {
+            "$ref": "#/components/schemas/OptionsDataReadiness"
+          },
+          "overall": {
+            "enum": [
+              "needs_attention",
+              "ready"
+            ],
+            "title": "Overall",
+            "type": "string"
+          }
+        },
+        "required": [
+          "overall",
+          "api",
+          "broker",
+          "market_data",
+          "macro_data",
+          "options_data",
+          "book",
+          "next_action"
+        ],
+        "title": "SetupStatus",
+        "type": "object"
+      },
       "ShareRow": {
         "properties": {
           "name": {
@@ -4009,6 +4663,41 @@
             "title": "N Positions",
             "type": "integer"
           },
+          "pnl_status": {
+            "enum": [
+              "empty",
+              "partial",
+              "complete"
+            ],
+            "title": "Pnl Status",
+            "type": "string"
+          },
+          "priced_market_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Priced Market Value"
+          },
+          "priced_positions": {
+            "title": "Priced Positions",
+            "type": "integer"
+          },
+          "reported_unrealized_pnl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reported Unrealized Pnl"
+          },
           "unrealized_pnl": {
             "anyOf": [
               {
@@ -4019,11 +4708,24 @@
               }
             ],
             "title": "Unrealized Pnl"
+          },
+          "valuation_status": {
+            "enum": [
+              "empty",
+              "partial",
+              "complete"
+            ],
+            "title": "Valuation Status",
+            "type": "string"
           }
         },
         "required": [
           "market_value",
-          "n_positions"
+          "priced_market_value",
+          "n_positions",
+          "priced_positions",
+          "valuation_status",
+          "pnl_status"
         ],
         "title": "Totals",
         "type": "object"
@@ -4496,7 +5198,7 @@
   },
   "info": {
     "title": "QuantMind API",
-    "version": "0.3.0.0"
+    "version": "0.4.0.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -5375,6 +6077,24 @@
           }
         },
         "summary": "Rotation Crisis"
+      }
+    },
+    "/api/setup/status": {
+      "get": {
+        "operationId": "get_setup_status_api_setup_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Setup Status"
       }
     },
     "/api/sync": {

@@ -280,9 +280,9 @@ export function Risk() {
     risk60.data?.es_975 != null ? risk60.data.es_975 * Math.sqrt(horizon) : null;
 
   return (
-    <div className="space-y-3 max-w-[1400px]">
+    <div className="w-full space-y-3">
       <div className="flex items-end justify-between gap-4">
-        <label className="flex flex-col gap-1 text-[11px] tracking-widest uppercase text-muted">
+        <label className="authoring-only flex-col gap-1 text-[11px] tracking-widest uppercase text-muted">
           Symbol
           <select
             aria-label="Symbol"
@@ -297,7 +297,7 @@ export function Risk() {
             ))}
           </select>
         </label>
-        <label className="flex flex-col gap-1 text-[10px] tracking-wider uppercase text-muted">
+        <label className="authoring-only flex-col gap-1 text-[10px] tracking-wider uppercase text-muted">
           Years
           <input
             aria-label="Years"
@@ -317,8 +317,9 @@ export function Risk() {
         </p>
       </div>
 
-      <Panel title="Factor builder" note={`${factors.length} factor${factors.length === 1 ? "" : "s"}`}>
-        <div className="flex flex-wrap items-end gap-4">
+      <div className="authoring-only-block">
+        <Panel title="Factor builder" note={`${factors.length} factor${factors.length === 1 ? "" : "s"}`}>
+          <div className="flex flex-wrap items-end gap-4">
           <label className="flex flex-col gap-1 text-[10px] tracking-wider uppercase text-muted">
             Primary factor (CAPM)
             <select
@@ -385,13 +386,16 @@ export function Risk() {
               />
             </label>
           )}
-        </div>
-      </Panel>
+          </div>
+        </Panel>
+      </div>
 
-      <div className="grid grid-cols-[1.3fr_1fr] gap-3">
+      <div className="space-y-3 2xl:grid 2xl:grid-cols-12 2xl:gap-3 2xl:space-y-0">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1.3fr_1fr] 2xl:contents">
         <Panel
           title="Regression"
           note={regression.data ? `${regression.data.n_obs} obs · HAC lags ${regression.data.hac_lags}` : undefined}
+          className="2xl:col-span-6"
         >
           {regression.isLoading && <Skeleton className="h-72" />}
           {regression.error && (
@@ -418,7 +422,11 @@ export function Risk() {
           )}
         </Panel>
 
-        <Panel title="Fit statistics" note={regression.data?.as_of ? `as of ${regression.data.as_of.slice(0, 10)}` : undefined}>
+        <Panel
+          title="Fit statistics"
+          note={regression.data?.as_of ? `as of ${regression.data.as_of.slice(0, 10)}` : undefined}
+          className="2xl:col-span-3"
+        >
           {regression.data ? (
             <div className="grid grid-cols-2 gap-x-4 gap-y-3">
               <div>
@@ -479,8 +487,8 @@ export function Risk() {
         </Panel>
       </div>
 
-      <div className="grid grid-cols-3 gap-3">
-        <Panel title="Per-factor betas (multi-factor, HAC 95% CI)">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-3 2xl:contents">
+        <Panel title="Per-factor betas (multi-factor, HAC 95% CI)" className="2xl:col-span-3">
           {regression.data ? (
             <table className="w-full text-[12px]">
               <thead>
@@ -505,7 +513,7 @@ export function Risk() {
           )}
         </Panel>
 
-        <Panel title="Variance decomposition" note="systematic vs idiosyncratic">
+        <Panel title="Variance decomposition" note="systematic vs idiosyncratic" className="2xl:col-span-3">
           {regression.data ? (
             <div className="space-y-2">
               <div className="flex h-3 w-full overflow-hidden border border-hairline">
@@ -538,7 +546,7 @@ export function Risk() {
           )}
         </Panel>
 
-        <Panel title="R² progression" note="as factors are added">
+        <Panel title="R² progression" note="as factors are added" className="2xl:col-span-3">
           {regression.data ? (
             <table className="w-full text-[12px]">
               <thead>
@@ -562,7 +570,11 @@ export function Risk() {
         </Panel>
       </div>
 
-      <Panel title="Return attribution" note="daily mean return split by source">
+      <Panel
+        title="Return attribution"
+        note="daily mean return split by source"
+        className="2xl:col-span-6"
+      >
         {regression.data ? (
           <table className="w-full text-[12px]">
             <thead>
@@ -586,10 +598,13 @@ export function Risk() {
           <p className="text-muted text-[12px]">Awaiting regression.</p>
         )}
       </Panel>
+      </div>
 
+      <div className="space-y-3 2xl:grid 2xl:grid-cols-12 2xl:gap-3 2xl:space-y-0">
       <Panel
         title="Rolling beta, with long-run context"
         note={risk60.data?.as_of ? `as of ${risk60.data.as_of.slice(0, 10)}` : undefined}
+        className="2xl:col-span-6"
       >
         {(risk20.isLoading || risk60.isLoading || risk120.isLoading) && <Skeleton className="h-64" />}
         {risk60.error && (
@@ -618,8 +633,12 @@ export function Risk() {
         )}
       </Panel>
 
-      <div className="grid grid-cols-[1fr_1fr] gap-3">
-        <Panel title="Tail risk & vol" note={risk60.data ? `${risk60.data.n_obs} obs, daily` : undefined}>
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 2xl:contents">
+        <Panel
+          title="Tail risk & vol"
+          note={risk60.data ? `${risk60.data.n_obs} obs, daily` : undefined}
+          className="2xl:col-span-3"
+        >
           <div className="grid grid-cols-2 gap-x-4 gap-y-3">
             <div>
               <div className="text-[10px] tracking-wider uppercase text-muted">ES 97.5% (1-day loss)</div>
@@ -647,7 +666,11 @@ export function Risk() {
           </div>
         </Panel>
 
-        <Panel title="Horizon risk (Monte Carlo)" note={mc.data ? `${mc.data.n_paths.toLocaleString()} paths · ${mc.data.horizon}d` : "block-bootstrap"}>
+        <Panel
+          title="Horizon risk (Monte Carlo)"
+          note={mc.data ? `${mc.data.n_paths.toLocaleString()} paths · ${mc.data.horizon}d` : "block-bootstrap"}
+          className="2xl:col-span-3"
+        >
           <p className="text-muted text-[10px] mb-3">
             Monte Carlo answers a horizon question, not a shape question: it block-bootstraps {symbol}'s own
             daily history into {horizon}-day paths, so autocorrelation/vol-clustering in the real history
@@ -655,7 +678,7 @@ export function Risk() {
             (textbook iid scaling) — a persistent gap between the two flags fat tails or vol-clustering the
             √t shortcut can't see.
           </p>
-          <div className="flex items-end gap-2 mb-3 flex-wrap">
+          <div className="authoring-only mb-3 flex-wrap items-end gap-2">
             <div className="flex gap-1">
               {TAIL_HORIZON_PRESETS.map((h) => (
                 <button
@@ -756,6 +779,7 @@ export function Risk() {
             </>
           )}
         </Panel>
+      </div>
       </div>
     </div>
   );

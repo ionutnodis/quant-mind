@@ -17,6 +17,15 @@ def test_env_override(monkeypatch):
     assert s.client_id == 23
 
 
+def test_web_dist_env_override(monkeypatch, tmp_path):
+    dist = tmp_path / "frontend"
+    monkeypatch.setenv("QM_WEB_DIST", str(dist))
+
+    settings = Settings(_env_file=None)
+
+    assert settings.web_dist == dist
+
+
 def test_yfinance_symbol_list_defaults_empty():
     s = Settings(_env_file=None)
     assert s.yfinance_symbol_list() == []
@@ -49,6 +58,7 @@ def test_main_build_wires_security_settings(monkeypatch, tmp_path):
 
     class FakeSettings:
         data_dir = tmp_path / "data"
+        web_dist = tmp_path / "missing-web-dist"
         benchmark = "SPY"
         api_token = "runtime-secret"
         host = "127.0.0.1"
@@ -62,8 +72,12 @@ def test_main_build_wires_security_settings(monkeypatch, tmp_path):
     class FakeRouter:
         lifespan_context = None
 
+    class FakeState:
+        pass
+
     class FakeApp:
         router = FakeRouter()
+        state = FakeState()
 
         def mount(self, *_args, **_kwargs):
             raise AssertionError("no frontend dist should exist in this isolated test")

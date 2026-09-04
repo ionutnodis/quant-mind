@@ -75,7 +75,7 @@ def _price_series(request: Request, symbol: str, years: int) -> pd.Series:
         raise HTTPException(422, detail=f"symbol {symbol!r} not in cache")
     try:
         bars, _ = store.read_bars(con_id=symbol_map[symbol], bar_size="1d")
-    except FileNotFoundError:
+    except (FileNotFoundError, KeyError, OSError, ValueError):
         # Mapped but never synced: missing data is a structured 422, never a 500.
         raise HTTPException(422, detail=f"symbol {symbol!r} has no cached bars")
     series = bars["close"]

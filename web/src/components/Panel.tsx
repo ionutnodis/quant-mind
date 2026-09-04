@@ -14,12 +14,12 @@ export function Panel({
   className?: string;
 }) {
   return (
-    <section className={`bg-surface border border-hairline ${className}`}>
+    <section className={`min-w-0 bg-surface border border-hairline ${className}`}>
       <header className="flex items-baseline justify-between px-3 py-2 border-b border-hairline">
         <h2 className="text-[11px] tracking-widest uppercase text-muted">{title}</h2>
         {note && <span className="text-[10px] num text-muted">{note}</span>}
       </header>
-      <div className="p-3">{children}</div>
+      <div className="min-w-0 overflow-x-auto p-3">{children}</div>
     </section>
   );
 }

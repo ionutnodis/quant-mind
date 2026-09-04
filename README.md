@@ -32,11 +32,11 @@ QuantMind does not try to replace TradingView, Koyfin, or an execution platform.
 | Book truth | Canonical book contract, immutable snapshots, provenance manifests, corruption detection, and explicit `book_ref` pinning |
 | Factor risk | CAPM and multi-factor regression, rolling beta, alpha only when risk-free evidence exists, variance decomposition, and attribution |
 | Risk | Historical expected shortfall, annualised volatility, horizon Monte Carlo, drawdown context, and scenario tooling |
-| Options | Read-only IBKR option-chain ingestion seam, stored chains, book Greeks, and option-aware risk boundaries |
+| Options | Read-only IBKR chain ingestion for bounded surfaces plus exact held contracts, stored bid/ask marks, book Greeks, and option-aware risk boundaries |
 | Decisions | What-If analysis, hedge candidate ranking/sizing, leverage checks, and saved local scenarios |
 | Market context | Regime, macro, rotation, instruments, news adapters, and a research-model lab |
 | Data | IBKR-first daily-bar sync, explicit yfinance fallback allowlist, FRED macro data, Parquet/DuckDB cache |
-| Product | FastAPI API, React 19 web client, generated OpenAPI types, and a dark professional alpha workbench |
+| Product | Guided first-run readiness, FastAPI API, React 19 web client, generated OpenAPI types, and a dark professional alpha workbench |
 
 The current release is a single-book alpha. Multi-book onboarding, wider vendor ingestion, production broker jobs, and the full SaaS layer are intentionally future work.
 
@@ -65,6 +65,8 @@ The analytical core is deliberately separated from I/O. `risk/`, `analytics/`, a
 
 ## Quick start
 
+For the first private user, follow the complete [first-user runbook](docs/FIRST_USER_RUNBOOK.md). The short path is below.
+
 ### Prerequisites
 
 - Python 3.12+
@@ -78,13 +80,15 @@ The analytical core is deliberately separated from I/O. `risk/`, `analytics/`, a
 git clone https://github.com/ionutnodis/quant-mind.git
 cd quant-mind
 
+cp .env.example .env
 uv sync --locked --dev
-cd web && bun install --frozen-lockfile && cd ..
+cd web && bun install --frozen-lockfile && bun run build && cd ..
 
-# Starts FastAPI at http://127.0.0.1:8000.
-# If web/dist exists, this process also serves the built web client.
+# Start IBKR Gateway or TWS first, then start the local workbench.
 uv run python -m quantmind.api.main
 ```
+
+Open `http://127.0.0.1:8000/book/setup` (`/setup` remains a first-use alias). The Setup screen diagnoses the local API, the selected IBKR account, daily-bar freshness, and the current pinned book. It can run the market sync and pin the current live book without submitting orders.
 
 For frontend development, run Vite in a second terminal:
 
@@ -97,7 +101,7 @@ Open the Vite URL, normally `http://127.0.0.1:5173`. Vite proxies `/api` to the 
 
 ### Populate data
 
-With IBKR Gateway running, sync the starter universe and macro series:
+With IBKR Gateway running, sync the starter universe, the selected account's stock and option underliers, held-option chains, and macro series:
 
 ```bash
 uv run python -m quantmind.sync_cli
@@ -109,7 +113,7 @@ To sync a smaller set of daily bars:
 uv run python -m quantmind.sync_cli SPY QQQ TLT
 ```
 
-Option-chain sync is a separate, explicit action. It reads cached spot data and snapshots monthly options up to 90 days out, within ±15% of spot:
+Option-chain sync can also be run explicitly. It reads cached spot data and snapshots monthly options up to 90 days out, within ±15% of spot:
 
 ```bash
 uv run python -m quantmind.options_sync_cli SPY QQQ
@@ -131,6 +135,8 @@ QM_ACCOUNT_ID=
 # Local data cache and benchmark
 QM_DATA_DIR=data
 QM_BENCHMARK=SPY
+# Optional when the production frontend is built outside ./web/dist
+# QM_WEB_DIST=/absolute/path/to/web/dist
 
 # Opt-in free fallback. IBKR remains authoritative for symbols it supplies.
 QM_YFINANCE_SYMBOLS=EZU,EWU
@@ -169,14 +175,19 @@ bun run gen:types
 ## Product boundaries
 
 - **Read-only by design:** no order submission or broker execution surface.
+- **Exactly one account:** `QM_ACCOUNT_ID` selects the portfolio. A multi-account IBKR session without an explicit selection fails closed rather than blending client books.
+- **Advisor-safe reads:** selected-account portfolio updates avoid IBKR's global positions request, which is not available to advisor/master sessions with more than 50 subaccounts.
 - **Local-first:** binds to loopback by default and keeps the evidence cache on the local machine.
 - **Single provenance:** yfinance fallback is opt-in and never silently replaces IBKR data for the same symbol.
-- **Data honesty:** staleness, absent risk-free inputs, missing option data, and invalid numeric input are represented explicitly.
-- **Responsive workflow:** the approved product policy targets one semantic UI from wide monitors to phones, with full authoring at 768px × 600px or larger and a read-only companion below that threshold. The current alpha is best used on a desktop or laptop while the responsive-shell implementation is completed.
+- **Data honesty:** readiness uses the weakest required market/macro observation; stale books, incomplete option chains, unsupported contracts, and invalid numeric input are represented explicitly. If any position is unpriced, QuantMind withholds total value and portfolio weights and labels the priced subtotal.
+- **Currency guard:** the private alpha requires authoritative USD instrument identity and USD-denominated account totals until dated FX normalization is implemented; it never adds unlike local-currency prices.
+- **Instrument guard:** the first-user acceptance book may contain stocks, ETFs, and equity options. Futures, futures options, bonds, CFDs, FX/cash rows, and other security types remain explicitly unsupported.
+- **Responsive workflow:** one semantic UI scales from wide monitors through laptops and tablets to a read-only phone companion; authoring controls require at least 768 × 600 and dense analytical tables scroll inside their panels.
 
 ## Documentation
 
 - [Design system and product decisions](DESIGN.md)
+- [First-user installation and acceptance runbook](docs/FIRST_USER_RUNBOOK.md)
 - [Contributor and engineering notes](CLAUDE.md)
 - [Web-client setup and API type generation](web/README.md)
 - [API contract](openapi.json)

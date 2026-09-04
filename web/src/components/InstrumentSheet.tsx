@@ -104,7 +104,7 @@ export function InstrumentSheet({ symbol, onClose }: { symbol: string; onClose: 
                 <p className="text-muted text-[12px]">No cached candles yet — sync the universe.</p>
               )}
 
-              <div className="grid grid-cols-4 gap-x-3 gap-y-2 mt-3 pt-3 border-t border-hairline">
+              <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-t border-hairline pt-3 sm:grid-cols-4">
                 <div>
                   <div className="text-[9px] tracking-wider uppercase text-muted">Last</div>
                   <div className="num text-market">{num(instrument.data?.last_close ?? null)}</div>

@@ -7,20 +7,19 @@ Greeks/dollar-delta/stress grid (A3's engine, reused not re-derived), and
 new pure module).
 
 Serialization policy (repo-wide, api/app.py): UTC ISO-Z timestamps, NaN/Inf ->
-null, missing/empty book -> structured empty, never a 500. Prices come from
-the cached bar store only (no network call here) — a position with no cached
-bars degrades to null price/market_value/weight, it never crashes the route.
+null, missing/empty book -> structured empty, never a 500. Equity marks come
+from cached bars; option marks come only from their exact cached-chain row.
+Neither path makes a network call, and an unpriceable position degrades to
+null price/market_value/weight rather than borrowing its underlier's price.
 
 Book source (Task A1's book-flow spine): `book_ref` (optional query param) —
 absent, this is the LIVE broker book exactly as before (back-compatible: the
 original five response fields are unchanged in shape); given, the book is
 resolved from a pinned snapshot via routers/book.py's `read_book_positions`,
-which is the ONLY path an OPT leg's strike/expiry/right ever reaches this
-router — `Position` (Engineering Constraint 9's one Portfolio type) has no
-room for those fields, so a live-broker OPT position can never be priced for
-Greeks/expiry-buckets no matter how it's fetched (see routers/book.py's
-`read_book_positions` docstring for the same limit on the whatif/hedge/options
-side). That is the source of the options sleeve's two honest-empty reasons:
+which is also how hypothetical option terms reach this router. Live IBKR
+positions preserve strike/expiry/right on `Position`, allowing the same
+options sleeve to price a live book when a matching chain is cached. That is
+the source of the options sleeve's two honest-empty reasons:
 "no option positions" (none held) vs "chain not ingested — run options_sync"
 (held, but this router has no way to price them — either no book_ref was
 given, or the pinned book's legs lack a matching cached IV quote).
@@ -35,20 +34,26 @@ from __future__ import annotations
 
 import math
 from datetime import date, datetime, timezone
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from quantmind.api.routers._shared import clean, downsample, iso, weighted_portfolio_returns
-from quantmind.api.routers.book import read_book_positions
+from quantmind.api.routers._shared import PositionIn, clean, downsample, iso, weighted_portfolio_returns
+from quantmind.api.routers.book import (
+    ResolvedBookPosition,
+    read_book,
+    read_book_positions,
+    validate_pinned_book_scope,
+)
 from quantmind.core.snapshot import BookSnapshot
-from quantmind.datastore.options_store import OptionsStore
+from quantmind.datastore.options_store import OptionsSnapshotMeta, OptionsStore
 from quantmind.exposure.attribution import InsufficientDataError as AttributionInsufficientDataError
 from quantmind.exposure.attribution import decompose_book_pnl, summarize_pnl_split
 from quantmind.exposure.book_greeks import BookLeg, aggregate_book_stress_grid, compute_book_greeks
-from quantmind.portfolio import Portfolio, Position
+from quantmind.portfolio import Portfolio, Position, option_terms_complete
 from quantmind.risk.returns import InsufficientDataError as ReturnsInsufficientDataError
 from quantmind.risk.returns import rolling_beta
 
@@ -63,6 +68,8 @@ _RISK_FREE_RATE = 0.0
 _YEARS_OF_HISTORY = 5
 _MAX_ATTRIBUTION_POINTS = 500
 _EXPIRY_BUCKET_DAYS = (7, 30, 90)
+_MARK_STALE_AFTER_DAYS = 3
+_OPTIONS_STALE_AFTER_DAYS = 3
 
 
 class PositionOut(BaseModel):
@@ -85,8 +92,13 @@ class PositionOut(BaseModel):
 
 class Totals(BaseModel):
     market_value: float | None
+    priced_market_value: float | None
     n_positions: int
+    priced_positions: int
+    valuation_status: Literal["empty", "partial", "complete"]
     unrealized_pnl: float | None = None
+    reported_unrealized_pnl: float | None = None
+    pnl_status: Literal["empty", "partial", "complete"]
 
 
 class AccountOut(BaseModel):
@@ -94,6 +106,7 @@ class AccountOut(BaseModel):
     total_cash_value: float | None
     gross_position_value: float | None
     buying_power: float | None
+    currency: str
 
 
 class UnderlyingExposureOut(BaseModel):
@@ -127,10 +140,17 @@ class StressGridOut(BaseModel):
 class OptionsSleeveOut(BaseModel):
     """Requirement 3: per-underlying net Gamma/vega/theta + the spot x vol
     stress grid — renders only when option positions AND priceable chain
-    data exist; the two honest-empty `reason`s are documented on the module
-    docstring above."""
+    data exist. Completeness counts legs with an exact usable mark, IV, and
+    underlier spot — every input required by the sleeve analytics."""
 
     available: bool
+    status: Literal["complete", "partial", "unavailable"]
+    total_positions: int
+    priced_positions: int
+    missing_positions: int
+    chain_as_of: str | None
+    chain_age_days: int | None
+    chain_stale: bool | None
     reason: str | None
     underlyings: list[SleeveUnderlyingOut]
     stress_grid: StressGridOut | None
@@ -205,7 +225,7 @@ class PortfolioResponse(BaseModel):
 def _close_series(store, con_id: int) -> pd.Series | None:
     try:
         bars, _ = store.read_bars(con_id=con_id, bar_size="1d")
-    except FileNotFoundError:
+    except (FileNotFoundError, KeyError, OSError, ValueError):
         return None
     if bars.empty:
         return None
@@ -216,6 +236,21 @@ def _last_close(series: pd.Series | None) -> float | None:
     if series is None or series.empty:
         return None
     return clean(float(series.iloc[-1]))
+
+
+def _series_is_stale(series: pd.Series | None, today: date) -> bool:
+    if series is None or series.empty:
+        return True
+    try:
+        observation = pd.Timestamp(series.index[-1]).date()
+    except (TypeError, ValueError):
+        return True
+    age_days = (
+        0
+        if observation >= today
+        else int(np.busday_count(observation.isoformat(), today.isoformat()))
+    )
+    return age_days > _MARK_STALE_AFTER_DAYS
 
 
 def _last_beta(asset: pd.Series, bench: pd.Series) -> float | None:
@@ -260,10 +295,31 @@ async def _resolve_account(broker, book_ref: str | None) -> tuple[AccountOut | N
         summary = await get_account_summary()
     except Exception:
         return None, "account summary unavailable (broker request failed)"
-    return AccountOut(**summary), None
+    currency = summary.get("currency")
+    if currency is None:
+        return (
+            None,
+            "account summary withheld because the broker did not label its base currency",
+        )
+    if currency != "USD":
+        raise HTTPException(
+            422,
+            detail=(
+                "FX normalization is not available for account totals in "
+                f"{currency!r}; USD account totals are required"
+            ),
+        )
+    account = AccountOut(**summary)
+    return account, None
 
 
-def _book_from_book_ref(store, book_ref: str) -> tuple[Portfolio, list[object | None]]:
+def _book_from_book_ref(
+    store,
+    book_ref: str,
+    *,
+    valuation_ts: str,
+    use_persisted_contract_ids: bool,
+) -> tuple[Portfolio, list[object | None]]:
     """Resolve a pinned snapshot into a priced Portfolio + the option-leg
     fields (strike/expiry/right), returned as a list POSITIONALLY ALIGNED
     with `portfolio.positions` (index i's leg belongs to position i) — never
@@ -283,55 +339,163 @@ def _book_from_book_ref(store, book_ref: str) -> tuple[Portfolio, list[object | 
     positions = []
     option_legs: list[object | None] = []
     for leg in legs:
+        resolved_leg = (
+            leg
+            if use_persisted_contract_ids
+            else leg.model_copy(update={"con_id": None})
+        )
         multiplier = leg.multiplier if leg.multiplier is not None else (100.0 if leg.right is not None else 1.0)
         positions.append(
             Position(
-                con_id=symbol_map[leg.symbol],
+                con_id=(
+                    resolved_leg.con_id
+                    if resolved_leg.right is not None and resolved_leg.con_id is not None
+                    else symbol_map[leg.symbol]
+                ),
                 symbol=leg.symbol,
                 qty=leg.qty,
-                sec_type="OPT" if leg.right is not None else "STK",
+                sec_type=leg.sec_type,
                 multiplier=multiplier,
+                strike=leg.strike,
+                expiry=leg.expiry,
+                right=leg.right,
+                currency=leg.currency,
+                exchange=leg.exchange,
             )
         )
-        option_legs.append(leg if leg.right is not None else None)
-    valuation_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        option_legs.append(resolved_leg if resolved_leg.right is not None else None)
     return Portfolio(positions=tuple(positions), as_of=valuation_ts), option_legs
 
 
-def _find_quote_row(df: pd.DataFrame, expiry: str, strike: float, right: str) -> pd.Series | None:
+def _find_quote_row(
+    df: pd.DataFrame,
+    expiry: str,
+    strike: float,
+    right: str,
+    con_id: int | None = None,
+) -> pd.Series | None:
     mask = (
         (df["expiry"].astype(str) == expiry)
         & (df["right"].astype(str) == right)
         & np.isclose(df["strike"].astype(float), strike, atol=1e-6)
     )
     matched = df.loc[mask]
-    return matched.iloc[0] if not matched.empty else None
+    if matched.empty:
+        return None
+    if con_id is not None:
+        if "con_id" not in matched.columns:
+            return None
+        contract_ids = pd.to_numeric(matched["con_id"], errors="coerce")
+        exact = matched.loc[contract_ids == con_id]
+        return exact.iloc[0] if len(exact) == 1 else None
+    return matched.iloc[0] if len(matched) == 1 else None
+
+
+def _quote_mark(row: pd.Series) -> float | None:
+    """Midpoint when two-sided; otherwise the sole usable bid or ask.
+
+    The cached-chain schema has no last-trade field, so there is deliberately
+    no invented last-price fallback here.
+    """
+    bid = clean(getattr(row, "bid", None))
+    ask = clean(getattr(row, "ask", None))
+    bid = bid if bid is not None and bid >= 0 else None
+    ask = ask if ask is not None and ask >= 0 else None
+    if bid is not None and ask is not None:
+        if ask < bid:
+            return None
+        return (bid + ask) / 2
+    return bid if bid is not None else ask
+
+
+def _cached_option_chain(
+    underlier: str,
+    options_store: OptionsStore,
+    cache: dict[str, tuple[pd.DataFrame, OptionsSnapshotMeta] | None],
+) -> tuple[pd.DataFrame, OptionsSnapshotMeta] | None:
+    """Read each underlier's parquet snapshot at most once per request."""
+    if underlier not in cache:
+        try:
+            cache[underlier] = options_store.read_chain(underlier)
+        except (FileNotFoundError, KeyError, OSError, ValueError):
+            cache[underlier] = None
+    return cache[underlier]
+
+
+def _option_mark(
+    p: Position,
+    leg,
+    options_store: OptionsStore,
+    chain_cache: dict[str, tuple[pd.DataFrame, OptionsSnapshotMeta] | None],
+    today: date,
+) -> float | None:
+    """Return an exact contract's cached midpoint or usable one-sided quote."""
+    if leg is None or leg.strike is None or leg.expiry is None or leg.right is None:
+        return None
+    cached = _cached_option_chain(p.symbol, options_store, chain_cache)
+    if cached is None:
+        return None
+    chain_df, meta = cached
+    if _chain_freshness(meta.as_of, today)[1]:
+        return None
+    row = _find_quote_row(
+        chain_df,
+        expiry=leg.expiry,
+        strike=leg.strike,
+        right=leg.right,
+        con_id=getattr(leg, "con_id", None),
+    )
+    if row is None:
+        return None
+    return _quote_mark(row)
+
+
+def _chain_freshness(as_of: str, today: date) -> tuple[int | None, bool]:
+    """Return weekday-aware age and staleness for chain metadata."""
+    try:
+        snapshot_date = datetime.fromisoformat(as_of.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None, True
+    age_days = (
+        0
+        if snapshot_date >= today
+        else int(np.busday_count(snapshot_date.isoformat(), today.isoformat()))
+    )
+    return age_days, age_days > _OPTIONS_STALE_AFTER_DAYS
 
 
 def _priced_option_leg(
     p: Position,
     leg,
     options_store: OptionsStore,
+    chain_cache: dict[str, tuple[pd.DataFrame, OptionsSnapshotMeta] | None],
     spot: float,
     as_of: date,
-) -> tuple[BookLeg, ExpiryLegOut] | None:
+) -> tuple[BookLeg, ExpiryLegOut, str] | None:
     """A single OPT position's book leg + expiry-bucket row, IF its strike/
     expiry has a matching cached-chain quote with a usable IV — else None
     (the caller folds that into the sleeve's honest-empty reason)."""
     if leg is None or leg.strike is None or leg.expiry is None or leg.right is None:
         return None
-    if not options_store.has_chain(p.symbol):
+    cached = _cached_option_chain(p.symbol, options_store, chain_cache)
+    if cached is None:
         return None
-    try:
-        chain_df, _ = options_store.read_chain(p.symbol)
-    except FileNotFoundError:
-        return None
-    row = _find_quote_row(chain_df, expiry=leg.expiry, strike=leg.strike, right=leg.right)
+    chain_df, meta = cached
+    row = _find_quote_row(
+        chain_df,
+        expiry=leg.expiry,
+        strike=leg.strike,
+        right=leg.right,
+        con_id=getattr(leg, "con_id", None),
+    )
     if row is None:
         return None
-    iv = row.iv
-    if iv is None or not np.isfinite(float(iv)):
+    if _quote_mark(row) is None:
         return None
+    iv = row.iv
+    if iv is None or not np.isfinite(float(iv)) or float(iv) <= 0:
+        return None
+    iv = float(iv)
     try:
         expiry_dt = datetime.strptime(leg.expiry, "%Y%m%d").date()
     except ValueError:
@@ -358,7 +522,7 @@ def _priced_option_leg(
         symbol=p.symbol, expiry=leg.expiry, right=leg.right, strike=leg.strike, qty=p.qty,
         days_to_expiry=days_to_expiry,
     )
-    return book_leg, bucket_row
+    return book_leg, bucket_row, meta.as_of
 
 
 def _bucket_expiry_legs(rows: list[ExpiryLegOut]) -> ExpiryBucketsOut:
@@ -402,6 +566,22 @@ def _book_return_series(
     return weighted_portfolio_returns(returns, con_ids, weights), gross
 
 
+def _empty_attribution(reason: str, window_days: int) -> AttributionOut:
+    return AttributionOut(
+        available=False,
+        reason=reason,
+        window_days=window_days,
+        beta=None,
+        n_obs=0,
+        total_pnl=None,
+        core_pnl=None,
+        overlay_pnl=None,
+        core_share=None,
+        overlay_share=None,
+        series=[],
+    )
+
+
 def _compute_attribution(
     store,
     close_series: dict[int, pd.Series],
@@ -410,10 +590,7 @@ def _compute_attribution(
     symbol_map: dict[str, int],
     window_days: int,
 ) -> AttributionOut:
-    empty = lambda reason: AttributionOut(  # noqa: E731
-        available=False, reason=reason, window_days=window_days, beta=None, n_obs=0,
-        total_pnl=None, core_pnl=None, overlay_pnl=None, core_share=None, overlay_share=None, series=[],
-    )
+    empty = lambda reason: _empty_attribution(reason, window_days)  # noqa: E731
 
     result = _book_return_series(close_series, market_values)
     if result is None:
@@ -487,21 +664,86 @@ async def get_portfolio(
     benchmark = request.app.state.benchmark
 
     valuation_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    pinned_snapshot_id: str | None = None
+    today = date.today()
 
     if book_ref is not None:
-        portfolio, option_legs = _book_from_book_ref(store, book_ref)
-        valuation_ts = portfolio.as_of
+        pinned = read_book(store, book_ref)
+        validate_pinned_book_scope(request.app.state, pinned)
+        valuation_ts = pinned["valuation_ts"]
+        pinned_snapshot_id = pinned["snapshot_id"]
+        portfolio, option_legs = _book_from_book_ref(
+            store,
+            book_ref,
+            valuation_ts=valuation_ts,
+            use_persisted_contract_ids=pinned["source"] == "live_ibkr",
+        )
+    elif broker is None and getattr(
+        request.app.state, "broker_connection_error", None
+    ) is not None:
+        raise HTTPException(
+            503,
+            detail="live broker unavailable; reconnect IBKR or request a pinned book_ref",
+        )
     elif broker is None:
         portfolio = Portfolio(positions=(), as_of=valuation_ts)
         option_legs = []
     else:
         portfolio = await broker.get_portfolio()
-        # Live-broker positions never carry strike/expiry (module docstring)
-        # — one `None` leg per position, positionally aligned like the
-        # book_ref path.
-        option_legs = [None] * len(portfolio.positions)
+        # Positionally aligned with `portfolio.positions`, exactly like the
+        # book_ref path. Complete IBKR option contracts can therefore use the
+        # same cached-chain pricing seam; incomplete legacy contracts remain
+        # `None` and degrade honestly below.
+        option_legs = [
+            ResolvedBookPosition(
+                con_id=p.con_id,
+                symbol=p.symbol,
+                qty=p.qty,
+                strike=p.strike,
+                expiry=p.expiry,
+                right=p.right,
+                multiplier=p.multiplier,
+            )
+            if p.sec_type == "OPT"
+            and option_terms_complete(strike=p.strike, expiry=p.expiry, right=p.right)
+            else None
+            for p in portfolio.positions
+        ]
 
-    snapshot = BookSnapshot.create(portfolio, valuation_ts=valuation_ts, base_currency="USD")
+    unsupported_currencies = sorted(
+        {
+            position.currency
+            for position in portfolio.positions
+            if position.currency not in {None, "USD"}
+        }
+    )
+    if unsupported_currencies:
+        raise HTTPException(
+            422,
+            detail=(
+                "FX normalization is not available for portfolio currencies: "
+                f"{unsupported_currencies}"
+            ),
+        )
+    unsupported_security_types = sorted(
+        {
+            position.sec_type
+            for position in portfolio.positions
+            if position.sec_type not in {"STK", "OPT"}
+        }
+    )
+    if unsupported_security_types:
+        raise HTTPException(
+            422,
+            detail=(
+                "portfolio security types are not supported in this release: "
+                f"{unsupported_security_types}"
+            ),
+        )
+
+    snapshot_id = pinned_snapshot_id or BookSnapshot.create(
+        portfolio, valuation_ts=valuation_ts, base_currency="USD"
+    ).snapshot_id
 
     # --- ledger essentials: price, cost basis, unrealized P&L ---
     avg_costs: dict[int, float] = {}
@@ -517,20 +759,34 @@ async def get_portfolio(
     # both positions at the LAST leg's market value and weight 1.0 each.
     # `close_series` alone stays con_id-keyed: the price SERIES really is
     # per-conId (every leg on one underlier reads the same bars).
+    options_store = OptionsStore(store.root)
+    option_chain_cache: dict[str, tuple[pd.DataFrame, OptionsSnapshotMeta] | None] = {}
     close_series: dict[int, pd.Series] = {}
     last_closes: list[float | None] = []
     market_values: list[float | None] = []
-    for p in portfolio.positions:
+    for p, leg in zip(portfolio.positions, option_legs):
         if p.con_id not in close_series:
             series = _close_series(store, p.con_id)
             if series is not None:
                 close_series[p.con_id] = series
-        last_close = _last_close(close_series.get(p.con_id))
+        last_close = (
+            _option_mark(p, leg, options_store, option_chain_cache, today)
+            if p.sec_type == "OPT"
+            else (
+                None
+                if _series_is_stale(close_series.get(p.con_id), today)
+                else _last_close(close_series.get(p.con_id))
+            )
+        )
         last_closes.append(last_close)
         market_values.append(clean(p.qty * p.multiplier * last_close) if last_close is not None else None)
 
     known_mvs = [mv for mv in market_values if mv is not None]
-    total_mv = sum(known_mvs) if known_mvs else None
+    priced_mv = sum(known_mvs) if known_mvs else None
+    valuation_complete = bool(portfolio.positions) and len(known_mvs) == len(
+        portfolio.positions
+    )
+    total_mv = priced_mv if valuation_complete else None
 
     positions_out: list[PositionOut] = []
     unrealized_values: list[float] = []
@@ -552,30 +808,51 @@ async def get_portfolio(
                 multiplier=p.multiplier,
                 last_close=last_close,
                 market_value=mv,
-                weight=(mv / total_mv if mv is not None and total_mv else None),
+                weight=(mv / total_mv if valuation_complete and mv is not None and total_mv else None),
                 avg_cost=avg_cost,
                 unrealized_pnl=unrealized,
             )
         )
 
+    pnl_complete = bool(portfolio.positions) and len(unrealized_values) == len(
+        portfolio.positions
+    )
+    reported_unrealized = sum(unrealized_values) if unrealized_values else None
     totals = Totals(
         market_value=total_mv,
+        priced_market_value=priced_mv,
         n_positions=len(portfolio.positions),
-        unrealized_pnl=(sum(unrealized_values) if unrealized_values else None),
+        priced_positions=len(known_mvs),
+        valuation_status=(
+            "empty"
+            if not portfolio.positions
+            else "complete"
+            if valuation_complete
+            else "partial"
+        ),
+        unrealized_pnl=reported_unrealized if pnl_complete else None,
+        reported_unrealized_pnl=reported_unrealized,
+        pnl_status=(
+            "empty"
+            if not portfolio.positions
+            else "complete"
+            if pnl_complete
+            else "partial"
+        ),
     )
 
     account, account_note = await _resolve_account(broker, book_ref)
 
     # --- delta-adjusted exposure + options sleeve + expiry buckets ---
     symbol_map = store.read_symbol_map()
-    options_store = OptionsStore(store.root)
-    today = date.today()
-
     groups: dict[str, list[tuple[Position, object | None]]] = {}
     for p, leg in zip(portfolio.positions, option_legs):
         groups.setdefault(p.symbol, []).append((p, leg))
 
-    has_option_positions = any(p.sec_type == "OPT" for p in portfolio.positions)
+    total_option_positions = sum(p.sec_type == "OPT" for p in portfolio.positions)
+    has_option_positions = total_option_positions > 0
+    priced_option_positions = 0
+    chain_snapshots: list[tuple[str, int | None, bool]] = []
     book_legs: list[BookLeg] = []
     priced_option_underliers: set[str] = set()
     # Option underliers dropped BEFORE the chain lookup (no symbol-map entry
@@ -610,13 +887,18 @@ async def get_portfolio(
             if p.sec_type != "OPT":
                 book_legs.append(BookLeg(underlier=underlier, qty=p.qty, is_option=False, spot=spot, r=_RISK_FREE_RATE))
                 continue
-            resolved = _priced_option_leg(p, leg, options_store, spot, today)
+            resolved = _priced_option_leg(
+                p, leg, options_store, option_chain_cache, spot, today
+            )
             if resolved is None:
                 continue
-            book_leg, bucket_row = resolved
+            book_leg, bucket_row, chain_as_of = resolved
             book_legs.append(book_leg)
             expiry_rows.append(bucket_row)
             priced_option_underliers.add(underlier)
+            priced_option_positions += 1
+            age_days, stale = _chain_freshness(chain_as_of, today)
+            chain_snapshots.append((chain_as_of, age_days, stale))
 
     betas_clean = {k: v for k, v in underlier_betas.items() if v is not None}
     underlyings = compute_book_greeks(book_legs, betas=betas_clean) if book_legs else []
@@ -638,8 +920,33 @@ async def get_portfolio(
         for u in underlyings
     ]
 
+    missing_option_positions = total_option_positions - priced_option_positions
+    if chain_snapshots:
+        oldest_snapshot = max(
+            chain_snapshots,
+            key=lambda item: item[1] if item[1] is not None else math.inf,
+        )
+        chain_as_of, chain_age_days, _ = oldest_snapshot
+        chain_stale: bool | None = any(item[2] for item in chain_snapshots)
+    else:
+        chain_as_of = None
+        chain_age_days = None
+        chain_stale = None
+
     if not has_option_positions:
-        options_sleeve = OptionsSleeveOut(available=False, reason="no option positions", underlyings=[], stress_grid=None)
+        options_sleeve = OptionsSleeveOut(
+            available=False,
+            status="unavailable",
+            total_positions=0,
+            priced_positions=0,
+            missing_positions=0,
+            chain_as_of=None,
+            chain_age_days=None,
+            chain_stale=None,
+            reason="no option positions",
+            underlyings=[],
+            stress_grid=None,
+        )
     elif not priced_option_underliers:
         if unpriceable_option_underliers:
             reason = (
@@ -648,13 +955,48 @@ async def get_portfolio(
             )
         else:
             reason = "chain not ingested — run options_sync"
-        options_sleeve = OptionsSleeveOut(available=False, reason=reason, underlyings=[], stress_grid=None)
+        options_sleeve = OptionsSleeveOut(
+            available=False,
+            status="unavailable",
+            total_positions=total_option_positions,
+            priced_positions=0,
+            missing_positions=missing_option_positions,
+            chain_as_of=chain_as_of,
+            chain_age_days=chain_age_days,
+            chain_stale=chain_stale,
+            reason=reason,
+            underlyings=[],
+            stress_grid=None,
+        )
     else:
         sleeve_legs = [leg for leg in book_legs if leg.underlier in priced_option_underliers]
         grid = aggregate_book_stress_grid(sleeve_legs)
+        status: Literal["complete", "partial"] = (
+            "complete"
+            if missing_option_positions == 0 and chain_stale is not True
+            else "partial"
+        )
         options_sleeve = OptionsSleeveOut(
             available=True,
-            reason=None,
+            status=status,
+            total_positions=total_option_positions,
+            priced_positions=priced_option_positions,
+            missing_positions=missing_option_positions,
+            chain_as_of=chain_as_of,
+            chain_age_days=chain_age_days,
+            chain_stale=chain_stale,
+            reason=(
+                None
+                if status == "complete"
+                else (
+                    "cached option chain is stale"
+                    if chain_stale is True and missing_option_positions == 0
+                    else (
+                        f"{missing_option_positions} of {total_option_positions} option positions "
+                        "could not be priced from cached chains"
+                    )
+                )
+            ),
             underlyings=[
                 SleeveUnderlyingOut(underlier=u.underlier, gamma=clean(u.gamma), vega=clean(u.vega), theta=clean(u.theta))
                 for u in underlyings
@@ -679,12 +1021,18 @@ async def get_portfolio(
         if mv is not None:
             mv_by_conid[p.con_id] = mv_by_conid.get(p.con_id, 0.0) + mv
 
-    attribution = _compute_attribution(
-        store, close_series, mv_by_conid, benchmark, symbol_map, attribution_days
-    )
+    if has_option_positions:
+        attribution = _empty_attribution(
+            "historical attribution unavailable for option books without option price history",
+            attribution_days,
+        )
+    else:
+        attribution = _compute_attribution(
+            store, close_series, mv_by_conid, benchmark, symbol_map, attribution_days
+        )
 
     return PortfolioResponse(
-        snapshot_id=snapshot.snapshot_id,
+        snapshot_id=snapshot_id,
         valuation_ts=valuation_ts,
         base_currency="USD",
         positions=positions_out,

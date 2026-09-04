@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     client_id: int = 17  # fixed clientId — see Engineering Constraint 1
     benchmark: str = "SPY"
     data_dir: Path = Path("data")
+    web_dist: Path | None = None
     fred_api_key: str = ""
     api_token: str = ""
     api_allowed_origins: str = (

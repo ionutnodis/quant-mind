@@ -19,6 +19,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 _META_PREFIX = b"quantmind.options."
+_CHAIN_COLUMNS = frozenset(
+    {"expiry", "strike", "right", "con_id", "bid", "ask", "iv", "delta", "multiplier"}
+)
 
 
 @dataclass(frozen=True)
@@ -54,7 +57,22 @@ class OptionsStore:
         if not path.exists():
             raise FileNotFoundError(f"no cached option chain for underlier {underlier!r}")
         table = pq.read_table(path)
+        missing_columns = _CHAIN_COLUMNS - set(table.column_names)
+        if missing_columns:
+            raise ValueError(
+                f"cached option chain for {underlier!r} is missing columns: "
+                f"{sorted(missing_columns)}"
+            )
         md = table.schema.metadata or {}
+        missing_metadata = {
+            key
+            for key in (_META_PREFIX + b"as_of", _META_PREFIX + b"spot")
+            if key not in md
+        }
+        if missing_metadata:
+            raise ValueError(
+                f"cached option chain for {underlier!r} is missing metadata"
+            )
         meta = OptionsSnapshotMeta(
             as_of=md[_META_PREFIX + b"as_of"].decode(),
             spot=float(md[_META_PREFIX + b"spot"].decode()),

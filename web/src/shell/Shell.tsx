@@ -6,53 +6,54 @@ import { api } from "../lib/api";
 import { CommandPalette } from "./CommandPalette";
 
 export const PAGES = [
-  { path: "/", label: "Today" },
-  { path: "/portfolio", label: "Portfolio" },
-  { path: "/risk", label: "Risk" },
-  { path: "/hedge", label: "Hedge Lab" },
-  { path: "/whatif", label: "What-If" },
-  { path: "/macro", label: "Macro" },
-  { path: "/lab", label: "Lab" },
+  { path: "/", label: "Today", navigation: true },
+  { path: "/portfolio", label: "Portfolio", navigation: true },
+  { path: "/risk", label: "Risk", navigation: true },
+  { path: "/hedge", label: "Hedge Lab", navigation: true },
+  { path: "/whatif", label: "What-If", navigation: true },
+  { path: "/macro", label: "Macro", navigation: true },
+  { path: "/lab", label: "Lab", navigation: true },
+  { path: "/book/setup", label: "Setup", navigation: false },
 ] as const;
 
 export function Shell() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const { data } = useQuery({ queryKey: ["brief"], queryFn: api.brief, staleTime: 60 * 60 * 1000 });
   return (
-    <div className="flex min-h-screen">
-      <aside className="w-48 shrink-0 border-r border-hairline flex flex-col">
+    <div className="flex min-h-screen max-w-full flex-col md:flex-row">
+      <aside className="flex w-full min-w-0 shrink-0 flex-col border-b border-hairline md:w-48 md:border-r md:border-b-0">
         <div className="px-4 py-4 border-b border-hairline">
           <span className="font-semibold tracking-widest text-sm">
             QUANT<span className="text-you">MIND</span>
           </span>
         </div>
-        <nav className="flex-1 py-2" aria-label="Pages">
-          {PAGES.map((p) => (
+        <nav className="flex max-w-full flex-1 overflow-x-auto py-0 md:block md:py-2" aria-label="Pages">
+          {PAGES.filter((page) => page.navigation).map((p) => (
             <Link
               key={p.path}
               to={p.path}
-              className={`block px-4 py-1.5 text-[13px] ${
+              className={`qm-target block shrink-0 whitespace-nowrap border-b-2 px-3 py-2 text-[12px] md:border-b-0 md:border-l-2 md:px-4 md:py-1.5 md:text-[13px] ${
                 pathname === p.path
-                  ? "text-you border-l-2 border-you bg-surface"
-                  : "text-muted hover:text-ink"
+                  ? "border-you bg-surface text-you"
+                  : "border-transparent text-muted hover:text-ink"
               }`}
             >
               {p.label}
             </Link>
           ))}
         </nav>
-        <div className="px-4 py-3 border-t border-hairline text-[10px] text-muted num">
+        <div className="hidden px-4 py-3 border-t border-hairline text-[10px] text-muted num md:block">
           local · read-only
         </div>
       </aside>
-      <div className="flex-1 flex flex-col min-w-0">
-        <header className="flex items-center justify-between px-5 py-2.5 border-b border-hairline">
-          <span className="text-muted text-[11px] num">⌘K — command palette</span>
+      <div className="flex w-full min-w-0 flex-1 flex-col">
+        <header className="flex items-center justify-between gap-3 border-b border-hairline px-3 py-2.5 sm:px-5">
+          <span className="hidden text-muted text-[11px] num sm:inline">⌘K — command palette</span>
           <span className="text-muted text-[11px] num" data-testid="topbar-asof">
             {data?.as_of ? `data as of ${data.as_of.slice(0, 10)}` : ""}
           </span>
         </header>
-        <main className="flex-1 p-5">
+        <main className="min-w-0 flex-1 p-3 sm:p-5">
           <Outlet />
         </main>
       </div>

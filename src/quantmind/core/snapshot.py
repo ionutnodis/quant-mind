@@ -24,10 +24,9 @@ class BookSnapshot:
         """`extra` is an optional caller-supplied string folded into the hash
         (default "" reproduces the original portfolio-only identity exactly,
         so every existing caller is unaffected). book.py uses this to fold
-        option-leg fields (strike/expiry/right) into the id — `Position`
-        itself (Engineering Constraint 9's one Portfolio type) doesn't carry
-        those fields, so two books that are identical at the Position level
-        but differ only by strike would otherwise collide on the same id."""
+        option-leg fields (strike/expiry/right) into the id. The original
+        position identity is frozen for compatibility, so callers must fold
+        newer contract terms into `extra`."""
         content = "|".join(
             f"{p.con_id}:{p.qty}:{p.multiplier}:{p.sec_type}" for p in sorted(
                 portfolio.positions, key=lambda p: p.con_id

@@ -109,7 +109,7 @@ def create_app(
     broker=None,
     allowed_origins: tuple[str, ...] | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="QuantMind API", version="0.3.0.0")
+    app = FastAPI(title="QuantMind API", version="0.4.0.0")
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_error(_request: Request, error: RequestValidationError):
@@ -124,6 +124,10 @@ def create_app(
     app.state.store = store
     app.state.benchmark = benchmark
     app.state.broker = broker
+    app.state.broker_connection_status = "connected" if broker is not None else "unavailable"
+    app.state.broker_connection_error = None
+    app.state.broker_mode = None
+    app.state.broker_account_id = None
     accepted_origins = (
         _DEFAULT_ALLOWED_ORIGINS
         if allowed_origins is None
@@ -184,14 +188,14 @@ def create_app(
         if symbol in symbol_map:
             try:
                 bars, _ = store.read_bars(con_id=symbol_map[symbol], bar_size="1d")
-            except FileNotFoundError:
+            except (FileNotFoundError, KeyError, OSError, ValueError):
                 raise HTTPException(422, detail=f"symbol {symbol!r} mapped but has no cached bars")
             series = bars["close"]
         else:
             # named series (US10Y, NET_LIQUIDITY, ...) — the Lab's natural data sources
             try:
                 series = store.read_series(symbol)
-            except FileNotFoundError:
+            except (FileNotFoundError, KeyError, OSError, ValueError):
                 known = sorted(symbol_map) + store.list_series()
                 raise HTTPException(422, detail=f"{symbol!r} not in cache; known: {known}")
         if years > 0:

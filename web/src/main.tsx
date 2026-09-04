@@ -16,6 +16,7 @@ import { Lab } from "./pages/Lab";
 import { WhatIf } from "./pages/WhatIf";
 import { Macro } from "./pages/Macro";
 import { Hedge } from "./pages/Hedge";
+import { Setup } from "./pages/Setup";
 
 export const rootRoute = createRootRoute({ component: Shell });
 const routes = [
@@ -26,6 +27,9 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: "/whatif", component: WhatIf }),
   createRoute({ getParentRoute: () => rootRoute, path: "/macro", component: Macro }),
   createRoute({ getParentRoute: () => rootRoute, path: "/lab", component: Lab }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/book/setup", component: Setup }),
+  // First-use alias retained for direct links in onboarding documentation.
+  createRoute({ getParentRoute: () => rootRoute, path: "/setup", component: Setup }),
 ];
 
 export const router = createRouter({ routeTree: rootRoute.addChildren(routes) });

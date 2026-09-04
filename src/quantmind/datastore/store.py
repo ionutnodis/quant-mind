@@ -18,6 +18,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 _META_PREFIX = b"quantmind."
+_BAR_COLUMNS = frozenset({"open", "high", "low", "close", "volume"})
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,12 @@ class BarStore:
         if not path.exists():
             raise FileNotFoundError(f"no cached bars for con_id {con_id} at bar_size {bar_size}")
         table = pq.read_table(path)
+        missing_columns = _BAR_COLUMNS - set(table.column_names)
+        if missing_columns:
+            raise ValueError(
+                f"cached bars for con_id {con_id} are missing columns: "
+                f"{sorted(missing_columns)}"
+            )
         md = table.schema.metadata or {}
         meta = BarMeta(
             bar_type=md[_META_PREFIX + b"bar_type"].decode(),
@@ -64,12 +71,46 @@ class BarStore:
         return table.to_pandas(), meta
 
     def watermark(self, con_id: int, bar_size: str) -> pd.Timestamp | None:
-        """Last cached bar date — incremental sync fetches only newer bars (Constraint 6)."""
+        """Last cached bar date without decoding the full OHLCV table.
+
+        Setup polls readiness, and incremental sync calls this for every symbol.
+        Reading only the persisted pandas index keeps that check proportional to
+        one narrow timestamp column rather than the entire market cache.
+        """
         path = self._path(con_id, bar_size)
+        if path.exists():
+            parquet = pq.ParquetFile(path)
+            missing_columns = _BAR_COLUMNS - set(parquet.schema_arrow.names)
+            if missing_columns:
+                raise ValueError(
+                    f"cached bars for con_id {con_id} are missing columns: "
+                    f"{sorted(missing_columns)}"
+                )
+        return self._index_watermark(
+            path,
+            fallback=lambda: self.read_bars(con_id, bar_size)[0].index,
+        )
+
+    @staticmethod
+    def _index_watermark(path: Path, fallback) -> pd.Timestamp | None:
+        """Read the last persisted pandas index value from one Parquet file."""
         if not path.exists():
             return None
-        bars, _ = self.read_bars(con_id, bar_size)
-        return bars.index[-1]
+        parquet = pq.ParquetFile(path)
+        pandas_metadata = parquet.schema_arrow.pandas_metadata or {}
+        index_columns = pandas_metadata.get("index_columns", [])
+        index_name = index_columns[0] if index_columns else None
+        if isinstance(index_name, str):
+            last_value = None
+            for batch in parquet.iter_batches(columns=[index_name]):
+                if batch.num_rows:
+                    last_value = batch.column(0)[batch.num_rows - 1].as_py()
+            return None if last_value is None else pd.Timestamp(last_value)
+
+        # A RangeIndex has no physical Parquet column. Bar data always uses a
+        # DatetimeIndex, but retain a compatibility fallback for older files.
+        index = fallback()
+        return index[-1] if len(index) else None
 
     # --- symbol map: symbol -> conId, written by sync, read by the UI ---
 
@@ -90,6 +131,35 @@ class BarStore:
             return {}
         return {k: int(v) for k, v in json.loads(path.read_text()).items()}
 
+    def write_required_symbols(self, symbols: list[str]) -> None:
+        """Persist the universe the latest complete sync intended to serve.
+
+        The broader symbol map is intentionally merge-preserved for cached
+        history and research. Readiness must not let those orphaned mappings
+        block a current book forever, so it reads this narrower manifest.
+        """
+        import json
+
+        path = self.root / "required_symbols.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = list(dict.fromkeys(symbol for symbol in symbols if symbol))
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2))
+        tmp.replace(path)
+
+    def read_required_symbols(self) -> list[str]:
+        import json
+
+        path = self.root / "required_symbols.json"
+        if not path.exists():
+            return []
+        payload = json.loads(path.read_text())
+        if not isinstance(payload, list) or not all(
+            isinstance(symbol, str) and symbol for symbol in payload
+        ):
+            raise ValueError("required_symbols.json must contain non-empty symbols")
+        return list(dict.fromkeys(payload))
+
     # --- generic named series (FRED etc.): root/series/{name}.parquet ---
 
     def _series_path(self, name: str):
@@ -109,6 +179,13 @@ class BarStore:
             raise FileNotFoundError(f"no cached series {name!r}")
         df = pq.read_table(path).to_pandas()
         return df["value"]
+
+    def series_watermark(self, name: str) -> pd.Timestamp | None:
+        """Last named-series date without decoding the full value column."""
+        return self._index_watermark(
+            self._series_path(name),
+            fallback=lambda: self.read_series(name).index,
+        )
 
     def list_series(self) -> list[str]:
         d = self.root / "series"

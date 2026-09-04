@@ -41,8 +41,15 @@ def build_brief(store: BarStore, benchmark: str, es_confidence: float = 0.975) -
     as_of: pd.Timestamp | None = None
 
     for symbol, con_id in symbol_map.items():
-        bars, _ = store.read_bars(con_id=con_id, bar_size="1d")
-        close = bars["close"]
+        try:
+            bars, _ = store.read_bars(con_id=con_id, bar_size="1d")
+            close = bars["close"]
+        except (FileNotFoundError, KeyError, OSError, ValueError):
+            # Readiness names the incomplete/corrupt symbol and offers a
+            # resync. Today remains useful from the valid subset meanwhile.
+            continue
+        if len(close) < 2:
+            continue
         closes[symbol] = close
         tiles.append(
             Tile(

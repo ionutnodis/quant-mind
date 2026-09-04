@@ -64,6 +64,8 @@ def client(tmp_path):
     )  # IWM
     store.write_bars(con_id=4, bar_size="1d", bars=_flat_bars(), meta=meta)  # FLAT (~zero beta)
     store.write_symbol_map({"SPY": 1, "QQQ": 2, "IWM": 3, "FLAT": 4})
+    for symbol in ("SPY", "QQQ", "IWM", "FLAT"):
+        store.write_instrument_metadata(symbol, {"currency": "USD", "exchange": "SMART"})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
@@ -419,6 +421,39 @@ def test_hedge_book_ref_resolves_to_the_same_result_as_inline_book(client):
     )
     assert r_ref.status_code == r_inline.status_code == 200
     assert r_ref.json() == r_inline.json()
+
+
+def test_hedge_rejects_live_book_from_a_different_account(client):
+    from quantmind.api.routers.book import _account_fingerprint, _pin_and_respond
+    from quantmind.portfolio import Portfolio, Position
+
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=1, symbol="SPY", qty=10, currency="USD"),
+        ),
+        as_of="2026-09-04T12:00:00Z",
+    )
+    pinned = _pin_and_respond(
+        client.app.state.store,
+        portfolio,
+        portfolio.as_of,
+        source="live_ibkr",
+        account_fingerprint=_account_fingerprint("DU_ACCOUNT_A"),
+        broker_mode="paper",
+    )
+    client.app.state.broker_account_id = "DU_ACCOUNT_B"
+    client.app.state.broker_mode = "paper"
+
+    response = client.post(
+        "/api/hedge",
+        json={
+            "book_ref": pinned.snapshot_id,
+            "objective": {"kind": "beta_target", "value": 0.0},
+        },
+    )
+
+    assert response.status_code == 409
+    assert "account" in response.json()["detail"]
 
 
 def test_hedge_refuses_inline_option_legs_until_contract_repricing_exists(client):

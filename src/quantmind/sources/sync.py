@@ -29,6 +29,7 @@ async def sync_daily_bars(
     years: int = 5,
     sleep=asyncio.sleep,
     pace_seconds: float = 0.5,
+    known_con_ids: dict[str, int] | None = None,
 ) -> dict[str, int]:
     """Sync adjusted daily bars for `symbols`; returns and persists symbol -> conId.
 
@@ -40,9 +41,12 @@ async def sync_daily_bars(
     metadata fetch) don't accidentally treat other providers' symbols as
     IBKR-synced."""
     persisted_map = store.read_symbol_map()
+    known_con_ids = known_con_ids or {}
     symbol_map: dict[str, int] = {}
     for symbol in symbols:
-        con_id = await broker.resolve_stock_con_id(symbol)
+        con_id = known_con_ids.get(symbol)
+        if con_id is None:
+            con_id = await broker.resolve_stock_con_id(symbol)
         symbol_map[symbol] = con_id
         persisted_map[symbol] = con_id
 

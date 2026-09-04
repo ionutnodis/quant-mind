@@ -48,7 +48,7 @@ def _bars_for(request: Request, symbol: str) -> tuple[pd.DataFrame, int]:
     con_id = symbol_map[symbol]
     try:
         bars, _ = store.read_bars(con_id=con_id, bar_size="1d")
-    except FileNotFoundError:
+    except (FileNotFoundError, KeyError, OSError, ValueError):
         raise HTTPException(422, detail=f"symbol {symbol!r} has no cached bars")
     return bars, con_id
 
@@ -62,7 +62,7 @@ def _beta_vs_benchmark(store, close: pd.Series, symbol: str, benchmark: str) -> 
         return None
     try:
         bench_bars, _ = store.read_bars(con_id=bench_con_id, bar_size="1d")
-    except FileNotFoundError:
+    except (FileNotFoundError, KeyError, OSError, ValueError):
         return None
     aligned = pd.concat({"a": close, "b": bench_bars["close"]}, axis=1).dropna()
     window = min(_BETA_WINDOW, len(aligned) - 2)

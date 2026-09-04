@@ -149,7 +149,7 @@ export function Lab() {
 
   if (models.isLoading)
     return (
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
         <Skeleton className="h-96" />
         <Skeleton className="h-96" />
         <Skeleton className="h-96" />
@@ -165,64 +165,66 @@ export function Lab() {
     );
 
   return (
-    <div className="grid grid-cols-3 gap-3 max-w-[1600px]">
+    <div className="grid w-full grid-cols-1 gap-3 lg:grid-cols-3">
       {/* LEFT — Model */}
       <Panel title="Model" note="data source → fit">
         <div className="space-y-3">
-          <div>
-            <label htmlFor="lab-model-select" className="text-[10px] tracking-wider uppercase text-muted block mb-1">
-              Model
-            </label>
-            <select
-              id="lab-model-select"
-              className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
-              value={activeName}
-              onChange={(e) => setSelectedName(e.target.value)}
+          <div className="authoring-only-block space-y-3">
+            <div>
+              <label htmlFor="lab-model-select" className="text-[10px] tracking-wider uppercase text-muted block mb-1">
+                Model
+              </label>
+              <select
+                id="lab-model-select"
+                className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
+                value={activeName}
+                onChange={(e) => setSelectedName(e.target.value)}
+              >
+                {models.data?.map((m) => (
+                  <option key={m.name} value={m.name}>
+                    {m.label ?? m.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label htmlFor="lab-symbol" className="text-[10px] tracking-wider uppercase text-muted block mb-1">
+                  Symbol
+                </label>
+                <input
+                  id="lab-symbol"
+                  className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
+                  value={symbol}
+                  onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+                />
+              </div>
+              <div>
+                <label htmlFor="lab-years" className="text-[10px] tracking-wider uppercase text-muted block mb-1">
+                  Years
+                </label>
+                <input
+                  id="lab-years"
+                  type="number"
+                  min={0}
+                  max={25}
+                  className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
+                  value={years}
+                  onChange={(e) => setYears(Number(e.target.value))}
+                />
+              </div>
+            </div>
+
+            <button
+              type="button"
+              className="w-full border border-hairline bg-elevated hover:bg-hairline text-[12px] py-1.5 disabled:opacity-40"
+              disabled={fit.isPending}
+              onClick={() => fit.mutate()}
             >
-              {models.data?.map((m) => (
-                <option key={m.name} value={m.name}>
-                  {m.label ?? m.name}
-                </option>
-              ))}
-            </select>
+              {fit.isPending ? "Fitting…" : "Fit"}
+            </button>
           </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label htmlFor="lab-symbol" className="text-[10px] tracking-wider uppercase text-muted block mb-1">
-                Symbol
-              </label>
-              <input
-                id="lab-symbol"
-                className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
-                value={symbol}
-                onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-              />
-            </div>
-            <div>
-              <label htmlFor="lab-years" className="text-[10px] tracking-wider uppercase text-muted block mb-1">
-                Years
-              </label>
-              <input
-                id="lab-years"
-                type="number"
-                min={0}
-                max={25}
-                className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
-                value={years}
-                onChange={(e) => setYears(Number(e.target.value))}
-              />
-            </div>
-          </div>
-
-          <button
-            type="button"
-            className="w-full border border-hairline bg-elevated hover:bg-hairline text-[12px] py-1.5 disabled:opacity-40"
-            disabled={fit.isPending}
-            onClick={() => fit.mutate()}
-          >
-            {fit.isPending ? "Fitting…" : "Fit"}
-          </button>
 
           {fit.isError && <p className="text-down text-[11px]">{String(fit.error.message ?? fit.error)}</p>}
 
@@ -269,45 +271,47 @@ export function Lab() {
       {/* CENTER — Simulate */}
       <Panel title="Simulate" note="steel · percentile bands">
         <div className="space-y-3">
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label htmlFor="lab-horizon" className="text-[10px] tracking-wider uppercase text-muted block mb-1">
-                Horizon (days)
-              </label>
-              <input
-                id="lab-horizon"
-                type="number"
-                min={1}
-                max={2520}
-                className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
-                value={horizon}
-                onChange={(e) => setHorizon(Number(e.target.value))}
-              />
+          <div className="authoring-only-block space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label htmlFor="lab-horizon" className="text-[10px] tracking-wider uppercase text-muted block mb-1">
+                  Horizon (days)
+                </label>
+                <input
+                  id="lab-horizon"
+                  type="number"
+                  min={1}
+                  max={2520}
+                  className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
+                  value={horizon}
+                  onChange={(e) => setHorizon(Number(e.target.value))}
+                />
+              </div>
+              <div>
+                <label htmlFor="lab-paths" className="text-[10px] tracking-wider uppercase text-muted block mb-1">
+                  Paths
+                </label>
+                <input
+                  id="lab-paths"
+                  type="number"
+                  min={1}
+                  max={200_000}
+                  className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
+                  value={nPaths}
+                  onChange={(e) => setNPaths(Number(e.target.value))}
+                />
+              </div>
             </div>
-            <div>
-              <label htmlFor="lab-paths" className="text-[10px] tracking-wider uppercase text-muted block mb-1">
-                Paths
-              </label>
-              <input
-                id="lab-paths"
-                type="number"
-                min={1}
-                max={200_000}
-                className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
-                value={nPaths}
-                onChange={(e) => setNPaths(Number(e.target.value))}
-              />
-            </div>
-          </div>
 
-          <button
-            type="button"
-            className="w-full border border-hairline bg-elevated hover:bg-hairline text-[12px] py-1.5 disabled:opacity-40"
-            disabled={!fit.data || simulate.isPending}
-            onClick={() => simulate.mutate()}
-          >
-            {simulate.isPending ? "Simulating…" : "Simulate"}
-          </button>
+            <button
+              type="button"
+              className="w-full border border-hairline bg-elevated hover:bg-hairline text-[12px] py-1.5 disabled:opacity-40"
+              disabled={!fit.data || simulate.isPending}
+              onClick={() => simulate.mutate()}
+            >
+              {simulate.isPending ? "Simulating…" : "Simulate"}
+            </button>
+          </div>
 
           {simulate.isError && (
             <p className="text-down text-[11px]">{String(simulate.error.message ?? simulate.error)}</p>
@@ -337,47 +341,49 @@ export function Lab() {
             <span className="num text-[12px] text-ink">{schema.factor.kind}</span>
           </div>
 
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label htmlFor="lab-exposure-units" className="text-[10px] tracking-wider uppercase text-muted block mb-1">
-                Units
-              </label>
-              <select
-                id="lab-exposure-units"
-                className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
-                value={activeUnits ?? ""}
-                onChange={(e) => setExposureUnits(e.target.value)}
-                disabled={allowedUnits.length === 0}
-              >
-                {allowedUnits.map((u) => (
-                  <option key={u} value={u}>
-                    {u}
-                  </option>
-                ))}
-              </select>
+          <div className="authoring-only-block space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label htmlFor="lab-exposure-units" className="text-[10px] tracking-wider uppercase text-muted block mb-1">
+                  Units
+                </label>
+                <select
+                  id="lab-exposure-units"
+                  className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
+                  value={activeUnits ?? ""}
+                  onChange={(e) => setExposureUnits(e.target.value)}
+                  disabled={allowedUnits.length === 0}
+                >
+                  {allowedUnits.map((u) => (
+                    <option key={u} value={u}>
+                      {u}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="lab-exposure-value" className="text-[10px] tracking-wider uppercase text-muted block mb-1">
+                  Exposure value
+                </label>
+                <input
+                  id="lab-exposure-value"
+                  type="number"
+                  className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
+                  value={exposureValue}
+                  onChange={(e) => setExposureValue(Number(e.target.value))}
+                />
+              </div>
             </div>
-            <div>
-              <label htmlFor="lab-exposure-value" className="text-[10px] tracking-wider uppercase text-muted block mb-1">
-                Exposure value
-              </label>
-              <input
-                id="lab-exposure-value"
-                type="number"
-                className="num w-full bg-elevated border border-hairline px-2 py-1.5 text-[12px]"
-                value={exposureValue}
-                onChange={(e) => setExposureValue(Number(e.target.value))}
-              />
-            </div>
-          </div>
 
-          <button
-            type="button"
-            className="w-full border border-you/60 bg-you/10 hover:bg-you/20 text-you text-[12px] py-1.5 disabled:opacity-40 disabled:text-muted disabled:border-hairline disabled:bg-transparent"
-            disabled={!fit.data || !activeUnits || apply.isPending}
-            onClick={() => apply.mutate()}
-          >
-            {apply.isPending ? "Applying…" : "Apply"}
-          </button>
+            <button
+              type="button"
+              className="w-full border border-hairline bg-elevated py-1.5 text-[12px] text-ink hover:border-market hover:bg-hairline disabled:border-hairline disabled:bg-transparent disabled:text-muted disabled:opacity-40"
+              disabled={!fit.data || !activeUnits || apply.isPending}
+              onClick={() => apply.mutate()}
+            >
+              {apply.isPending ? "Applying…" : "Apply"}
+            </button>
+          </div>
 
           {apply.isError && (
             <p className="text-down text-[11px]">{String(apply.error.message ?? apply.error)}</p>

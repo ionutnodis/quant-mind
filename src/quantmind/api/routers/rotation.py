@@ -156,7 +156,7 @@ def _closes_for(
             continue  # already recorded in `missing` above
         try:
             bars, _ = store.read_bars(con_id=symbol_map[symbol], bar_size="1d")
-        except FileNotFoundError:
+        except (FileNotFoundError, KeyError, OSError, ValueError):
             missing.append(symbol)
             continue
         close = bars["close"]
@@ -243,7 +243,7 @@ def _benchmark_returns(store, symbol_map: dict[str, int], benchmark: str, years:
         return None
     try:
         bars, _ = store.read_bars(con_id=symbol_map[benchmark], bar_size="1d")
-    except FileNotFoundError:
+    except (FileNotFoundError, KeyError, OSError, ValueError):
         return None
     close = bars["close"]
     if years > 0:

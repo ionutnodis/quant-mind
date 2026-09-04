@@ -112,7 +112,7 @@ export function GlanceCharts() {
   const spread = buildSpread(macro.data?.yields?.series);
 
   return (
-    <div className="grid grid-cols-5 gap-2" data-testid="glance-charts">
+    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-5" data-testid="glance-charts">
       {GLANCE_INSTRUMENTS.map((g) => (
         <GlanceCell key={g.symbol} symbol={g.symbol} label={g.label} />
       ))}

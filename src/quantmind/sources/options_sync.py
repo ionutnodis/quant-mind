@@ -26,10 +26,12 @@ from quantmind.broker.ib_options import (
     fetch_chain_params,
     select_monthly_expiries,
     select_strikes_near_spot,
+    snapshot_held_option_quotes,
     snapshot_option_quotes,
 )
 from quantmind.datastore.options_store import OptionsSnapshotMeta, OptionsStore
 from quantmind.datastore.store import BarStore
+from quantmind.portfolio import Position
 
 _QUOTE_COLUMNS = ["expiry", "strike", "right", "con_id", "bid", "ask", "iv", "delta", "multiplier"]
 
@@ -57,6 +59,7 @@ async def sync_options_chains(
     bar_store: BarStore,
     ib,
     underliers: Sequence[str] = ("SPY", "QQQ"),
+    held_contracts: Sequence[Position] = (),
     as_of: date | None = None,
     max_days_to_expiry: int = 90,
     strike_pct: float = 0.15,
@@ -94,6 +97,26 @@ async def sync_options_chains(
             pace_seconds=pace_seconds,
             batch_size=batch_size,
         )
+        exact_quotes = await snapshot_held_option_quotes(
+            ib,
+            [position for position in held_contracts if position.symbol == underlier],
+            sleep=sleep,
+            pace_seconds=pace_seconds,
+            batch_size=batch_size,
+        )
+        # Preserve distinct contracts that share display terms (adjusted and
+        # standard deliverables can have the same expiry/strike/right). Exact
+        # held rows still override a sampled row when both carry the same
+        # authoritative conId; rows without one fall back to display terms.
+        by_contract = {
+            (
+                ("con_id", quote.con_id)
+                if quote.con_id is not None
+                else ("terms", quote.expiry, quote.strike, quote.right)
+            ): quote
+            for quote in [*quotes, *exact_quotes]
+        }
+        quotes = list(by_contract.values())
         df = _quotes_to_frame(quotes)
         options_store.write_chain(underlier, df, OptionsSnapshotMeta(as_of=str(as_of), spot=spot))
         counts[underlier] = len(df)

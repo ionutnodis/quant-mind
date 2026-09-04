@@ -28,7 +28,11 @@ from quantmind.api.routers._shared import (
     refuse_unsupported_contract_legs,
     weighted_portfolio_returns,
 )
-from quantmind.api.routers.book import read_book_positions
+from quantmind.api.routers.book import (
+    read_book,
+    read_book_positions,
+    validate_pinned_book_scope,
+)
 from quantmind.risk.montecarlo import simulate_terminal_returns
 from quantmind.risk.returns import (
     InsufficientDataError,
@@ -129,7 +133,12 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
     # (read_book_positions 422s naming the ref if it's unknown); Field's
     # min_length/max_length=1..50 only runs on an inline `positions` body, so
     # a book_ref-resolved list gets the same bounds check by hand here.
-    positions = req.positions if req.positions is not None else read_book_positions(store, req.book_ref)
+    if req.positions is not None:
+        positions = req.positions
+    else:
+        pinned = read_book(store, req.book_ref)
+        validate_pinned_book_scope(request.app.state, pinned)
+        positions = read_book_positions(store, req.book_ref)
     if not positions:
         raise HTTPException(422, detail="book_ref resolved to an empty book")
     if len(positions) > _MAX_POSITIONS:

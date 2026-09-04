@@ -11,7 +11,7 @@
  */
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { http, HttpResponse } from "msw";
+import { delay, http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
 import { Hedge } from "../pages/Hedge";
@@ -33,7 +33,10 @@ const LEVERAGE_RESPONSE = {
 
 const server = setupServer(http.post("/api/leverage", () => HttpResponse.json(LEVERAGE_RESPONSE)));
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
-afterEach(() => server.resetHandlers());
+afterEach(() => {
+  server.resetHandlers();
+  window.history.replaceState(null, "", "/");
+});
 afterAll(() => server.close());
 
 function renderHedge() {
@@ -105,6 +108,9 @@ test("shows an honest awaiting state before a run", async () => {
   expect(screen.getByText(/awaiting run/i)).toBeInTheDocument();
   // Book builder starts with one row so `book` (min 1) can always be submitted.
   expect(screen.getAllByLabelText(/symbol/i).length).toBeGreaterThan(0);
+  const run = screen.getByRole("button", { name: /^run$/i });
+  expect(run.closest(".authoring-only-block")).not.toBeNull();
+  expect(run).not.toHaveClass("border-you", "bg-you/10", "text-you");
 });
 
 test("build a book, run, and render the ranked candidates table in amber", async () => {
@@ -212,6 +218,39 @@ test("load current book populates rows and runs by book_ref", async () => {
 
   fireEvent.click(screen.getByRole("button", { name: /^run$/i }));
   await screen.findByRole("table");
+});
+
+test("book_ref query loads and submits the pinned book without showing defaults", async () => {
+  window.history.replaceState(null, "", "/hedge?book_ref=url-snapshot");
+  server.use(
+    http.get("/api/book/url-snapshot", async () => {
+      await delay(50);
+      return HttpResponse.json({ ...CURRENT_BOOK, snapshot_id: "url-snapshot" });
+    }),
+    http.post("/api/hedge", async ({ request }) => {
+      const body = (await request.json()) as { book_ref?: string; book?: unknown };
+      expect(body.book_ref).toBe("url-snapshot");
+      expect(body.book).toBeUndefined();
+      return HttpResponse.json(HEDGE_RESPONSE);
+    }),
+    http.post("/api/leverage", async ({ request }) => {
+      const body = (await request.json()) as { book_ref?: string; book?: unknown };
+      expect(body.book_ref).toBe("url-snapshot");
+      expect(body.book).toBeUndefined();
+      return HttpResponse.json(LEVERAGE_RESPONSE);
+    }),
+  );
+
+  renderHedge();
+
+  expect(screen.queryByLabelText(/qty row 1/i)).not.toBeInTheDocument();
+  expect(await screen.findByText("Loading pinned book url-snapshot…")).toBeInTheDocument();
+  await screen.findByDisplayValue("25", {}, BOOK_FETCH_TIMEOUT);
+  expect(screen.getByDisplayValue("SPY")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: /^run$/i }));
+  await screen.findByRole("table");
+  await screen.findByRole("heading", { name: "Resilience" });
 });
 
 test("editing a row after loading the current book reverts to inline positions", async () => {

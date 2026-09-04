@@ -84,7 +84,13 @@ test("schema-driven model form renders from GET /api/models", async () => {
   expect(await screen.findByText(/Ornstein-Uhlenbeck/)).toBeInTheDocument();
   expect(screen.getByLabelText(/symbol/i)).toBeInTheDocument();
   expect(screen.getByLabelText(/years/i)).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: /^fit$/i })).toBeInTheDocument();
+  const fit = screen.getByRole("button", { name: /^fit$/i });
+  const simulate = screen.getByRole("button", { name: /^simulate$/i });
+  const apply = screen.getByRole("button", { name: /^apply$/i });
+  expect(fit.closest(".authoring-only-block")).not.toBeNull();
+  expect(simulate.closest(".authoring-only-block")).not.toBeNull();
+  expect(apply.closest(".authoring-only-block")).not.toBeNull();
+  expect(apply).not.toHaveClass("border-you", "bg-you/10", "text-you");
   // Structured empty states before any fit — never a crash, never fake data.
   expect(screen.getAllByText(/awaiting fit/i).length).toBeGreaterThan(0);
 });

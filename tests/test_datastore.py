@@ -1,5 +1,7 @@
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from quantmind.datastore.store import BarMeta, BarStore
@@ -43,9 +45,47 @@ def test_watermark_is_last_bar_date(tmp_path):
     assert store.watermark(con_id=1, bar_size="1d") == df.index[-1]
 
 
+def test_watermark_reads_only_the_parquet_index_column(tmp_path, monkeypatch):
+    store = BarStore(tmp_path)
+    df = _bars("2026-01-05", 5)
+    store.write_bars(con_id=1, bar_size="1d", bars=df, meta=META)
+    monkeypatch.setattr(
+        store,
+        "read_bars",
+        lambda *_args, **_kwargs: pytest.fail("watermark loaded the full bar table"),
+    )
+
+    assert store.watermark(con_id=1, bar_size="1d") == df.index[-1]
+
+
 def test_watermark_missing_instrument_is_none(tmp_path):
     store = BarStore(tmp_path)
     assert store.watermark(con_id=999, bar_size="1d") is None
+
+
+def test_named_series_watermark_reads_the_persisted_index(tmp_path, monkeypatch):
+    store = BarStore(tmp_path)
+    series = pd.Series(
+        [4.1, 4.2, 4.3],
+        index=pd.date_range("2026-07-01", periods=3),
+    )
+    store.write_series("US10Y", series)
+    monkeypatch.setattr(
+        store,
+        "read_series",
+        lambda *_args, **_kwargs: pytest.fail("series watermark loaded the full table"),
+    )
+
+    assert store.series_watermark("US10Y") == series.index[-1]
+    assert store.series_watermark("MISSING") is None
+
+
+def test_required_symbols_round_trip_deduplicates_in_order(tmp_path):
+    store = BarStore(tmp_path)
+
+    store.write_required_symbols(["SPY", "QQQ", "SPY"])
+
+    assert store.read_required_symbols() == ["SPY", "QQQ"]
 
 
 def test_rewrite_replaces_history_for_readjustment(tmp_path):
@@ -62,6 +102,18 @@ def test_read_missing_instrument_raises_clear_error(tmp_path):
     store = BarStore(tmp_path)
     with pytest.raises(FileNotFoundError, match="con_id 42"):
         store.read_bars(con_id=42, bar_size="1d")
+
+
+def test_missing_bar_columns_are_rejected_by_reads_and_watermarks(tmp_path):
+    store = BarStore(tmp_path)
+    path = store._path(42, "1d")
+    path.parent.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pandas(pd.DataFrame({"close": [100.0]})), path)
+
+    with pytest.raises(ValueError, match="missing columns"):
+        store.read_bars(con_id=42, bar_size="1d")
+    with pytest.raises(ValueError, match="missing columns"):
+        store.watermark(con_id=42, bar_size="1d")
 
 
 # --- instrument metadata (Task A2): contract-details cache, symbol -> dict,
