@@ -14,6 +14,17 @@
             ],
             "title": "Buying Power"
           },
+          "buying_power_base": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Buying Power Base"
+          },
           "currency": {
             "title": "Currency",
             "type": "string"
@@ -29,6 +40,17 @@
             ],
             "title": "Gross Position Value"
           },
+          "gross_position_value_base": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gross Position Value Base"
+          },
           "net_liquidation": {
             "anyOf": [
               {
@@ -40,6 +62,21 @@
             ],
             "title": "Net Liquidation"
           },
+          "net_liquidation_base": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Net Liquidation Base"
+          },
+          "source_currency": {
+            "title": "Source Currency",
+            "type": "string"
+          },
           "total_cash_value": {
             "anyOf": [
               {
@@ -50,6 +87,17 @@
               }
             ],
             "title": "Total Cash Value"
+          },
+          "total_cash_value_base": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Cash Value Base"
           }
         },
         "required": [
@@ -57,7 +105,12 @@
           "total_cash_value",
           "gross_position_value",
           "buying_power",
-          "currency"
+          "net_liquidation_base",
+          "total_cash_value_base",
+          "gross_position_value_base",
+          "buying_power_base",
+          "currency",
+          "source_currency"
         ],
         "title": "AccountOut",
         "type": "object"
@@ -664,6 +717,8 @@
                   "stale_snapshot",
                   "invalid_timestamp",
                   "legacy_scope",
+                  "base_currency_mismatch",
+                  "cross_currency_option",
                   "account_mismatch",
                   "mode_mismatch",
                   "unsupported_currency",
@@ -789,6 +844,17 @@
             },
             "title": "Positions",
             "type": "array"
+          },
+          "rebased_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rebased From"
           },
           "snapshot_id": {
             "title": "Snapshot Id",
@@ -1345,6 +1411,15 @@
         "title": "CurrentBookOut",
         "type": "object"
       },
+      "DistributionPolicy": {
+        "enum": [
+          "ACCUMULATING",
+          "DISTRIBUTING",
+          "UNKNOWN"
+        ],
+        "title": "DistributionPolicy",
+        "type": "string"
+      },
       "ExpiryBucketsOut": {
         "description": "Requirement 5: option legs bucketed by days-to-expiry. Only legs that\nresolved to a priceable BookLeg (matching cached-chain IV) are bucketed \u2014\nan unpriceable OPT position has no known expiry to bucket by.",
         "properties": {
@@ -1631,6 +1706,143 @@
         "title": "FitResponse",
         "type": "object"
       },
+      "FxDataReadiness": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "base_currency": {
+            "title": "Base Currency",
+            "type": "string"
+          },
+          "missing_currencies": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Currencies",
+            "type": "array"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "required_currencies": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Currencies",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "not_required",
+              "missing",
+              "stale",
+              "ready"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "base_currency",
+          "required_currencies",
+          "missing_currencies",
+          "provider",
+          "as_of"
+        ],
+        "title": "FxDataReadiness",
+        "type": "object"
+      },
+      "FxEvidenceOut": {
+        "description": "Shared public evidence shape for every base-currency analysis.",
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "base_currency": {
+            "title": "Base Currency",
+            "type": "string"
+          },
+          "fetched_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fetched At"
+          },
+          "missing_currencies": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Currencies",
+            "type": "array"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "status": {
+            "enum": [
+              "identity",
+              "converted",
+              "incomplete"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "base_currency",
+          "source",
+          "as_of",
+          "fetched_at",
+          "missing_currencies",
+          "note"
+        ],
+        "title": "FxEvidenceOut",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1758,6 +1970,24 @@
         "title": "HedgeCandidateOut",
         "type": "object"
       },
+      "HedgeCandidateSkipOut": {
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "reason"
+        ],
+        "title": "HedgeCandidateSkipOut",
+        "type": "object"
+      },
       "HedgeRequest": {
         "properties": {
           "book": {
@@ -1793,6 +2023,8 @@
                 "items": {
                   "type": "string"
                 },
+                "maxItems": 50,
+                "minItems": 1,
                 "type": "array"
               },
               {
@@ -1864,6 +2096,22 @@
             "title": "Candidates",
             "type": "array"
           },
+          "comparison_as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comparison As Of"
+          },
+          "comparison_n_obs": {
+            "default": 0,
+            "title": "Comparison N Obs",
+            "type": "integer"
+          },
           "es_before": {
             "anyOf": [
               {
@@ -1875,15 +2123,26 @@
             ],
             "title": "Es Before"
           },
+          "fx": {
+            "$ref": "#/components/schemas/FxEvidenceOut"
+          },
           "n_candidates_evaluated": {
             "title": "N Candidates Evaluated",
             "type": "integer"
           },
           "objective": {
             "$ref": "#/components/schemas/Objective"
+          },
+          "skipped_candidates": {
+            "items": {
+              "$ref": "#/components/schemas/HedgeCandidateSkipOut"
+            },
+            "title": "Skipped Candidates",
+            "type": "array"
           }
         },
         "required": [
+          "fx",
           "benchmark",
           "objective",
           "book_value",
@@ -1891,6 +2150,7 @@
           "es_before",
           "n_candidates_evaluated",
           "candidates",
+          "skipped_candidates",
           "as_of"
         ],
         "title": "HedgeResponse",
@@ -2007,6 +2267,28 @@
             ],
             "title": "Industry"
           },
+          "isin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isin"
+          },
+          "issuer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Issuer Id"
+          },
           "last_close": {
             "anyOf": [
               {
@@ -2017,6 +2299,17 @@
               }
             ],
             "title": "Last Close"
+          },
+          "local_symbol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Symbol"
           },
           "long_name": {
             "anyOf": [
@@ -2062,6 +2355,17 @@
             ],
             "title": "Pct From 52W Low"
           },
+          "primary_exchange": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Primary Exchange"
+          },
           "provider": {
             "anyOf": [
               {
@@ -2084,6 +2388,35 @@
             ],
             "title": "Region"
           },
+          "risk": {
+            "$ref": "#/components/schemas/InstrumentRiskReadiness"
+          },
+          "risk_base_currency": {
+            "title": "Risk Base Currency",
+            "type": "string"
+          },
+          "risk_fx_as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Risk Fx As Of"
+          },
+          "risk_fx_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Risk Fx Source"
+          },
           "sec_type": {
             "anyOf": [
               {
@@ -2095,9 +2428,69 @@
             ],
             "title": "Sec Type"
           },
+          "stock_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stock Type"
+          },
           "symbol": {
             "title": "Symbol",
             "type": "string"
+          },
+          "trading_class": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trading Class"
+          },
+          "ucits_profile": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UcitsEtfProfileV1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ucits_profile_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ucits Profile Reason"
+          },
+          "ucits_profile_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProfileFreshness"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "valid_exchanges": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Valid Exchanges",
+            "type": "array"
           }
         },
         "required": [
@@ -2110,6 +2503,16 @@
           "industry",
           "region",
           "provider",
+          "isin",
+          "primary_exchange",
+          "local_symbol",
+          "trading_class",
+          "stock_type",
+          "valid_exchanges",
+          "issuer_id",
+          "ucits_profile_status",
+          "ucits_profile_reason",
+          "ucits_profile",
           "last_close",
           "high_52w",
           "low_52w",
@@ -2118,9 +2521,67 @@
           "ann_vol",
           "beta",
           "beta_benchmark",
+          "risk_base_currency",
+          "risk_fx_source",
+          "risk_fx_as_of",
+          "risk",
           "as_of"
         ],
         "title": "InstrumentResponse",
+        "type": "object"
+      },
+      "InstrumentRiskReadiness": {
+        "properties": {
+          "base_currency": {
+            "title": "Base Currency",
+            "type": "string"
+          },
+          "benchmark": {
+            "title": "Benchmark",
+            "type": "string"
+          },
+          "fx": {
+            "$ref": "#/components/schemas/FxEvidenceOut"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "fx_unavailable",
+                  "missing_benchmark",
+                  "insufficient_history"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "partial",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "reason",
+          "benchmark",
+          "base_currency",
+          "fx",
+          "note"
+        ],
+        "title": "InstrumentRiskReadiness",
         "type": "object"
       },
       "LabApplyRequest": {
@@ -2353,6 +2814,9 @@
             "title": "Drawdown Budget",
             "type": "number"
           },
+          "fx": {
+            "$ref": "#/components/schemas/FxEvidenceOut"
+          },
           "gross": {
             "anyOf": [
               {
@@ -2403,6 +2867,7 @@
           }
         },
         "required": [
+          "fx",
           "symbols",
           "n_obs",
           "max_drawdown",
@@ -2642,6 +3107,32 @@
         "title": "MarketDataReadiness",
         "type": "object"
       },
+      "MetadataProvenanceV1": {
+        "additionalProperties": false,
+        "properties": {
+          "fetched_at_utc": {
+            "format": "date-time",
+            "title": "Fetched At Utc",
+            "type": "string"
+          },
+          "source": {
+            "const": "justetf",
+            "title": "Source",
+            "type": "string"
+          },
+          "source_url": {
+            "title": "Source Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "source_url",
+          "fetched_at_utc"
+        ],
+        "title": "MetadataProvenanceV1",
+        "type": "object"
+      },
       "MonteCarloOut": {
         "properties": {
           "histogram": {
@@ -2777,6 +3268,9 @@
             ],
             "title": "Es 975"
           },
+          "fx": {
+            "$ref": "#/components/schemas/FxEvidenceOut"
+          },
           "histogram": {
             "$ref": "#/components/schemas/Histogram"
           },
@@ -2831,6 +3325,7 @@
           }
         },
         "required": [
+          "fx",
           "symbol",
           "horizon",
           "n_paths",
@@ -3348,6 +3843,9 @@
             "title": "Exposure",
             "type": "array"
           },
+          "fx": {
+            "$ref": "#/components/schemas/FxEvidenceOut"
+          },
           "options_sleeve": {
             "$ref": "#/components/schemas/OptionsSleeveOut"
           },
@@ -3374,6 +3872,7 @@
           "snapshot_id",
           "valuation_ts",
           "base_currency",
+          "fx",
           "positions",
           "totals",
           "account",
@@ -3493,6 +3992,50 @@
             "title": "Con Id",
             "type": "integer"
           },
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
+          "exchange": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exchange"
+          },
+          "expiry": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiry"
+          },
+          "fx_rate_to_base": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fx Rate To Base"
+          },
           "last_close": {
             "anyOf": [
               {
@@ -3503,6 +4046,17 @@
               }
             ],
             "title": "Last Close"
+          },
+          "local_market_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Market Value"
           },
           "market_value": {
             "anyOf": [
@@ -3523,9 +4077,35 @@
             "title": "Qty",
             "type": "number"
           },
+          "right": {
+            "anyOf": [
+              {
+                "enum": [
+                  "C",
+                  "P"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Right"
+          },
           "sec_type": {
             "title": "Sec Type",
             "type": "string"
+          },
+          "strike": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strike"
           },
           "symbol": {
             "title": "Symbol",
@@ -3541,6 +4121,17 @@
               }
             ],
             "title": "Unrealized Pnl"
+          },
+          "unrealized_pnl_local": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unrealized Pnl Local"
           },
           "weight": {
             "anyOf": [
@@ -3560,12 +4151,28 @@
           "qty",
           "sec_type",
           "multiplier",
+          "exchange",
+          "strike",
+          "expiry",
+          "right",
+          "currency",
           "last_close",
+          "fx_rate_to_base",
+          "local_market_value",
           "market_value",
           "weight"
         ],
         "title": "PositionOut",
         "type": "object"
+      },
+      "ProfileFreshness": {
+        "enum": [
+          "FRESH",
+          "STALE",
+          "MISSING"
+        ],
+        "title": "ProfileFreshness",
+        "type": "string"
       },
       "R2Step": {
         "properties": {
@@ -3705,6 +4312,9 @@
           "fit_line": {
             "$ref": "#/components/schemas/FitLine"
           },
+          "fx": {
+            "$ref": "#/components/schemas/FxEvidenceOut"
+          },
           "hac_lags": {
             "title": "Hac Lags",
             "type": "integer"
@@ -3788,6 +4398,7 @@
           }
         },
         "required": [
+          "fx",
           "symbol",
           "factors",
           "window",
@@ -3938,6 +4549,9 @@
             ],
             "title": "Es 975"
           },
+          "fx": {
+            "$ref": "#/components/schemas/FxEvidenceOut"
+          },
           "mean_arith_annual": {
             "anyOf": [
               {
@@ -3967,6 +4581,7 @@
           }
         },
         "required": [
+          "fx",
           "symbol",
           "benchmark",
           "window",
@@ -4275,6 +4890,9 @@
           "broker": {
             "$ref": "#/components/schemas/BrokerReadiness"
           },
+          "fx_data": {
+            "$ref": "#/components/schemas/FxDataReadiness"
+          },
           "macro_data": {
             "$ref": "#/components/schemas/MacroDataReadiness"
           },
@@ -4288,9 +4906,11 @@
               "wait_for_gateway",
               "sync_market_data",
               "sync_option_data",
+              "sync_fx_data",
               "pin_book",
               "resolve_currency",
               "resolve_instruments",
+              "rebase_option_book",
               "ready"
             ],
             "title": "Next Action",
@@ -4306,6 +4926,9 @@
             ],
             "title": "Overall",
             "type": "string"
+          },
+          "ucits_data": {
+            "$ref": "#/components/schemas/UcitsDataReadiness"
           }
         },
         "required": [
@@ -4315,6 +4938,8 @@
           "market_data",
           "macro_data",
           "options_data",
+          "fx_data",
+          "ucits_data",
           "book",
           "next_action"
         ],
@@ -4730,6 +5355,152 @@
         "title": "Totals",
         "type": "object"
       },
+      "UcitsDataReadiness": {
+        "properties": {
+          "missing_symbols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Symbols",
+            "type": "array"
+          },
+          "ready_profiles": {
+            "title": "Ready Profiles",
+            "type": "integer"
+          },
+          "stale_symbols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Stale Symbols",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "not_required",
+              "incomplete",
+              "stale",
+              "ready"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "total_etfs": {
+            "title": "Total Etfs",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "total_etfs",
+          "ready_profiles",
+          "missing_symbols",
+          "stale_symbols"
+        ],
+        "title": "UcitsDataReadiness",
+        "type": "object"
+      },
+      "UcitsEtfProfileV1": {
+        "additionalProperties": false,
+        "properties": {
+          "benchmark_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Benchmark Name"
+          },
+          "distribution_policy": {
+            "$ref": "#/components/schemas/DistributionPolicy"
+          },
+          "domicile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domicile"
+          },
+          "fund_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fund Name"
+          },
+          "isin": {
+            "title": "Isin",
+            "type": "string"
+          },
+          "issuer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Issuer"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/MetadataProvenanceV1"
+          },
+          "replication_method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replication Method"
+          },
+          "schema_version": {
+            "const": "ucits_etf_profile_v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "ter_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ter Pct"
+          }
+        },
+        "required": [
+          "schema_version",
+          "isin",
+          "fund_name",
+          "issuer",
+          "domicile",
+          "ter_pct",
+          "distribution_policy",
+          "replication_method",
+          "benchmark_name",
+          "provenance"
+        ],
+        "title": "UcitsEtfProfileV1",
+        "type": "object"
+      },
       "UnderlyingExposureOut": {
         "description": "Delta-adjusted exposure (Task B1 requirement 2 \u2014 \"the number he\nmanages to\"): net delta (shares + option legs via book_greeks),\ndollar-delta, and SPY-equivalent notional (dollar-delta * per-underlier\nbeta vs the app benchmark, estimated from cached bars).",
         "properties": {
@@ -4755,6 +5526,17 @@
             ],
             "title": "Beta Note"
           },
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
           "dollar_delta": {
             "anyOf": [
               {
@@ -4765,6 +5547,17 @@
               }
             ],
             "title": "Dollar Delta"
+          },
+          "fx_rate_to_base": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fx Rate To Base"
           },
           "net_delta": {
             "anyOf": [
@@ -5099,6 +5892,9 @@
             ],
             "title": "Es 975"
           },
+          "fx": {
+            "$ref": "#/components/schemas/FxEvidenceOut"
+          },
           "mc": {
             "$ref": "#/components/schemas/MonteCarloOut"
           },
@@ -5115,6 +5911,7 @@
           }
         },
         "required": [
+          "fx",
           "weights",
           "beta",
           "es_975",
@@ -5295,6 +6092,46 @@
           }
         },
         "summary": "Get Book"
+      }
+    },
+    "/api/book/{snapshot_id}/rebase": {
+      "post": {
+        "description": "Mint an immutable reporting-currency successor without rewriting history.",
+        "operationId": "rebase_book_api_book__snapshot_id__rebase_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "title": "Snapshot Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookSnapshotOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rebase Book"
       }
     },
     "/api/brief": {

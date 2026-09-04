@@ -41,7 +41,16 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from quantmind.api.routers._shared import PositionIn, clean, downsample, iso, weighted_portfolio_returns
+from quantmind.api.routers._shared import (
+    FxEvidenceOut,
+    PositionIn,
+    clean,
+    complete_fx_evidence,
+    downsample,
+    iso,
+    read_instrument_metadata_map,
+    weighted_portfolio_returns,
+)
 from quantmind.api.routers.book import (
     ResolvedBookPosition,
     read_book,
@@ -53,6 +62,7 @@ from quantmind.datastore.options_store import OptionsSnapshotMeta, OptionsStore
 from quantmind.exposure.attribution import InsufficientDataError as AttributionInsufficientDataError
 from quantmind.exposure.attribution import decompose_book_pnl, summarize_pnl_split
 from quantmind.exposure.book_greeks import BookLeg, aggregate_book_stress_grid, compute_book_greeks
+from quantmind.fx import FxConversionUnavailable, FxConverter
 from quantmind.portfolio import Portfolio, Position, option_terms_complete
 from quantmind.risk.returns import InsufficientDataError as ReturnsInsufficientDataError
 from quantmind.risk.returns import rolling_beta
@@ -78,7 +88,17 @@ class PositionOut(BaseModel):
     qty: float
     sec_type: str
     multiplier: float
+    # Exact broker/canonical identity is part of the reconciliation surface,
+    # not merely an implementation detail.  Keep option terms on every row
+    # even when the chain is missing and valuation therefore degrades to null.
+    exchange: str | None
+    strike: float | None
+    expiry: str | None
+    right: Literal["C", "P"] | None
+    currency: str | None
     last_close: float | None
+    fx_rate_to_base: float | None
+    local_market_value: float | None
     market_value: float | None
     weight: float | None
     # Ledger essentials (Task B1): cost basis + unrealized P&L. Both null
@@ -87,6 +107,7 @@ class PositionOut(BaseModel):
     # this position's cost basis) — mark is the cached last close, honest
     # null when either side of the P&L calc is missing.
     avg_cost: float | None = None
+    unrealized_pnl_local: float | None = None
     unrealized_pnl: float | None = None
 
 
@@ -106,7 +127,12 @@ class AccountOut(BaseModel):
     total_cash_value: float | None
     gross_position_value: float | None
     buying_power: float | None
+    net_liquidation_base: float | None
+    total_cash_value_base: float | None
+    gross_position_value_base: float | None
+    buying_power_base: float | None
     currency: str
+    source_currency: str
 
 
 class UnderlyingExposureOut(BaseModel):
@@ -116,6 +142,8 @@ class UnderlyingExposureOut(BaseModel):
     beta vs the app benchmark, estimated from cached bars)."""
 
     underlier: str
+    currency: str | None = None
+    fx_rate_to_base: float | None = None
     spot: float | None
     net_delta: float | None
     dollar_delta: float | None
@@ -208,6 +236,7 @@ class PortfolioResponse(BaseModel):
     snapshot_id: str
     valuation_ts: str
     base_currency: str
+    fx: FxEvidenceOut
     positions: list[PositionOut]
     totals: Totals
     account: AccountOut | None
@@ -238,6 +267,20 @@ def _last_close(series: pd.Series | None) -> float | None:
     return clean(float(series.iloc[-1]))
 
 
+def _last_observation_date(series: pd.Series | None) -> date | None:
+    """Return the date belonging to the accepted last market observation.
+
+    Spot conversion must be keyed to the mark itself, not the request date:
+    otherwise a newer FX observation can leak into an older cached close.
+    """
+    if series is None or series.empty:
+        return None
+    try:
+        return pd.Timestamp(series.index[-1]).date()
+    except (TypeError, ValueError):
+        return None
+
+
 def _series_is_stale(series: pd.Series | None, today: date) -> bool:
     if series is None or series.empty:
         return True
@@ -257,8 +300,14 @@ def _last_beta(asset: pd.Series, bench: pd.Series) -> float | None:
     aligned = pd.concat({"asset": asset, "bench": bench}, axis=1).dropna()
     if len(aligned) < _BETA_WINDOW + 2:
         return None
+    returns = aligned.pct_change().dropna()
     try:
-        beta_series = rolling_beta(aligned["asset"], aligned["bench"], window=_BETA_WINDOW, rf=_RISK_FREE_RATE)
+        beta_series = rolling_beta(
+            returns["asset"],
+            returns["bench"],
+            window=_BETA_WINDOW,
+            rf=_RISK_FREE_RATE,
+        )
     except ReturnsInsufficientDataError:
         return None
     beta_valid = beta_series.dropna()
@@ -283,34 +332,149 @@ async def _resolve_avg_costs(broker) -> dict[int, float]:
         return {}
 
 
-async def _resolve_account(broker, book_ref: str | None) -> tuple[AccountOut | None, str | None]:
+async def _resolve_account(
+    broker,
+    book_ref: str | None,
+    *,
+    store,
+    base_currency: str,
+    as_of: date,
+) -> tuple[AccountOut | None, str | None, FxEvidenceOut | None]:
     if book_ref is not None:
-        return None, "NO MATERIAL LINK — account values reflect the live broker connection, not this pinned book"
+        return None, "NO MATERIAL LINK — account values reflect the live broker connection, not this pinned book", None
     if broker is None:
-        return None, "NO MATERIAL LINK — no broker connected"
+        return None, "NO MATERIAL LINK — no broker connected", None
     get_account_summary = getattr(broker, "get_account_summary", None)
     if get_account_summary is None:
-        return None, "broker does not report account summary"
+        return None, "broker does not report account summary", None
     try:
         summary = await get_account_summary()
     except Exception:
-        return None, "account summary unavailable (broker request failed)"
+        return None, "account summary unavailable (broker request failed)", None
     currency = summary.get("currency")
     if currency is None:
         return (
             None,
             "account summary withheld because the broker did not label its base currency",
+            None,
         )
-    if currency != "USD":
-        raise HTTPException(
-            422,
-            detail=(
-                "FX normalization is not available for account totals in "
-                f"{currency!r}; USD account totals are required"
-            ),
+    source_currency = str(currency).strip().upper()
+    monetary_fields = (
+        "net_liquidation",
+        "total_cash_value",
+        "gross_position_value",
+        "buying_power",
+    )
+    local = {field: clean(summary.get(field)) for field in monetary_fields}
+    rate = 1.0
+    if source_currency != base_currency:
+        try:
+            converter = FxConverter.from_store(
+                store,
+                base_currency=base_currency,
+                currencies={source_currency},
+            )
+            rate = converter.rate(source_currency, as_of)
+        except (FxConversionUnavailable, ValueError) as exc:
+            account = AccountOut(
+                **local,
+                **{f"{field}_base": None for field in monetary_fields},
+                currency=source_currency,
+                source_currency=source_currency,
+            )
+            return (
+                account,
+                f"Broker totals remain in {source_currency}; dated normalization to "
+                f"{base_currency} is unavailable ({exc}). Run sync to refresh FX.",
+                FxEvidenceOut(
+                    status="incomplete",
+                    base_currency=base_currency,
+                    source=None,
+                    as_of=None,
+                    fetched_at=None,
+                    missing_currencies=[source_currency],
+                    note=(
+                        f"Broker account values in {source_currency} could not be "
+                        f"normalized to {base_currency}."
+                    ),
+                ),
+            )
+    converted = {
+        f"{field}_base": (
+            clean(summary.get(field) * rate)
+            if summary.get(field) is not None
+            else None
         )
-    account = AccountOut(**summary)
-    return account, None
+        for field in monetary_fields
+    }
+    account = AccountOut(
+        **local,
+        **converted,
+        currency=source_currency,
+        source_currency=source_currency,
+    )
+    account_evidence = (
+        complete_fx_evidence(converter, base_currency=base_currency)
+        if source_currency != base_currency
+        else FxEvidenceOut(
+            status="identity",
+            base_currency=base_currency,
+            source=None,
+            as_of=None,
+            fetched_at=None,
+            missing_currencies=[],
+            note=f"Broker account values are denominated in {base_currency}.",
+        )
+    )
+    return account, None, account_evidence
+
+
+def _merge_fx_evidence(
+    position_evidence: FxEvidenceOut,
+    account_evidence: FxEvidenceOut | None,
+    *,
+    base_currency: str,
+) -> FxEvidenceOut:
+    """Combine position and live-account conversion provenance without hiding either."""
+    if account_evidence is None:
+        return position_evidence
+    missing = sorted(
+        set(position_evidence.missing_currencies) | set(account_evidence.missing_currencies)
+    )
+    sources = sorted(
+        {
+            source
+            for source in (position_evidence.source, account_evidence.source)
+            if source
+        }
+    )
+    as_of_values = [
+        value for value in (position_evidence.as_of, account_evidence.as_of) if value
+    ]
+    fetched_values = [
+        value
+        for value in (position_evidence.fetched_at, account_evidence.fetched_at)
+        if value
+    ]
+    converted = bool(sources)
+    return FxEvidenceOut(
+        status="incomplete" if missing else "converted" if converted else "identity",
+        base_currency=base_currency,
+        source=", ".join(sources) or None,
+        as_of=min(as_of_values) if as_of_values else None,
+        fetched_at=min(fetched_values) if fetched_values else None,
+        missing_currencies=missing,
+        note=(
+            f"Account or position values in {missing} could not be normalized to "
+            f"{base_currency}; available local values are retained."
+            if missing
+            else f"Portfolio positions and broker account values are normalized to "
+            f"{base_currency} with dated FX evidence."
+            if converted
+            else f"Portfolio positions and broker account values are denominated in "
+            f"{base_currency}."
+        ),
+    )
 
 
 def _book_from_book_ref(
@@ -589,6 +753,7 @@ def _compute_attribution(
     benchmark: str,
     symbol_map: dict[str, int],
     window_days: int,
+    benchmark_series: pd.Series | None = None,
 ) -> AttributionOut:
     empty = lambda reason: _empty_attribution(reason, window_days)  # noqa: E731
 
@@ -599,7 +764,11 @@ def _compute_attribution(
 
     if benchmark not in symbol_map:
         return empty(f"benchmark {benchmark!r} not in cache")
-    bench_series = _close_series(store, symbol_map[benchmark])
+    bench_series = (
+        benchmark_series
+        if benchmark_series is not None
+        else _close_series(store, symbol_map[benchmark])
+    )
     if bench_series is None:
         return empty(f"benchmark {benchmark!r} has no cached bars")
     bench_returns = bench_series.pct_change().dropna()
@@ -662,6 +831,7 @@ async def get_portfolio(
     store = request.app.state.store
     broker = request.app.state.broker
     benchmark = request.app.state.benchmark
+    base_currency = request.app.state.base_currency
 
     valuation_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     pinned_snapshot_id: str | None = None
@@ -710,19 +880,40 @@ async def get_portfolio(
             for p in portfolio.positions
         ]
 
-    unsupported_currencies = sorted(
+    instrument_metadata = read_instrument_metadata_map(store)
+    resolved_position_currencies = [
+        (
+            position.currency.strip().upper()
+            if position.currency and position.currency.strip()
+            else str((instrument_metadata.get(position.symbol) or {}).get("currency") or "")
+            .strip()
+            .upper()
+            or None
+        )
+        for position in portfolio.positions
+    ]
+    account, account_note, account_fx_evidence = await _resolve_account(
+        broker,
+        book_ref,
+        store=store,
+        base_currency=base_currency,
+        as_of=today,
+    )
+    unsupported_option_currencies = sorted(
         {
-            position.currency
-            for position in portfolio.positions
-            if position.currency not in {None, "USD"}
+            currency or "UNKNOWN"
+            for position, currency in zip(portfolio.positions, resolved_position_currencies)
+            if position.sec_type == "OPT"
+            and currency != base_currency
         }
     )
-    if unsupported_currencies:
+    if unsupported_option_currencies:
         raise HTTPException(
             422,
             detail=(
-                "FX normalization is not available for portfolio currencies: "
-                f"{unsupported_currencies}"
+                "cross-currency option aggregation is not available until all "
+                "Greeks and stress P&L are normalized leg-by-leg; unsupported "
+                f"option currencies: {unsupported_option_currencies}"
             ),
         )
     unsupported_security_types = sorted(
@@ -742,8 +933,62 @@ async def get_portfolio(
         )
 
     snapshot_id = pinned_snapshot_id or BookSnapshot.create(
-        portfolio, valuation_ts=valuation_ts, base_currency="USD"
+        portfolio, valuation_ts=valuation_ts, base_currency=base_currency
     ).snapshot_id
+
+    position_currencies = {
+        currency for currency in resolved_position_currencies if currency is not None
+    }
+    unknown_currency = any(currency is None for currency in resolved_position_currencies)
+    missing_currencies: set[str] = {"UNKNOWN"} if unknown_currency else set()
+    fx_converter: FxConverter | None = None
+    if position_currencies - {base_currency}:
+        try:
+            fx_converter = FxConverter.from_store(
+                store,
+                base_currency=base_currency,
+                currencies=position_currencies,
+            )
+        except (FxConversionUnavailable, ValueError):
+            missing_currencies.update(position_currencies - {base_currency})
+
+    if missing_currencies:
+        fx_status = FxEvidenceOut(
+            status="incomplete",
+            base_currency=base_currency,
+            source=None,
+            as_of=None,
+            fetched_at=None,
+            missing_currencies=sorted(missing_currencies),
+            note=(
+                f"Local values are shown, but {base_currency} totals exclude account or "
+                "position values without trustworthy dated FX. Run sync to refresh ECB "
+                "reference rates."
+            ),
+        )
+    elif position_currencies - {base_currency}:
+        fx_status = FxEvidenceOut(
+            status="converted",
+            base_currency=base_currency,
+            source=fx_converter.source if fx_converter is not None else None,
+            as_of=fx_converter.as_of if fx_converter is not None else None,
+            fetched_at=fx_converter.fetched_at if fx_converter is not None else None,
+            missing_currencies=[],
+            note=(
+                f"Market values are normalized to {base_currency} with dated ECB "
+                "reference rates; local unit prices are retained."
+            ),
+        )
+    else:
+        fx_status = FxEvidenceOut(
+            status="identity",
+            base_currency=base_currency,
+            source=None,
+            as_of=None,
+            fetched_at=None,
+            missing_currencies=[],
+            note=f"All priced positions are already denominated in {base_currency}.",
+        )
 
     # --- ledger essentials: price, cost basis, unrealized P&L ---
     avg_costs: dict[int, float] = {}
@@ -762,9 +1007,14 @@ async def get_portfolio(
     options_store = OptionsStore(store.root)
     option_chain_cache: dict[str, tuple[pd.DataFrame, OptionsSnapshotMeta] | None] = {}
     close_series: dict[int, pd.Series] = {}
+    base_close_series: dict[int, pd.Series] = {}
     last_closes: list[float | None] = []
+    fx_rates: list[float | None] = []
+    local_market_values: list[float | None] = []
     market_values: list[float | None] = []
-    for p, leg in zip(portfolio.positions, option_legs):
+    for p, leg, currency in zip(
+        portfolio.positions, option_legs, resolved_position_currencies
+    ):
         if p.con_id not in close_series:
             series = _close_series(store, p.con_id)
             if series is not None:
@@ -779,7 +1029,65 @@ async def get_portfolio(
             )
         )
         last_closes.append(last_close)
-        market_values.append(clean(p.qty * p.multiplier * last_close) if last_close is not None else None)
+        mark_date = (
+            _last_observation_date(close_series.get(p.con_id))
+            if last_close is not None and p.sec_type == "STK"
+            else today if last_close is not None else None
+        )
+        local_mv = (
+            clean(p.qty * p.multiplier * last_close)
+            if last_close is not None
+            else None
+        )
+        local_market_values.append(local_mv)
+        rate: float | None = None
+        if currency == base_currency and mark_date is not None:
+            rate = 1.0
+        elif (
+            currency is not None
+            and fx_converter is not None
+            and mark_date is not None
+        ):
+            try:
+                rate = clean(fx_converter.rate(currency, mark_date))
+            except FxConversionUnavailable:
+                missing_currencies.add(currency)
+        fx_rates.append(rate)
+        market_values.append(
+            clean(local_mv * rate)
+            if local_mv is not None and rate is not None
+            else None
+        )
+        local_history = close_series.get(p.con_id)
+        if local_history is not None:
+            if currency == base_currency:
+                base_close_series[p.con_id] = local_history
+            elif currency is not None and fx_converter is not None:
+                try:
+                    base_close_series[p.con_id] = fx_converter.convert_series(
+                        local_history, currency
+                    )
+                except FxConversionUnavailable:
+                    pass
+
+    if missing_currencies:
+        fx_status = FxEvidenceOut(
+            status="incomplete",
+            base_currency=base_currency,
+            source=fx_converter.source if fx_converter is not None else None,
+            as_of=fx_converter.as_of if fx_converter is not None else None,
+            fetched_at=fx_converter.fetched_at if fx_converter is not None else None,
+            missing_currencies=sorted(missing_currencies),
+            note=(
+                f"Local marks are shown, but {base_currency} totals exclude positions "
+                "without trustworthy dated FX. Run sync to refresh ECB reference rates."
+            ),
+        )
+    fx_status = _merge_fx_evidence(
+        fx_status,
+        account_fx_evidence,
+        base_currency=base_currency,
+    )
 
     known_mvs = [mv for mv in market_values if mv is not None]
     priced_mv = sum(known_mvs) if known_mvs else None
@@ -790,13 +1098,26 @@ async def get_portfolio(
 
     positions_out: list[PositionOut] = []
     unrealized_values: list[float] = []
-    for p, last_close, mv in zip(portfolio.positions, last_closes, market_values):
+    for p, currency, last_close, rate, local_mv, mv in zip(
+        portfolio.positions,
+        resolved_position_currencies,
+        last_closes,
+        fx_rates,
+        local_market_values,
+        market_values,
+    ):
         avg_cost = clean(avg_costs.get(p.con_id))
-        unrealized = (
+        unrealized_local = (
             clean((last_close - avg_cost) * p.qty * p.multiplier)
             if last_close is not None and avg_cost is not None
             else None
         )
+        # IBKR avgCost is in the instrument's local quote currency. Current
+        # FX can normalize today's market value, but it cannot reconstruct
+        # acquisition-date base cost or the FX gain/loss on invested capital.
+        # Until lot-level historical FX (or broker base P&L) is available,
+        # expose foreign P&L only in local currency and withhold the base total.
+        unrealized = unrealized_local if currency == base_currency else None
         if unrealized is not None:
             unrealized_values.append(unrealized)
         positions_out.append(
@@ -806,10 +1127,18 @@ async def get_portfolio(
                 qty=p.qty,
                 sec_type=p.sec_type,
                 multiplier=p.multiplier,
+                exchange=p.exchange,
+                strike=p.strike,
+                expiry=p.expiry,
+                right=p.right,
+                currency=currency,
                 last_close=last_close,
+                fx_rate_to_base=rate,
+                local_market_value=local_mv,
                 market_value=mv,
                 weight=(mv / total_mv if valuation_complete and mv is not None and total_mv else None),
                 avg_cost=avg_cost,
+                unrealized_pnl_local=unrealized_local,
                 unrealized_pnl=unrealized,
             )
         )
@@ -841,10 +1170,50 @@ async def get_portfolio(
         ),
     )
 
-    account, account_note = await _resolve_account(broker, book_ref)
-
     # --- delta-adjusted exposure + options sleeve + expiry buckets ---
     symbol_map = store.read_symbol_map()
+    symbol_currencies: dict[str, str | None] = {}
+    for position, currency in zip(
+        portfolio.positions, resolved_position_currencies
+    ):
+        symbol_currencies.setdefault(position.symbol, currency)
+
+    benchmark_local_series = (
+        _close_series(store, symbol_map[benchmark]) if benchmark in symbol_map else None
+    )
+    benchmark_base_series = benchmark_local_series
+    benchmark_currency = (
+        (store.read_instrument_metadata(benchmark) or {}).get("currency")
+        if benchmark in symbol_map
+        else None
+    )
+    if (
+        benchmark_local_series is not None
+        and benchmark_currency
+        and benchmark_currency != base_currency
+    ):
+        # The position converter is intentionally scoped to held currencies.
+        # A foreign benchmark can be a different currency, so construct an
+        # evidence set that explicitly includes it instead of reusing a
+        # converter that may not have loaded the required quote.
+        try:
+            analysis_converter = FxConverter.from_store(
+                store,
+                base_currency=base_currency,
+                currencies={benchmark_currency},
+            )
+        except (FxConversionUnavailable, ValueError):
+            analysis_converter = None
+        if analysis_converter is not None:
+            try:
+                benchmark_base_series = analysis_converter.convert_series(
+                    benchmark_local_series, benchmark_currency
+                )
+            except FxConversionUnavailable:
+                benchmark_base_series = None
+        else:
+            benchmark_base_series = None
+
     groups: dict[str, list[tuple[Position, object | None]]] = {}
     for p, leg in zip(portfolio.positions, option_legs):
         groups.setdefault(p.symbol, []).append((p, leg))
@@ -862,6 +1231,7 @@ async def get_portfolio(
     unpriceable_option_underliers: set[str] = set()
     expiry_rows: list[ExpiryLegOut] = []
     underlier_betas: dict[str, float | None] = {}
+    underlier_fx_rates: dict[str, float | None] = {}
 
     for underlier, group in groups.items():
         group_has_options = any(p.sec_type == "OPT" for p, _ in group)
@@ -870,17 +1240,45 @@ async def get_portfolio(
                 unpriceable_option_underliers.add(underlier)
             continue
         spot_series = _close_series(store, symbol_map[underlier])
-        spot = _last_close(spot_series)
-        if spot is None:
+        # Exposure, Greeks, and stress P&L are just as mark-sensitive as the
+        # ledger. Reuse the ledger freshness contract so a fresh chain cannot
+        # revive an arbitrarily old underlier spot.
+        spot_is_stale = _series_is_stale(spot_series, today)
+        spot = None if spot_is_stale else _last_close(spot_series)
+        spot_date = None if spot_is_stale else _last_observation_date(spot_series)
+        underlier_currency = symbol_currencies.get(underlier)
+        underlier_rate: float | None = None
+        if underlier_currency == base_currency and spot_date is not None:
+            underlier_rate = 1.0
+        elif (
+            underlier_currency is not None
+            and fx_converter is not None
+            and spot_date is not None
+        ):
+            try:
+                underlier_rate = clean(
+                    fx_converter.rate(underlier_currency, spot_date)
+                )
+            except FxConversionUnavailable:
+                underlier_rate = None
+        underlier_fx_rates[underlier] = underlier_rate
+        if spot is None or underlier_rate is None:
             if group_has_options:
                 unpriceable_option_underliers.add(underlier)
             continue
 
+        risk_series = base_close_series.get(symbol_map[underlier])
+        if risk_series is None:
+            risk_series = spot_series if underlier_rate == 1.0 else None
+
         if underlier == benchmark:
             beta: float | None = 1.0
         else:
-            bench_series = _close_series(store, symbol_map[benchmark]) if benchmark in symbol_map else None
-            beta = _last_beta(spot_series, bench_series) if bench_series is not None else None
+            beta = (
+                _last_beta(risk_series, benchmark_base_series)
+                if risk_series is not None and benchmark_base_series is not None
+                else None
+            )
         underlier_betas[underlier] = beta
 
         for p, leg in group:
@@ -906,11 +1304,22 @@ async def get_portfolio(
     exposure_out = [
         UnderlyingExposureOut(
             underlier=u.underlier,
+            currency=symbol_currencies.get(u.underlier),
+            fx_rate_to_base=clean(underlier_fx_rates.get(u.underlier)),
             spot=clean(u.spot),
             net_delta=clean(u.delta),
-            dollar_delta=clean(u.dollar_delta),
+            dollar_delta=clean(
+                u.dollar_delta * underlier_fx_rates[u.underlier]
+                if underlier_fx_rates.get(u.underlier) is not None
+                else None
+            ),
             beta=clean(underlier_betas.get(u.underlier)),
-            spy_equivalent_notional=clean(u.spy_equivalent_notional),
+            spy_equivalent_notional=clean(
+                u.spy_equivalent_notional * underlier_fx_rates[u.underlier]
+                if u.spy_equivalent_notional is not None
+                and underlier_fx_rates.get(u.underlier) is not None
+                else None
+            ),
             beta_note=(
                 None
                 if underlier_betas.get(u.underlier) is not None
@@ -950,8 +1359,8 @@ async def get_portfolio(
     elif not priced_option_underliers:
         if unpriceable_option_underliers:
             reason = (
-                f"option underliers not in cached universe: {sorted(unpriceable_option_underliers)} — "
-                "sync bars first"
+                "option underliers are unavailable, stale, or missing trustworthy "
+                f"FX: {sorted(unpriceable_option_underliers)} — sync bars first"
             )
         else:
             reason = "chain not ingested — run options_sync"
@@ -1028,13 +1437,20 @@ async def get_portfolio(
         )
     else:
         attribution = _compute_attribution(
-            store, close_series, mv_by_conid, benchmark, symbol_map, attribution_days
+            store,
+            base_close_series,
+            mv_by_conid,
+            benchmark,
+            symbol_map,
+            attribution_days,
+            benchmark_series=benchmark_base_series,
         )
 
     return PortfolioResponse(
         snapshot_id=snapshot_id,
         valuation_ts=valuation_ts,
-        base_currency="USD",
+        base_currency=base_currency,
+        fx=fx_status,
         positions=positions_out,
         totals=totals,
         account=account,

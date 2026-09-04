@@ -10,15 +10,126 @@ discipline is process-level (exactly one writer process per phase).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+if TYPE_CHECKING:
+    from quantmind.instruments.metadata import UcitsEtfProfileV1
+
 _META_PREFIX = b"quantmind."
 _BAR_COLUMNS = frozenset({"open", "high", "low", "close", "volume"})
+_INSTRUMENT_METADATA_SHAPE_ERROR = (
+    "instruments.json must map symbols to metadata objects"
+)
+_INSTRUMENT_METADATA_STRING_FIELDS = frozenset(
+    {
+        "currency",
+        "exchange",
+        "industry",
+        "isin",
+        "issuer_id",
+        "local_symbol",
+        "long_name",
+        "primary_exchange",
+        "provider",
+        "quote_unit",
+        "region",
+        "sec_type",
+        "stock_type",
+        "trading_class",
+        "ucits_profile_isin",
+        "ucits_profile_reason",
+    }
+)
+_UCITS_PROFILE_STATUSES = frozenset({"FRESH", "STALE", "MISSING"})
+
+
+def _instrument_metadata_value_error(
+    symbol: str, field: str, expected: str
+) -> ValueError:
+    return ValueError(
+        f"instruments.json contains invalid metadata for {symbol!r}: "
+        f"{field!r} must be {expected}"
+    )
+
+
+def _validate_instrument_metadata(payload: object) -> dict[str, dict]:
+    if not isinstance(payload, dict) or not all(
+        isinstance(symbol, str) and isinstance(fields, dict)
+        for symbol, fields in payload.items()
+    ):
+        raise ValueError(_INSTRUMENT_METADATA_SHAPE_ERROR)
+
+    for symbol, fields in payload.items():
+        for field in _INSTRUMENT_METADATA_STRING_FIELDS:
+            value = fields.get(field)
+            if value is not None and not isinstance(value, str):
+                raise _instrument_metadata_value_error(
+                    symbol, field, "a string or null"
+                )
+
+        con_id = fields.get("con_id")
+        if con_id is not None and (
+            not isinstance(con_id, int) or isinstance(con_id, bool)
+        ):
+            raise _instrument_metadata_value_error(
+                symbol, "con_id", "an integer or null"
+            )
+
+        valid_exchanges = fields.get("valid_exchanges")
+        if valid_exchanges is not None and (
+            not isinstance(valid_exchanges, list)
+            or not all(isinstance(exchange, str) for exchange in valid_exchanges)
+        ):
+            raise _instrument_metadata_value_error(
+                symbol, "valid_exchanges", "a list of strings or null"
+            )
+
+        external_identifiers = fields.get("external_identifiers")
+        if external_identifiers is not None and (
+            not isinstance(external_identifiers, dict)
+            or not all(
+                isinstance(namespace, str)
+                and isinstance(values, list)
+                and all(isinstance(value, str) for value in values)
+                for namespace, values in external_identifiers.items()
+            )
+        ):
+            raise _instrument_metadata_value_error(
+                symbol,
+                "external_identifiers",
+                "an object mapping namespaces to lists of strings or null",
+            )
+
+        profile_status = fields.get("ucits_profile_status")
+        if (
+            profile_status is not None
+            and profile_status not in _UCITS_PROFILE_STATUSES
+        ):
+            raise _instrument_metadata_value_error(
+                symbol,
+                "ucits_profile_status",
+                "FRESH, STALE, MISSING, or null",
+            )
+
+        price_scale = fields.get("price_scale")
+        if price_scale is not None and (
+            isinstance(price_scale, bool)
+            or not isinstance(price_scale, (int, float))
+            or not math.isfinite(price_scale)
+            or price_scale <= 0
+        ):
+            raise _instrument_metadata_value_error(
+                symbol, "price_scale", "a positive finite number or null"
+            )
+
+    return payload
 
 
 @dataclass(frozen=True)
@@ -204,14 +315,27 @@ class BarStore:
         return self.root / "instruments.json"
 
     def write_instrument_metadata(self, symbol: str, fields: dict) -> None:
+        self.write_instrument_metadata_batch({symbol: fields})
+
+    def write_instrument_metadata_batch(self, updates: dict[str, dict]) -> None:
+        """Merge multiple listing patches in one atomic master-file write."""
+        if not updates:
+            return
+        _validate_instrument_metadata(updates)
+        all_meta = self.read_all_instrument_metadata()
+        for symbol, fields in updates.items():
+            all_meta[symbol] = {**all_meta.get(symbol, {}), **fields}
+        self.replace_instrument_metadata(all_meta)
+
+    def replace_instrument_metadata(self, metadata: dict[str, dict]) -> None:
+        """Atomically replace the instrument master with validated records."""
         import json
 
+        validated = _validate_instrument_metadata(metadata)
         path = self._instruments_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        all_meta = self.read_all_instrument_metadata()
-        all_meta[symbol] = {**all_meta.get(symbol, {}), **fields}
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(all_meta, indent=2))
+        tmp.write_text(json.dumps(validated, indent=2))
         tmp.replace(path)
 
     def read_instrument_metadata(self, symbol: str) -> dict | None:
@@ -223,4 +347,43 @@ class BarStore:
         path = self._instruments_path()
         if not path.exists():
             return {}
-        return json.loads(path.read_text())
+        try:
+            payload = json.loads(path.read_text())
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise ValueError(_INSTRUMENT_METADATA_SHAPE_ERROR) from error
+        return _validate_instrument_metadata(payload)
+
+    # --- ISIN-addressed UCITS ETF profiles ---
+
+    def _ucits_profile_path(self, isin: str) -> Path:
+        from quantmind.instruments.metadata import normalize_isin
+
+        return self.root / "ucits_profiles" / f"{normalize_isin(isin)}.json"
+
+    def write_ucits_profile(self, profile: UcitsEtfProfileV1) -> None:
+        """Atomically publish one validated UCITS share-class profile."""
+        from quantmind.instruments.metadata import UcitsEtfProfileV1
+
+        if not isinstance(profile, UcitsEtfProfileV1):
+            raise TypeError("profile must be a UcitsEtfProfileV1")
+        path = self._ucits_profile_path(profile.isin)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(profile.model_dump_json(indent=2))
+        tmp.replace(path)
+
+    def read_ucits_profile(self, isin: str) -> UcitsEtfProfileV1 | None:
+        """Read and validate one UCITS profile; corrupt bytes are never served."""
+        from quantmind.instruments.metadata import UcitsEtfProfileV1, normalize_isin
+
+        requested_isin = normalize_isin(isin)
+        path = self._ucits_profile_path(requested_isin)
+        if not path.exists():
+            return None
+        try:
+            profile = UcitsEtfProfileV1.model_validate_json(path.read_text())
+            if profile.isin != requested_isin:
+                raise ValueError("profile identity does not match its cache key")
+            return profile
+        except Exception as error:
+            raise ValueError(f"corrupt UCITS profile for {path.stem}") from error

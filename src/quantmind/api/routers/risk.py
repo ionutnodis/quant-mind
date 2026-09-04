@@ -22,7 +22,15 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from quantmind.api.routers._shared import clean, downsample, iso
+from quantmind.api.routers._shared import (
+    FxEvidenceOut,
+    clean,
+    complete_fx_evidence,
+    downsample,
+    iso,
+    load_base_currency_series,
+)
+from quantmind.fx import FxConverter
 from quantmind.risk.factors import bp_change_series, factor_regression, r_squared_progression
 from quantmind.risk.montecarlo import simulate_terminal_returns
 from quantmind.risk.returns import (
@@ -56,6 +64,12 @@ def _daily_risk_free(
     request: Request, index: pd.Index, *, min_obs: int
 ) -> tuple[pd.Series | None, str | None]:
     """Resolve aligned daily US3M or explain why production alpha is unavailable."""
+    base_currency = getattr(request.app.state, "base_currency", "USD")
+    if base_currency != "USD":
+        return (
+            None,
+            f"{base_currency} risk-free evidence is not configured; US3M is USD-only",
+        )
     try:
         levels = request.app.state.store.read_series("US3M")
     except FileNotFoundError:
@@ -68,34 +82,43 @@ def _daily_risk_free(
     return daily, None
 
 
-def _price_series(request: Request, symbol: str, years: int) -> pd.Series:
+def _price_series_map(
+    request: Request, symbols: list[str], years: int
+) -> tuple[dict[str, pd.Series], FxConverter]:
+    """Load every priced input through one fail-closed FX evidence set."""
     store = request.app.state.store
     symbol_map = store.read_symbol_map()
-    if symbol not in symbol_map:
-        raise HTTPException(422, detail=f"symbol {symbol!r} not in cache")
-    try:
-        bars, _ = store.read_bars(con_id=symbol_map[symbol], bar_size="1d")
-    except (FileNotFoundError, KeyError, OSError, ValueError):
-        # Mapped but never synced: missing data is a structured 422, never a 500.
-        raise HTTPException(422, detail=f"symbol {symbol!r} has no cached bars")
-    series = bars["close"]
-    if years > 0:
-        series = series.iloc[-(years * 252):]
-    return series
+    ordered = list(dict.fromkeys(symbols))
+    for symbol in ordered:
+        if symbol not in symbol_map:
+            raise HTTPException(422, detail=f"symbol {symbol!r} not in cache")
+    series, _, converter = load_base_currency_series(
+        store,
+        symbol_map,
+        ordered,
+        years=years,
+        base_currency=getattr(request.app.state, "base_currency", "USD"),
+    )
+    return series, converter
 
 
-def _resolve_factor_series(request: Request, name: str, years: int) -> pd.Series:
+def _resolve_factor_series(
+    request: Request,
+    name: str,
+    years: int,
+    price_series: dict[str, pd.Series],
+) -> pd.Series:
     """A factor's return series: a cached symbol resolves to its simple
     price return; a named series (US10Y etc., see `_RATE_LEVEL_SERIES`
     above) resolves to its own transform. Unknown name -> structured 422
     naming both the symbol map and the named-series catalog, never a 500."""
     store = request.app.state.store
-    symbol_map = store.read_symbol_map()
-    if name in symbol_map:
-        return simple_returns(_price_series(request, name, years))
+    if name in price_series:
+        return simple_returns(price_series[name])
     try:
         series = store.read_series(name)
     except FileNotFoundError:
+        symbol_map = store.read_symbol_map()
         known = sorted(symbol_map) + store.list_series()
         raise HTTPException(422, detail=f"factor {name!r} not in cache; known: {known}")
     if years > 0:
@@ -111,6 +134,7 @@ class BetaPoint(BaseModel):
 
 
 class RiskResponse(BaseModel):
+    fx: FxEvidenceOut
     symbol: str
     benchmark: str
     window: int
@@ -143,6 +167,7 @@ class Histogram(BaseModel):
 
 
 class MonteCarloResponse(BaseModel):
+    fx: FxEvidenceOut
     symbol: str
     horizon: int
     n_paths: int
@@ -166,8 +191,11 @@ def risk(
     years: int = Query(5, ge=1, le=25),
 ):
     benchmark = request.app.state.benchmark
-    asset_prices = _price_series(request, symbol, years)
-    bench_prices = _price_series(request, benchmark, years)
+    price_series, fx_converter = _price_series_map(
+        request, [symbol, benchmark], years
+    )
+    asset_prices = price_series[symbol]
+    bench_prices = price_series[benchmark]
 
     prices = pd.concat({"asset": asset_prices, "bench": bench_prices}, axis=1).dropna()
     if len(prices) < window + 2:
@@ -217,6 +245,9 @@ def risk(
         mean_arith_annual = cagr = drag_exact = drag_approx = None
 
     return RiskResponse(
+        fx=complete_fx_evidence(
+            fx_converter, base_currency=request.app.state.base_currency
+        ),
         symbol=symbol,
         benchmark=benchmark,
         window=window,
@@ -243,7 +274,8 @@ def risk(
 @router.post("/risk/montecarlo", response_model=MonteCarloResponse)
 def montecarlo(request: Request, req: MonteCarloRequest):
     # Full cached history (years=0) — MC needs the deepest empirical block pool available.
-    prices = _price_series(request, req.symbol, years=0)
+    price_series, fx_converter = _price_series_map(request, [req.symbol], years=0)
+    prices = price_series[req.symbol]
     returns = simple_returns(prices)
     if len(returns) < 30:
         raise HTTPException(422, detail=f"only {len(returns)} return observations; need >= 30")
@@ -283,6 +315,9 @@ def montecarlo(request: Request, req: MonteCarloRequest):
         es = None
 
     return MonteCarloResponse(
+        fx=complete_fx_evidence(
+            fx_converter, base_currency=request.app.state.base_currency
+        ),
         symbol=req.symbol,
         horizon=req.horizon,
         n_paths=req.n_paths,
@@ -355,6 +390,7 @@ class R2Step(BaseModel):
 
 
 class RegressionResponse(BaseModel):
+    fx: FxEvidenceOut
     symbol: str
     factors: list[str]
     window: int | None
@@ -400,8 +436,16 @@ def regression(
     if len(factor_names) != len(set(factor_names)):
         raise HTTPException(422, detail=f"duplicate factor names: {factors!r}")
 
-    asset_returns = simple_returns(_price_series(request, symbol, years))
-    factor_series = {name: _resolve_factor_series(request, name, years) for name in factor_names}
+    symbol_map = request.app.state.store.read_symbol_map()
+    priced_factors = [name for name in factor_names if name in symbol_map]
+    price_series, fx_converter = _price_series_map(
+        request, [symbol, *priced_factors], years
+    )
+    asset_returns = simple_returns(price_series[symbol])
+    factor_series = {
+        name: _resolve_factor_series(request, name, years, price_series)
+        for name in factor_names
+    }
 
     aligned = pd.concat({"asset": asset_returns, **factor_series}, axis=1).dropna()
     if window is not None:
@@ -494,6 +538,9 @@ def regression(
 
     alpha_daily = full.alpha if alpha_available else None
     return RegressionResponse(
+        fx=complete_fx_evidence(
+            fx_converter, base_currency=request.app.state.base_currency
+        ),
         symbol=symbol,
         factors=factor_names,
         window=window,

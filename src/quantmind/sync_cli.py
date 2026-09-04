@@ -9,16 +9,20 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from datetime import UTC, datetime
 
 from ib_async import IB
 
 from quantmind.broker.connection import ConnectionManager
 from quantmind.broker.ib_broker import IbBroker
 from quantmind.config import Settings
+from quantmind.datastore.locking import exclusive_sync_lock
 from quantmind.datastore.options_store import OptionsStore
 from quantmind.datastore.store import BarStore
+from quantmind.fx import EcbFxProvider, sync_ecb_fx
 from quantmind.portfolio import Portfolio
 from quantmind.sources.options_sync import sync_options_chains
+from quantmind.sources.providers.justetf import JustEtfProvider
 from quantmind.sources.providers.yfinance_provider import YFinanceProvider
 from quantmind.sources.sync import (
     sync_daily_bars,
@@ -26,6 +30,7 @@ from quantmind.sources.sync import (
     sync_instrument_metadata,
     sync_yfinance_bars,
 )
+from quantmind.sources.ucits_sync import sync_ucits_profiles
 
 # World-ETF region tags (Task A2: "wider world") — region metadata cached at
 # sync alongside contract details; SH is a negative-beta validation
@@ -57,6 +62,7 @@ DEFAULT_UNIVERSE = [
 
 # VIX + SPX via IBKR Index contracts (empirically verified working: Task A2).
 INDEX_UNIVERSE = {"VIX": "CBOE", "SPX": "CBOE"}
+PORTFOLIO_DISCOVERY_FAILURE_SYMBOL = "__LIVE_PORTFOLIO_DISCOVERY_FAILED__"
 
 
 def portfolio_sync_targets(portfolio: Portfolio) -> tuple[list[str], list[str]]:
@@ -73,10 +79,11 @@ def portfolio_sync_targets(portfolio: Portfolio) -> tuple[list[str], list[str]]:
     return daily, options
 
 
-async def main(symbols: list[str]) -> None:
+async def _run_main(symbols: list[str], ib_connections: list) -> None:
     settings = Settings()
     store = BarStore(settings.data_dir)
     ib = IB()
+    ib_connections.append(ib)
     mgr = ConnectionManager(
         ib, host=settings.host, port=settings.port, client_id=settings.client_id, max_attempts=3
     )
@@ -85,26 +92,60 @@ async def main(symbols: list[str]) -> None:
     held_symbols: list[str] = []
     option_underliers: list[str] = []
     held_option_contracts = []
-    held_stock_con_ids: dict[str, int] = {}
+    held_stock_con_ids: dict[str, int | list[int]] = {}
+    held_option_con_ids: dict[str, list[int]] = {}
+    held_currencies: set[str] = set()
+    account_currencies: set[str] = set()
     warnings: list[str] = []
+    portfolio_discovery_failed = False
     try:
         portfolio = await broker.get_portfolio()
         held_symbols, option_underliers = portfolio_sync_targets(portfolio)
         held_option_contracts = [
             position for position in portfolio.positions if position.sec_type == "OPT"
         ]
+        stock_ids_by_symbol: dict[str, list[int]] = {}
+        for position in portfolio.positions:
+            if position.sec_type != "STK":
+                continue
+            stock_ids = stock_ids_by_symbol.setdefault(position.symbol, [])
+            if position.con_id not in stock_ids:
+                stock_ids.append(position.con_id)
         held_stock_con_ids = {
-            position.symbol: position.con_id
+            symbol: stock_ids[0] if len(stock_ids) == 1 else stock_ids
+            for symbol, stock_ids in stock_ids_by_symbol.items()
+        }
+        for position in held_option_contracts:
+            option_ids = held_option_con_ids.setdefault(position.symbol, [])
+            if position.con_id not in option_ids:
+                option_ids.append(position.con_id)
+        held_currencies = {
+            position.currency.strip().upper()
             for position in portfolio.positions
-            if position.sec_type == "STK"
+            if position.currency and position.currency.strip()
         }
     except Exception as exc:
+        portfolio_discovery_failed = True
         warnings.append("live portfolio unavailable")
         print(f"WARNING: live portfolio unavailable ({type(exc).__name__}); syncing starter universe only")
+
+    get_account_summary = getattr(broker, "get_account_summary", None)
+    if get_account_summary is not None:
+        try:
+            account_summary = await get_account_summary()
+            account_currency = str(account_summary.get("currency") or "").strip().upper()
+            if len(account_currency) == 3 and account_currency.isalpha():
+                account_currencies.add(account_currency)
+        except Exception as exc:
+            print(
+                f"WARNING: account-summary currency unavailable ({type(exc).__name__}); "
+                "position FX discovery continues"
+            )
 
     sync_symbols = list(
         dict.fromkeys([getattr(settings, "benchmark", "SPY"), *symbols, *held_symbols])
     )
+    daily_failures: dict[str, str] = {}
     symbol_map = await sync_daily_bars(
         store,
         broker,
@@ -112,20 +153,51 @@ async def main(symbols: list[str]) -> None:
         years=5,
         pace_seconds=2.0,
         known_con_ids=held_stock_con_ids,
+        option_contract_con_ids=held_option_con_ids,
+        failures=daily_failures,
     )
+    if daily_failures:
+        warnings.append("daily bars incomplete")
+        print(f"WARNING: daily bars unavailable for {daily_failures}")
     for symbol, con_id in symbol_map.items():
         wm = store.watermark(con_id=con_id, bar_size="1d")
         print(f"{symbol:>5} conId={con_id:<12} bars through {wm.date()}")
 
-    index_map = await sync_index_bars(store, broker, INDEX_UNIVERSE, years=5, pace_seconds=2.0)
+    index_failures: dict[str, str] = {}
+    index_map = await sync_index_bars(
+        store,
+        broker,
+        INDEX_UNIVERSE,
+        years=5,
+        pace_seconds=2.0,
+        failures=index_failures,
+    )
+    if index_failures:
+        warnings.append("index bars incomplete")
+        print(f"WARNING: index bars unavailable for {index_failures}")
     for symbol, con_id in index_map.items():
         wm = store.watermark(con_id=con_id, bar_size="1d")
         print(f"{symbol:>5} conId={con_id:<12} bars through {wm.date()} (index)")
 
     extra_tags = {sym: {"region": region} for sym, region in WORLD_ETF_REGIONS.items()}
     ibkr_map = {**symbol_map, **index_map}
-    await sync_instrument_metadata(store, broker, ibkr_map, extra_tags=extra_tags, pace_seconds=1.0)
-
+    metadata_failures: dict[str, str] = {}
+    instrument_metadata = await sync_instrument_metadata(
+        store,
+        broker,
+        ibkr_map,
+        extra_tags=extra_tags,
+        pace_seconds=1.0,
+        failures=metadata_failures,
+    ) or {}
+    if metadata_failures:
+        warnings.append("instrument metadata incomplete")
+        print(f"WARNING: instrument metadata unavailable for {metadata_failures}")
+    metadata_currencies = {
+        str(fields["currency"]).strip().upper()
+        for fields in instrument_metadata.values()
+        if fields.get("currency") and str(fields["currency"]).strip()
+    }
     if option_underliers:
         try:
             counts = await sync_options_chains(
@@ -146,10 +218,54 @@ async def main(symbols: list[str]) -> None:
             )
     ib.disconnect()
 
+    # justETF is synchronous and independently paced. Run it only after all
+    # IBKR work is complete and off the asyncio event loop so a slow profile
+    # page cannot starve broker heartbeats or held-option synchronization.
+    if getattr(settings, "ucits_metadata_enabled", False):
+        try:
+            ucits_results = await asyncio.to_thread(
+                sync_ucits_profiles,
+                store,
+                instrument_metadata,
+                JustEtfProvider(store),
+                now=datetime.now(UTC),
+                pace_seconds=1.0,
+            )
+            incomplete_profiles = sorted(
+                symbol
+                for symbol, status in ucits_results.items()
+                if status.freshness.value != "FRESH"
+            )
+        except Exception as exc:
+            warnings.append("UCITS profiles incomplete")
+            print(
+                f"WARNING: UCITS profile sync unavailable ({type(exc).__name__}: {exc}); "
+                "price sync and later cache phases remain usable"
+            )
+        else:
+            if incomplete_profiles:
+                warnings.append("UCITS profiles incomplete")
+                print(
+                    "WARNING: UCITS profiles unavailable or stale for "
+                    f"{incomplete_profiles}; price sync remains usable"
+                )
+            elif ucits_results:
+                print(f"UCITS profiles refreshed for {', '.join(sorted(ucits_results))}")
+
     yfinance_symbols = settings.yfinance_symbol_list()
     skipped: list[str] = []
     if yfinance_symbols:
-        yf_map, skipped = sync_yfinance_bars(store, YFinanceProvider(), yfinance_symbols, years=5)
+        yfinance_failures: dict[str, str] = {}
+        yf_map, skipped = sync_yfinance_bars(
+            store,
+            YFinanceProvider(),
+            yfinance_symbols,
+            years=5,
+            failures=yfinance_failures,
+        )
+        if yfinance_failures:
+            warnings.append("yfinance fallback incomplete")
+            print(f"WARNING: yfinance fallback unavailable for {yfinance_failures}")
         for symbol in skipped:
             print(
                 f"WARNING: {symbol} is IBKR-synced (positive conId) — skipped yfinance sync; "
@@ -159,22 +275,86 @@ async def main(symbols: list[str]) -> None:
             if symbol not in skipped:
                 print(f"{symbol:>5} conId={con_id:<12} synced via yfinance")
 
-    required_symbols = [
-        *sync_symbols,
-        *INDEX_UNIVERSE,
-        *(symbol for symbol in yfinance_symbols if symbol not in skipped),
-    ]
-    store.write_required_symbols(required_symbols)
+    fallback_currencies = {
+        str((store.read_instrument_metadata(symbol) or {}).get("currency") or "")
+        .strip()
+        .upper()
+        for symbol in yfinance_symbols
+    } - {""}
+    base_currency = getattr(settings, "base_currency", "USD").strip().upper()
+    fx_currencies = (
+        held_currencies
+        | account_currencies
+        | metadata_currencies
+        | fallback_currencies
+        | {base_currency}
+    )
+    if fx_currencies - {base_currency}:
+        try:
+            fx_result = sync_ecb_fx(store, EcbFxProvider(), fx_currencies)
+            print(
+                f"ECB FX {', '.join(sorted(fx_currencies))} through {fx_result.as_of} "
+                "(reference rates)"
+            )
+        except Exception as exc:
+            warnings.append("FX reference rates unavailable")
+            print(
+                f"WARNING: FX sync unavailable ({type(exc).__name__}: {exc}); "
+                "local-currency bars remain cached but mixed-currency analysis is unavailable"
+            )
+
+    # Readiness is the minimum viable acceptance book: benchmark plus held
+    # underliers. Starter hedge/context symbols, CBOE indices, and configured
+    # fallback research listings remain useful optional coverage; a missing
+    # entitlement there must not trap a first user in Setup forever.
+    benchmark = getattr(settings, "benchmark", "SPY")
+    if portfolio_discovery_failed:
+        try:
+            required_symbols = store.read_required_symbols()
+        except Exception:
+            # Preserve unreadable evidence: Setup already reports it corrupt.
+            pass
+        else:
+            if benchmark not in required_symbols:
+                required_symbols.insert(0, benchmark)
+            if PORTFOLIO_DISCOVERY_FAILURE_SYMBOL not in required_symbols:
+                required_symbols.append(PORTFOLIO_DISCOVERY_FAILURE_SYMBOL)
+            store.write_required_symbols(required_symbols)
+    else:
+        required_symbols = list(dict.fromkeys([benchmark, *held_symbols]))
+        store.write_required_symbols(required_symbols)
 
     from quantmind.sources.fred import sync_fred
 
-    for name, last in sync_fred(store).items():
-        print(f"{name:>14} series through {last}")
+    try:
+        for name, last in sync_fred(store).items():
+            print(f"{name:>14} series through {last}")
+    except Exception as exc:
+        warnings.append("FRED macro data incomplete")
+        print(
+            f"WARNING: FRED macro sync unavailable ({type(exc).__name__}: {exc}); "
+            "other cache phases remain usable"
+        )
 
     if warnings:
         print(f"SYNC_RESULT: partial · {'; '.join(warnings)}")
     else:
         print("SYNC_RESULT: complete")
+
+
+async def main(symbols: list[str]) -> None:
+    """Run one sync and always release any created IBKR session."""
+    ib_connections: list = []
+    settings = Settings()
+    with exclusive_sync_lock(settings.data_dir):
+        try:
+            await _run_main(symbols, ib_connections)
+        finally:
+            for ib in ib_connections:
+                try:
+                    ib.disconnect()
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":

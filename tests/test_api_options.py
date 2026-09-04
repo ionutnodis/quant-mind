@@ -275,6 +275,23 @@ def test_book_greeks_betas_populate_spy_equivalent_notional(client):
     assert row["spy_equivalent_notional"] == pytest.approx(10 * 380.0 * 1.1)
 
 
+def test_book_greeks_refuses_cross_currency_aggregation_until_legwise_fx_exists(store):
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken", base_currency="GBP")
+    c = TestClient(
+        app,
+        base_url="http://127.0.0.1",
+        headers={"Authorization": "Bearer testtoken"},
+    )
+
+    response = c.post(
+        "/api/options/book-greeks",
+        json={"positions": [{"symbol": "SPY", "qty": 10}]},
+    )
+
+    assert response.status_code == 422
+    assert "cross-currency" in response.json()["detail"]
+
+
 def test_book_greeks_via_book_ref_round_trip(client):
     pin = client.post("/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 50}]})
     assert pin.status_code == 200

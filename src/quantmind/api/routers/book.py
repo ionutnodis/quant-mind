@@ -32,7 +32,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
-from quantmind.api.routers._shared import PositionIn
+from quantmind.api.routers._shared import PositionIn, read_instrument_metadata_map
 from quantmind.core.snapshot import BookSnapshot
 from quantmind.portfolio import Portfolio, Position, option_terms_complete
 
@@ -83,6 +83,7 @@ class BookSnapshotOut(BaseModel):
     source: Literal["live_ibkr", "manual", "legacy"] = "legacy"
     account_fingerprint: str | None = None
     broker_mode: Literal["paper", "live", "custom"] | None = None
+    rebased_from: str | None = None
 
 
 class CurrentBookOut(BaseModel):
@@ -123,13 +124,24 @@ def _account_fingerprint(account_id: str | None) -> str | None:
     return hashlib.sha256(account_id.encode()).hexdigest()[:12]
 
 
-def validate_pinned_book_scope(state, pinned: dict) -> None:
+def validate_pinned_book_scope(
+    state, pinned: dict, *, require_configured_base: bool = True
+) -> None:
     """Reject a live snapshot outside the currently selected broker scope.
 
     Manual books are intentionally portable. A broker-sourced book is not:
     reusing its URL after switching account or paper/live mode would run a
     valid calculation against the wrong holdings.
     """
+    configured_base = getattr(state, "base_currency", "USD")
+    if require_configured_base and pinned.get("base_currency") != configured_base:
+        raise HTTPException(
+            409,
+            detail=(
+                f"pinned book uses base currency {pinned.get('base_currency')}; "
+                f"rebase or re-pin the book for configured base currency {configured_base}"
+            ),
+        )
     if pinned["source"] != "live_ibkr":
         return
     current_fingerprint = _account_fingerprint(
@@ -160,6 +172,7 @@ def write_book(
     account_fingerprint: str | None = None,
     broker_mode: Literal["paper", "live", "custom"] | None = None,
     identity_version: Literal["book_snapshot_v2"] | None = None,
+    rebased_from: str | None = None,
 ) -> None:
     """Persist an immutable snapshot as JSON (atomic tmp-then-replace, the
     same convention BarStore uses for its own writes — reproduced here as a
@@ -180,9 +193,6 @@ def write_book(
         "snapshot_id": snapshot.snapshot_id,
         "valuation_ts": snapshot.valuation_ts,
         "base_currency": snapshot.base_currency,
-        "source": source,
-        "account_fingerprint": account_fingerprint,
-        "broker_mode": broker_mode,
         "positions": [
             {
                 "con_id": p.con_id,
@@ -201,6 +211,18 @@ def write_book(
     }
     if identity_version is not None:
         payload["identity_version"] = identity_version
+        payload["source"] = source
+        payload["account_fingerprint"] = account_fingerprint
+        payload["broker_mode"] = broker_mode
+    elif (
+        source != "legacy"
+        or account_fingerprint is not None
+        or broker_mode is not None
+        or rebased_from is not None
+    ):
+        raise ValueError("provenance-scoped snapshots require book_snapshot_v2")
+    if rebased_from is not None:
+        payload["rebased_from"] = rebased_from
     if path.exists():
         try:
             existing = json.loads(path.read_text())
@@ -233,8 +255,13 @@ def read_book(store, snapshot_id: str) -> dict:
         payload = json.loads(path.read_text())
         if not isinstance(payload, dict):
             raise TypeError("snapshot payload must be an object")
-        if payload.get("identity_version") == "book_snapshot_v2":
+        identity_version = payload.get("identity_version")
+        if identity_version == "book_snapshot_v2":
             _verify_snapshot_identity(payload)
+        elif identity_version is None:
+            _verify_legacy_snapshot_identity(payload)
+        else:
+            raise ValueError("unsupported snapshot identity version")
         snapshot = _snapshot_out(payload)
         if snapshot.snapshot_id != snapshot_id:
             raise ValueError("snapshot id does not match filename")
@@ -277,19 +304,19 @@ def read_book_positions(store, snapshot_id: str) -> list[ResolvedBookPosition]:
     wrong-numbers bug this fix wave exists to close. Refuse it honestly
     instead."""
     payload = read_book(store, snapshot_id)
-    unsupported_currencies = sorted(
+    unknown_currencies = sorted(
         {
             p.get("currency") or "UNKNOWN"
             for p in payload["positions"]
-            if p.get("currency") != payload["base_currency"]
+            if not p.get("currency") or p.get("currency") == "UNKNOWN"
         }
     )
-    if unsupported_currencies:
+    if unknown_currencies:
         raise HTTPException(
             422,
             detail=(
-                "FX normalization is not available for pinned currencies: "
-                f"{unsupported_currencies}"
+                "FX normalization requires known pinned currencies: "
+                f"{unknown_currencies}"
             ),
         )
     positions: list[ResolvedBookPosition] = []
@@ -330,6 +357,7 @@ def _snapshot_out(payload: dict) -> BookSnapshotOut:
         source=payload.get("source", "legacy"),
         account_fingerprint=payload.get("account_fingerprint"),
         broker_mode=payload.get("broker_mode"),
+        rebased_from=payload.get("rebased_from"),
     )
 
 
@@ -343,10 +371,12 @@ async def _live_portfolio(request: Request) -> Portfolio:
     return await broker.get_portfolio()
 
 
-def _current_out(portfolio: Portfolio, valuation_ts: str) -> CurrentBookOut:
+def _current_out(
+    portfolio: Portfolio, valuation_ts: str, *, base_currency: str = "USD"
+) -> CurrentBookOut:
     return CurrentBookOut(
         valuation_ts=valuation_ts,
-        base_currency="USD",
+        base_currency=base_currency,
         positions=[
             BookPositionOut(
                 symbol=p.symbol,
@@ -370,9 +400,10 @@ def _portfolio_from_positions(store, positions: list[PositionIn], valuation_ts: 
     unknown = sorted({p.symbol for p in positions} - symbol_map.keys())
     if unknown:
         raise HTTPException(422, detail=f"unknown symbols: {unknown}")
+    metadata_by_symbol = read_instrument_metadata_map(store) if positions else {}
     resolved_positions: list[Position] = []
     for p in positions:
-        metadata = store.read_instrument_metadata(p.symbol) or {}
+        metadata = metadata_by_symbol.get(p.symbol) or {}
         authoritative_currency = str(metadata.get("currency") or "UNKNOWN")
         authoritative_exchange = str(metadata.get("exchange") or "").strip() or None
         if p.currency is not None and p.currency != authoritative_currency:
@@ -403,9 +434,10 @@ def _snapshot_hash_extra(
     portfolio: Portfolio,
     legs: list[PositionIn] | None,
     *,
-    source: Literal["live_ibkr", "manual"],
+    source: Literal["live_ibkr", "manual", "legacy"],
     account_fingerprint: str | None,
     broker_mode: Literal["paper", "live", "custom"] | None,
+    rebased_from: str | None = None,
 ) -> str:
     """Fold complete contract identity and provenance scope into the ID."""
     leg_by_position = legs if legs is not None else [None] * len(portfolio.positions)
@@ -426,13 +458,18 @@ def _snapshot_hash_extra(
             }
         )
     identities.sort(key=lambda identity: json.dumps(identity, sort_keys=True))
+    scope = {
+        "positions": identities,
+        "source": source,
+        "account_fingerprint": account_fingerprint,
+        "broker_mode": broker_mode,
+    }
+    # Preserve the exact v2 identity preimage for existing snapshots; lineage
+    # is folded in only for a newly rebased successor.
+    if rebased_from is not None:
+        scope["rebased_from"] = rebased_from
     return json.dumps(
-        {
-            "positions": identities,
-            "source": source,
-            "account_fingerprint": account_fingerprint,
-            "broker_mode": broker_mode,
-        },
+        scope,
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -462,6 +499,7 @@ def _verify_snapshot_identity(payload: dict) -> None:
         source=payload["source"],
         account_fingerprint=payload.get("account_fingerprint"),
         broker_mode=payload.get("broker_mode"),
+        rebased_from=payload.get("rebased_from"),
     )
     expected = BookSnapshot.create(
         portfolio,
@@ -473,15 +511,58 @@ def _verify_snapshot_identity(payload: dict) -> None:
         raise ValueError("snapshot content hash does not match snapshot_id")
 
 
+def _verify_legacy_snapshot_identity(payload: dict) -> None:
+    """Verify pre-v2 content hashes and reject marker-removal downgrade attempts."""
+    if any(
+        field in payload
+        for field in ("source", "account_fingerprint", "broker_mode", "rebased_from")
+    ):
+        raise ValueError("unversioned snapshot contains v2-only provenance fields")
+    positions = tuple(
+        Position(
+            con_id=int(item["con_id"]),
+            symbol=item["symbol"],
+            qty=item["qty"],
+            sec_type=item["sec_type"],
+            multiplier=item["multiplier"],
+        )
+        for item in payload["positions"]
+    )
+    portfolio = Portfolio(positions=positions, as_of=payload["valuation_ts"])
+    option_identities = [
+        (
+            item.get("strike"),
+            item.get("expiry"),
+            item.get("right"),
+        )
+        for item in sorted(payload["positions"], key=lambda item: int(item["con_id"]))
+    ]
+    extra = (
+        "|".join(f"{strike}:{expiry}:{right}" for strike, expiry, right in option_identities)
+        if any(any(value is not None for value in identity) for identity in option_identities)
+        else ""
+    )
+    expected = BookSnapshot.create(
+        portfolio,
+        valuation_ts=payload["valuation_ts"],
+        base_currency=payload["base_currency"],
+        extra=extra,
+    )
+    if expected.snapshot_id != payload["snapshot_id"]:
+        raise ValueError("legacy snapshot content hash does not match snapshot_id")
+
+
 def _pin_and_respond(
     store,
     portfolio: Portfolio,
     valuation_ts: str,
     legs: list[PositionIn] | None = None,
     *,
-    source: Literal["live_ibkr", "manual"] = "manual",
+    source: Literal["live_ibkr", "manual", "legacy"] = "manual",
     account_fingerprint: str | None = None,
     broker_mode: Literal["paper", "live", "custom"] | None = None,
+    base_currency: str = "USD",
+    rebased_from: str | None = None,
 ) -> BookSnapshotOut:
     extra = _snapshot_hash_extra(
         portfolio,
@@ -489,8 +570,14 @@ def _pin_and_respond(
         source=source,
         account_fingerprint=account_fingerprint,
         broker_mode=broker_mode,
+        rebased_from=rebased_from,
     )
-    snapshot = BookSnapshot.create(portfolio, valuation_ts=valuation_ts, base_currency="USD", extra=extra)
+    snapshot = BookSnapshot.create(
+        portfolio,
+        valuation_ts=valuation_ts,
+        base_currency=base_currency,
+        extra=extra,
+    )
     try:
         write_book(
             store,
@@ -500,6 +587,7 @@ def _pin_and_respond(
             account_fingerprint=account_fingerprint,
             broker_mode=broker_mode,
             identity_version="book_snapshot_v2",
+            rebased_from=rebased_from,
         )
     except SnapshotCollisionError as exc:
         raise HTTPException(409, detail=str(exc)) from exc
@@ -519,6 +607,7 @@ async def pin_book(request: Request, req: BookPinRequest) -> BookSnapshotOut:
             valuation_ts,
             legs=req.positions,
             source="manual",
+            base_currency=request.app.state.base_currency,
         )
 
     portfolio = await _live_portfolio(request)
@@ -531,6 +620,7 @@ async def pin_book(request: Request, req: BookPinRequest) -> BookSnapshotOut:
             getattr(request.app.state, "broker_account_id", None)
         ),
         broker_mode=getattr(request.app.state, "broker_mode", None),
+        base_currency=request.app.state.base_currency,
     )
 
 
@@ -538,7 +628,54 @@ async def pin_book(request: Request, req: BookPinRequest) -> BookSnapshotOut:
 async def get_current_book(request: Request) -> CurrentBookOut:
     valuation_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     portfolio = await _live_portfolio(request)
-    return _current_out(portfolio, valuation_ts)
+    return _current_out(
+        portfolio, valuation_ts, base_currency=request.app.state.base_currency
+    )
+
+
+@router.post("/book/{snapshot_id}/rebase", response_model=BookSnapshotOut)
+def rebase_book(snapshot_id: str, request: Request) -> BookSnapshotOut:
+    """Mint an immutable reporting-currency successor without rewriting history."""
+    store = request.app.state.store
+    payload = read_book(store, snapshot_id)
+    validate_pinned_book_scope(
+        request.app.state,
+        payload,
+        require_configured_base=False,
+    )
+    target_base = request.app.state.base_currency
+    if payload["base_currency"] == target_base:
+        return _snapshot_out(payload)
+
+    resolved = read_book_positions(store, snapshot_id)
+    portfolio = Portfolio(
+        positions=tuple(
+            Position(
+                con_id=position.con_id,
+                symbol=position.symbol,
+                qty=position.qty,
+                sec_type=position.sec_type,
+                multiplier=_leg_multiplier(position),
+                strike=position.strike,
+                expiry=position.expiry,
+                right=position.right,
+                currency=position.currency,
+                exchange=position.exchange,
+            )
+            for position in resolved
+        ),
+        as_of=payload["valuation_ts"],
+    )
+    return _pin_and_respond(
+        store,
+        portfolio,
+        payload["valuation_ts"],
+        source=payload["source"],
+        account_fingerprint=payload.get("account_fingerprint"),
+        broker_mode=payload.get("broker_mode"),
+        base_currency=target_base,
+        rebased_from=snapshot_id,
+    )
 
 
 @router.get("/book/{snapshot_id}", response_model=BookSnapshotOut)

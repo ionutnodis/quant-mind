@@ -1,3 +1,5 @@
+import pytest
+
 from quantmind.config import Settings
 
 
@@ -7,14 +9,31 @@ def test_defaults_are_local_paper_gateway():
     assert s.host == "127.0.0.1"
     assert s.port == 4002  # IB Gateway paper default
     assert s.benchmark == "SPY"
+    assert s.base_currency == "USD"
+    assert s.ucits_metadata_enabled is False
 
 
 def test_env_override(monkeypatch):
     monkeypatch.setenv("QM_ACCOUNT_ID", "DU1234567")
     monkeypatch.setenv("QM_CLIENT_ID", "23")
+    monkeypatch.setenv("QM_BASE_CURRENCY", "eur")
     s = Settings(_env_file=None)
     assert s.account_id == "DU1234567"
     assert s.client_id == 23
+    assert s.base_currency == "EUR"
+
+
+def test_invalid_base_currency_is_rejected(monkeypatch):
+    monkeypatch.setenv("QM_BASE_CURRENCY", "EU")
+
+    with pytest.raises(ValueError, match="currency"):
+        Settings(_env_file=None)
+
+
+def test_ucits_metadata_can_be_explicitly_enabled(monkeypatch):
+    monkeypatch.setenv("QM_UCITS_METADATA_ENABLED", "true")
+
+    assert Settings(_env_file=None).ucits_metadata_enabled is True
 
 
 def test_web_dist_env_override(monkeypatch, tmp_path):
@@ -60,6 +79,7 @@ def test_main_build_wires_security_settings(monkeypatch, tmp_path):
         data_dir = tmp_path / "data"
         web_dist = tmp_path / "missing-web-dist"
         benchmark = "SPY"
+        base_currency = "GBP"
         api_token = "runtime-secret"
         host = "127.0.0.1"
         port = 4002
@@ -93,3 +113,4 @@ def test_main_build_wires_security_settings(monkeypatch, tmp_path):
 
     assert captured["api_token"] == "runtime-secret"
     assert captured["allowed_origins"] == ("http://127.0.0.1:8000",)
+    assert captured["base_currency"] == "GBP"

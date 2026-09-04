@@ -51,6 +51,14 @@ const TWO_POSITIONS = {
   snapshot_id: "abc123def456",
   valuation_ts: "2026-07-25T00:00:00Z",
   base_currency: "USD",
+  fx: {
+    status: "converted",
+    source: "ecb_fx_v1",
+    as_of: "2026-07-25",
+    fetched_at: "2026-07-25T07:00:00Z",
+    missing_currencies: [],
+    note: "All position values normalized to USD using dated ECB reference rates.",
+  },
   positions: [
     {
       con_id: 1,
@@ -58,7 +66,14 @@ const TWO_POSITIONS = {
       qty: 10,
       sec_type: "STK",
       multiplier: 1,
+      exchange: "ARCA",
+      strike: null,
+      expiry: null,
+      right: null,
+      currency: "EUR",
       last_close: 100.0,
+      fx_rate_to_base: 1.08,
+      local_market_value: 1000.0,
       market_value: 1000.0,
       weight: 0.2857142857142857,
       avg_cost: 90.0,
@@ -70,7 +85,14 @@ const TWO_POSITIONS = {
       qty: 5,
       sec_type: "OPT",
       multiplier: 100,
+      exchange: "SMART",
+      strike: 105,
+      expiry: "20261218",
+      right: "C",
+      currency: "USD",
       last_close: 5.0,
+      fx_rate_to_base: 1.0,
+      local_market_value: 2500.0,
       market_value: 2500.0,
       weight: 0.7142857142857143,
       avg_cost: 4.0,
@@ -88,16 +110,23 @@ const TWO_POSITIONS = {
     pnl_status: "complete",
   },
   account: {
-    currency: "USD",
+    currency: "EUR",
+    source_currency: "EUR",
     net_liquidation: 125000.5,
     total_cash_value: 20000.0,
     gross_position_value: 105000.5,
     buying_power: 60000.0,
+    net_liquidation_base: 125000.5,
+    total_cash_value_base: 20000.0,
+    gross_position_value_base: 105000.5,
+    buying_power_base: 60000.0,
   },
   account_note: null,
   exposure: [
     {
       underlier: "SPY",
+      currency: "USD",
+      fx_rate_to_base: 1.0,
       spot: 100.0,
       net_delta: 10.0,
       dollar_delta: 1000.0,
@@ -115,6 +144,14 @@ const EMPTY = {
   snapshot_id: "empty000000",
   valuation_ts: "2026-07-25T00:00:00Z",
   base_currency: "USD",
+  fx: {
+    status: "identity",
+    source: null,
+    as_of: null,
+    fetched_at: null,
+    missing_currencies: [],
+    note: "All positions are denominated in USD.",
+  },
   positions: [],
   totals: {
     market_value: null,
@@ -159,6 +196,56 @@ test("renders positions table with cost basis, unrealized P&L, and totals from t
   expect(table.getByText("3500.00")).toBeInTheDocument();
   // snapshot/valuation-ts note (Panel-level, outside the table)
   expect(screen.getByText(/abc123def456/)).toBeInTheDocument();
+  expect(screen.getByTestId("fx-evidence")).toHaveTextContent("ECB");
+  expect(table.getByText("EUR")).toBeInTheDocument();
+  expect(table.getByRole("columnheader", { name: "Unrealized P&L (USD)" })).toBeInTheDocument();
+  expect(table.getByRole("columnheader", { name: "Market value (USD)" })).toBeInTheDocument();
+  expect(table.getByTestId("position-identity-1")).toHaveTextContent("conId 1 · STK · ARCA · ×1");
+  expect(table.getByTestId("position-identity-2")).toHaveTextContent(
+    "conId 2 · OPT · SMART · ×100"
+  );
+  expect(table.getByTestId("position-identity-2")).toHaveTextContent(
+    "Call · strike 105.00 · expiry 20261218"
+  );
+  const scrollRegion = screen.getByRole("region", { name: "Position valuation table" });
+  expect(scrollRegion).toHaveAttribute("tabindex", "0");
+  expect(table.getByRole("columnheader", { name: "Position identity" })).toHaveClass("sticky");
+  expect(screen.getByText(/broker totals remain available in EUR/i)).toBeInTheDocument();
+});
+
+test("shows local broker totals warning when account FX is unavailable", async () => {
+  server.use(
+    http.get("/api/portfolio", () =>
+      HttpResponse.json({
+        ...TWO_POSITIONS,
+        account: {
+          ...TWO_POSITIONS.account,
+          currency: "HKD",
+          source_currency: "HKD",
+          net_liquidation: 125000.5,
+          net_liquidation_base: null,
+          total_cash_value_base: null,
+          gross_position_value_base: null,
+          buying_power_base: null,
+        },
+        account_note: "Broker totals remain in HKD; dated normalization to USD is unavailable. Run sync to refresh FX.",
+      })
+    ),
+  );
+
+  renderPortfolio();
+
+  expect(await screen.findByText(/broker totals remain in HKD/i)).toBeInTheDocument();
+  expect(screen.getByText("Net liquidation (HKD)")).toBeInTheDocument();
+  expect(screen.getByText("Total cash (HKD)")).toBeInTheDocument();
+  expect(screen.getByText("Gross position value (HKD)")).toBeInTheDocument();
+  expect(screen.getByText("Buying power (HKD)")).toBeInTheDocument();
+  expect(screen.getByText("125001")).toBeInTheDocument();
+  expect(screen.getByText("20000")).toBeInTheDocument();
+  expect(screen.getByText("105001")).toBeInTheDocument();
+  expect(screen.getByText("60000")).toBeInTheDocument();
+  expect(screen.queryByText("Net liquidation (USD)")).not.toBeInTheDocument();
+  expect(screen.queryByText(/figures above are normalized/i)).not.toBeInTheDocument();
 });
 
 test("null price fields render as em-dash placeholders, not crashes", async () => {
@@ -230,10 +317,60 @@ test("partial valuations expose priced subtotals without presenting complete por
   expect(table.getByTestId("totals-unrealized-pnl")).toHaveTextContent("reported only");
 });
 
-test("empty paper book shows honest empty state, not a crash", async () => {
+test("incomplete FX names missing currencies and preserves local position values", async () => {
+  const incomplete = {
+    ...TWO_POSITIONS,
+    fx: {
+      status: "incomplete",
+      base_currency: "USD",
+      source: null,
+      as_of: null,
+      fetched_at: null,
+      missing_currencies: ["EUR"],
+      note: "Local marks are shown; USD totals exclude positions without trustworthy dated FX. Missing EUR.",
+    },
+    positions: [
+      {
+        ...TWO_POSITIONS.positions[0],
+        symbol: "ASML",
+        currency: "EUR",
+        local_market_value: 1000,
+        market_value: null,
+        weight: null,
+        unrealized_pnl_local: 100,
+        unrealized_pnl: null,
+      },
+    ],
+    totals: {
+      ...TWO_POSITIONS.totals,
+      market_value: null,
+      priced_market_value: null,
+      n_positions: 1,
+      priced_positions: 0,
+      valuation_status: "partial",
+      unrealized_pnl: null,
+      reported_unrealized_pnl: null,
+      pnl_status: "partial",
+    },
+  };
+  server.use(http.get("/api/portfolio", () => HttpResponse.json(incomplete)));
+
+  renderPortfolio();
+
+  const evidence = await screen.findByTestId("fx-evidence");
+  expect(evidence).toHaveTextContent("▲ Incomplete");
+  expect(evidence).toHaveTextContent("EUR");
+  const table = within(screen.getByTestId("positions-table"));
+  expect(table.getByText("Local 1000.00 EUR")).toBeInTheDocument();
+  expect(table.getByText("Local 100.00 EUR")).toBeInTheDocument();
+  expect(table.getAllByText("—").length).toBeGreaterThan(0);
+});
+
+test("empty book shows source-neutral recovery guidance, not a crash", async () => {
   server.use(http.get("/api/portfolio", () => HttpResponse.json(EMPTY)));
   renderPortfolio();
-  expect(await screen.findByText(/No positions in the paper book yet/)).toBeInTheDocument();
+  expect(await screen.findByText(/No positions were reported for this book/)).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Check Setup" })).toHaveAttribute("href", "/book/setup");
   expect(screen.getByText("NO MATERIAL LINK — no broker connected")).toBeInTheDocument();
 });
 

@@ -57,6 +57,7 @@ def build():
     app = create_app(
         store=BarStore(settings.data_dir),
         benchmark=settings.benchmark,
+        base_currency=getattr(settings, "base_currency", "USD"),
         api_token=settings.api_token,
         allowed_origins=settings.api_allowed_origin_list(),
     )

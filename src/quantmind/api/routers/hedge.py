@@ -43,9 +43,11 @@ reducing tail risk, not from denominator inflation.
 Hedge sizing: to move book beta from `book_beta` to `objective.value` by
 adding `hedge_qty` shares of a candidate with beta `beta_cand` at price
 `price_cand`, the dollar-beta needed from the hedge leg is
-`(objective.value - book_beta) * book_value`, so
-`hedge_qty = (objective.value - book_beta) * book_value / (beta_cand * price_cand)`
-`= -(book_beta - objective.value) * book_value / (beta_cand * price_cand)`.
+`(objective.value - book_beta) * book_gross`, so
+`hedge_qty = (objective.value - book_beta) * book_gross / (beta_cand * price_cand)`
+`= -(book_beta - objective.value) * book_gross / (beta_cand * price_cand)`.
+A signed-net book value is not the denominator of the book return/beta
+calculation and therefore cannot size its beta overlay.
 A candidate with |beta| < 0.1 is flagged `unusable` (sizing would blow up)
 and reported without a size/protection, never dropped from the response.
 
@@ -61,6 +63,8 @@ routers/risk.py, routers/whatif.py).
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
+from itertools import islice
 from typing import Literal
 
 import numpy as np
@@ -70,9 +74,14 @@ from pydantic import BaseModel, Field, model_validator
 
 from quantmind.analytics.correlation import rolling_correlation
 from quantmind.api.routers._shared import (
+    FxEvidenceOut,
     PositionIn,
     clean,
+    collect_currency_assertions,
+    complete_fx_evidence,
     iso,
+    load_base_currency_series,
+    read_instrument_metadata_map,
     read_close_series,
     refuse_unsupported_contract_legs,
     weighted_portfolio_returns,
@@ -83,6 +92,7 @@ from quantmind.api.routers.book import (
     validate_pinned_book_scope,
 )
 from quantmind.hedge.core import diversification_ratio, leverage_headroom, max_drawdown
+from quantmind.fx import FxConversionUnavailable, FxConverter
 from quantmind.risk.returns import InsufficientDataError, historical_es, rolling_beta
 
 router = APIRouter()
@@ -90,7 +100,15 @@ router = APIRouter()
 _BETA_WINDOW = 60
 _MIN_BETA_ABS = 0.1
 _MAX_CANDIDATES_OUT = 20
+_MAX_CANDIDATES_IN = 50
+_MAX_DEFAULT_CANDIDATE_SCAN = 200
 _MAX_BOOK_POSITIONS = 50
+_MAX_CANDIDATE_MARK_AGE_BUSINESS_DAYS = 3
+# At 97.5% confidence this leaves at least five observations in the
+# historical-ES tail. A merely beta-estimable 60-day listing would otherwise
+# rank on one worst day and could collapse the comparison window for every
+# other candidate.
+_MIN_PROTECTION_OBSERVATIONS = 200
 
 
 class Objective(BaseModel):
@@ -106,7 +124,9 @@ class HedgeRequest(BaseModel):
     objective: Objective
     # Default = the cached universe minus book symbols (resolved in-handler,
     # request.app.state.store isn't available at model-validation time).
-    candidates: list[str] | None = None
+    candidates: list[str] | None = Field(
+        None, min_length=1, max_length=_MAX_CANDIDATES_IN
+    )
     years: int = Field(5, ge=1, le=25)
 
     @model_validator(mode="after")
@@ -131,6 +151,7 @@ class LeverageRequest(BaseModel):
 
 
 class LeverageResponse(BaseModel):
+    fx: FxEvidenceOut
     symbols: list[str]
     n_obs: int
     max_drawdown: float | None
@@ -157,15 +178,37 @@ class HedgeCandidateOut(BaseModel):
     corr_stability: float | None
 
 
+class HedgeCandidateSkipOut(BaseModel):
+    symbol: str
+    reason: str
+
+
 class HedgeResponse(BaseModel):
+    fx: FxEvidenceOut
     benchmark: str
     objective: Objective
     book_value: float | None
     book_beta: float | None
     es_before: float | None
+    # Additive evidence for the one common sample used by every candidate's
+    # es_before/es_after/protection fields. The top-level es_before remains the
+    # full available book baseline for backwards compatibility.
+    comparison_as_of: str | None = None
+    comparison_n_obs: int = 0
     n_candidates_evaluated: int
     candidates: list[HedgeCandidateOut]
+    skipped_candidates: list[HedgeCandidateSkipOut]
     as_of: str | None
+
+
+@dataclass(frozen=True)
+class _PreparedCandidate:
+    symbol: str
+    prices: pd.Series
+    returns: pd.Series
+    beta: float | None
+    unusable: bool
+    corr_stability: float | None
 
 
 def _portfolio_returns(
@@ -176,13 +219,21 @@ def _portfolio_returns(
     Returns (portfolio_returns, weights, book_value, gross, prices); `gross`
     is the denominator the caller must reuse for any per-book-dollar overlay
     computation (see module docstring's normalization convention)."""
-    last_close = {s: float(series_map[s].iloc[-1]) for s in symbols}
+    prices = pd.concat(
+        {s: series_map[s] for s in symbols}, axis=1, sort=False
+    ).dropna()
+    if prices.empty:
+        return None, {}, 0.0, 0.0, prices
+
+    # Valuation, gross weights, returns, and response as_of must describe the
+    # same book observation. Using each leg's independent last row mixes dates
+    # whenever exchange calendars or cache freshness differ.
+    last_close = {s: float(prices.iloc[-1][s]) for s in symbols}
     market_values = {s: qtys[s] * last_close[s] for s in symbols}
     gross = sum(abs(v) for v in market_values.values())
     weights = {s: (market_values[s] / gross if gross else 0.0) for s in symbols}
     book_value = sum(market_values.values())
 
-    prices = pd.concat({s: series_map[s] for s in symbols}, axis=1).dropna()
     returns = prices.pct_change().dropna()
     if len(returns) == 0:
         return None, weights, book_value, gross, prices
@@ -191,10 +242,23 @@ def _portfolio_returns(
     return portfolio_returns, weights, book_value, gross, prices
 
 
+def _business_day_age(older: pd.Timestamp, newer: pd.Timestamp) -> int:
+    """Weekday-aware age between two already ordered market observations."""
+
+    older_date = pd.Timestamp(older).date()
+    newer_date = pd.Timestamp(newer).date()
+    if older_date >= newer_date:
+        return 0
+    return int(
+        np.busday_count(older_date.isoformat(), newer_date.isoformat())
+    )
+
+
 @router.post("/hedge", response_model=HedgeResponse)
 def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     store = request.app.state.store
     benchmark = request.app.state.benchmark
+    base_currency = request.app.state.base_currency
     symbol_map = store.read_symbol_map()
 
     # book_ref resolves to the same PositionIn shape as an inline book
@@ -226,9 +290,22 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     if benchmark not in symbol_map:
         raise HTTPException(422, detail=f"benchmark {benchmark!r} not in cache")
 
-    series_map: dict[str, pd.Series] = {}
-    for sym in [*unique_book, benchmark]:
-        series_map[sym] = read_close_series(store, symbol_map[sym], sym, req.years)
+    asserted_currencies = collect_currency_assertions(book_positions)
+    series_map, book_currencies, fx_converter = load_base_currency_series(
+        store,
+        symbol_map,
+        [*unique_book, benchmark],
+        years=req.years,
+        base_currency=base_currency,
+        asserted_currencies=asserted_currencies,
+    )
+    fx_sources = (
+        {fx_converter.source} if fx_converter.source != "identity" else set()
+    )
+    fx_as_of_dates = [fx_converter.as_of] if fx_converter.as_of is not None else []
+    fx_fetched_at_values = (
+        [fx_converter.fetched_at] if fx_converter.fetched_at else []
+    )
 
     # NaN/Inf last close (corrupted/partial sync data) makes a book leg
     # unpriceable — named 422 rather than a silently propagated NaN, aligned
@@ -274,9 +351,29 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         es_before = None
 
     if req.candidates is not None:
-        candidate_pool = [s for s in dict.fromkeys(req.candidates) if s not in unique_book]
+        requested = list(dict.fromkeys(req.candidates))
+        overlaps = [symbol for symbol in requested if symbol in unique_book]
+        if overlaps:
+            detail = "; ".join(
+                f"{symbol}: candidate is already present in book"
+                for symbol in overlaps
+            )
+            raise HTTPException(
+                422,
+                detail=f"requested hedge candidates unavailable: {detail}",
+            )
+        candidate_pool = requested
+        default_scan_omitted = 0
     else:
-        candidate_pool = [s for s in symbol_map if s not in unique_book]
+        book_symbols = set(unique_book)
+        candidate_count = len(symbol_map) - len(book_symbols)
+        candidate_pool = list(
+            islice(
+                (symbol for symbol in symbol_map if symbol not in book_symbols),
+                _MAX_DEFAULT_CANDIDATE_SCAN,
+            )
+        )
+        default_scan_omitted = max(0, candidate_count - len(candidate_pool))
 
     if not candidate_pool:
         raise HTTPException(
@@ -284,16 +381,121 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
             detail="no usable candidates: candidate universe is empty after excluding book symbols",
         )
 
-    results: list[HedgeCandidateOut] = []
-    for csym in candidate_pool:
+    prepared_candidates: list[_PreparedCandidate] = []
+    skipped_candidates: list[HedgeCandidateSkipOut] = []
+    candidate_metadata = read_instrument_metadata_map(store)
+    converter_cache: dict[str, FxConverter | None] = {
+        currency: fx_converter for currency in set(book_currencies.values())
+    }
+    book_as_of = book_prices.index[-1]
+    comparison_index = book_returns.index
+    has_comparable_candidate = False
+    for candidate_index, csym in enumerate(candidate_pool):
+        if (
+            req.candidates is None
+            and len(prepared_candidates) >= _MAX_CANDIDATES_IN
+        ):
+            skipped_candidates.extend(
+                HedgeCandidateSkipOut(
+                    symbol=remaining_symbol,
+                    reason=(
+                        "not inspected because the default candidate evaluation "
+                        f"limit ({_MAX_CANDIDATES_IN}) was reached"
+                    ),
+                )
+                for remaining_symbol in candidate_pool[candidate_index:]
+            )
+            break
+        currency_value = (candidate_metadata.get(csym) or {}).get("currency")
+        currency = (
+            str(currency_value).strip().upper() if currency_value else None
+        )
+        if currency is None:
+            skipped_candidates.append(
+                HedgeCandidateSkipOut(symbol=csym, reason="missing currency metadata")
+            )
+            continue
         try:
-            cand_prices = read_close_series(store, symbol_map[csym], csym, req.years)
+            if currency not in converter_cache:
+                try:
+                    converter_cache[currency] = FxConverter.from_store(
+                        store,
+                        base_currency=base_currency,
+                        currencies={currency},
+                    )
+                except (FxConversionUnavailable, ValueError):
+                    converter_cache[currency] = None
+            candidate_converter = converter_cache[currency]
+            if candidate_converter is None:
+                skipped_candidates.append(
+                    HedgeCandidateSkipOut(
+                        symbol=csym,
+                        reason=f"dated {currency} FX evidence is unavailable",
+                    )
+                )
+                continue
+            local_prices = read_close_series(
+                store,
+                symbol_map[csym],
+                csym,
+                req.years,
+            )
+            cand_prices = candidate_converter.convert_series(local_prices, currency)
         except HTTPException:
-            continue  # mapped but no cached bars — a data gap, not a client error; skip it
+            skipped_candidates.append(
+                HedgeCandidateSkipOut(symbol=csym, reason="cached daily bars are unavailable")
+            )
+            continue
+        except FxConversionUnavailable:
+            skipped_candidates.append(
+                HedgeCandidateSkipOut(
+                    symbol=csym,
+                    reason=f"dated {currency} FX evidence does not cover the price history",
+                )
+            )
+            continue
+        cand_prices = cand_prices.sort_index()
+        cand_prices = cand_prices.loc[cand_prices.index <= book_as_of]
+        if cand_prices.empty:
+            skipped_candidates.append(
+                HedgeCandidateSkipOut(
+                    symbol=csym,
+                    reason=(
+                        "no cached daily bars on or before the aligned book "
+                        "valuation date"
+                    ),
+                )
+            )
+            continue
+        candidate_as_of = pd.Timestamp(cand_prices.index[-1])
+        mark_age = _business_day_age(candidate_as_of, pd.Timestamp(book_as_of))
+        if mark_age > _MAX_CANDIDATE_MARK_AGE_BUSINESS_DAYS:
+            skipped_candidates.append(
+                HedgeCandidateSkipOut(
+                    symbol=csym,
+                    reason=(
+                        f"candidate mark from {candidate_as_of.date()} is stale "
+                        f"relative to book as-of {pd.Timestamp(book_as_of).date()} "
+                        f"({mark_age} business days; max "
+                        f"{_MAX_CANDIDATE_MARK_AGE_BUSINESS_DAYS})"
+                    ),
+                )
+            )
+            continue
+        if candidate_converter.source != "identity":
+            fx_sources.add(candidate_converter.source)
+        if candidate_converter.as_of is not None:
+            fx_as_of_dates.append(candidate_converter.as_of)
+        if candidate_converter.fetched_at:
+            fx_fetched_at_values.append(candidate_converter.fetched_at)
 
         cand_returns = cand_prices.pct_change().dropna()
 
-        aligned_c = pd.concat({"asset": cand_returns, "bench": bench_returns}, axis=1).dropna()
+        aligned_c = pd.concat(
+            {"asset": cand_returns, "bench": bench_returns},
+            axis=1,
+            sort=False,
+        ).dropna()
         beta_cand: float | None = None
         if len(aligned_c) >= _BETA_WINDOW + 2:
             try:
@@ -304,7 +506,11 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
             except InsufficientDataError:
                 beta_cand = None
 
-        aligned_bc = pd.concat({"book": book_returns, "cand": cand_returns}, axis=1).dropna()
+        aligned_bc = pd.concat(
+            {"book": book_returns, "cand": cand_returns},
+            axis=1,
+            sort=False,
+        ).dropna()
         corr_stability: float | None = None
         if len(aligned_bc) >= _BETA_WINDOW + 2:
             roll_corr = rolling_correlation(aligned_bc["book"], aligned_bc["cand"], window=_BETA_WINDOW).dropna()
@@ -313,40 +519,99 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
 
         unusable = beta_cand is None or not math.isfinite(beta_cand) or abs(beta_cand) < _MIN_BETA_ABS
 
-        hedge_qty = hedge_notional = es_after = protection = residual_beta = None
-
         if not unusable and book_beta is not None:
-            price_cand_last = float(cand_prices.iloc[-1])
+            candidate_comparison_index = comparison_index.intersection(
+                cand_returns.index, sort=False
+            ).sort_values()
+            if len(candidate_comparison_index) < _MIN_PROTECTION_OBSERVATIONS:
+                skipped_candidates.append(
+                    HedgeCandidateSkipOut(
+                        symbol=csym,
+                        reason=(
+                            "insufficient common comparison history: "
+                            f"{len(candidate_comparison_index)} observations; need "
+                            f"at least {_MIN_PROTECTION_OBSERVATIONS}"
+                        ),
+                    )
+                )
+                continue
+            comparison_index = candidate_comparison_index
+            has_comparable_candidate = True
+
+        prepared_candidates.append(
+            _PreparedCandidate(
+                symbol=csym,
+                prices=cand_prices,
+                returns=cand_returns,
+                beta=beta_cand,
+                unusable=unusable,
+                corr_stability=corr_stability,
+            )
+        )
+
+    # Protection is a cross-candidate ranking metric, so every beta-usable
+    # candidate must use one common book/candidate sample. Candidate-specific
+    # overlaps make shorter or differently listed histories incomparable.
+    comparison_book_returns = book_returns.loc[comparison_index]
+    if has_comparable_candidate:
+        try:
+            comparison_es_before = clean(
+                historical_es(comparison_book_returns, confidence=0.975)
+            )
+        except InsufficientDataError:
+            comparison_es_before = None
+    else:
+        comparison_es_before = None
+
+    results: list[HedgeCandidateOut] = []
+    for candidate in prepared_candidates:
+        hedge_qty = hedge_notional = es_after = protection = residual_beta = None
+        beta_cand = candidate.beta
+
+        if not candidate.unusable and book_beta is not None and beta_cand is not None:
+            price_cand_last = float(candidate.prices.iloc[-1])
             if math.isfinite(price_cand_last) and price_cand_last != 0:
-                raw_size = (book_beta - req.objective.value) * book_value / (beta_cand * price_cand_last)
+                raw_size = (
+                    (book_beta - req.objective.value)
+                    * book_gross
+                    / (beta_cand * price_cand_last)
+                )
                 hedge_qty = -raw_size
                 hedge_notional = hedge_qty * price_cand_last
 
                 # Overlay, not a re-blended portfolio (see module docstring's
-                # normalization convention): the hedge leg's daily dollar P&L
-                # (hedge_notional * cand_return(t), constant-notional
-                # approximation) is added to book_returns after converting to
-                # the SAME per-original-book-dollar units via book_gross —
-                # never the (possibly hedge-inflated) new portfolio gross.
-                aligned_overlay = pd.concat({"book": book_returns, "cand": cand_returns}, axis=1).dropna()
+                # normalization convention). The common index guarantees
+                # es_before and every ranked es_after use identical dates.
+                candidate_returns = candidate.returns.loc[comparison_index]
                 hedged_returns: pd.Series | None = None
-                if len(aligned_overlay) > 0 and book_gross:
-                    hedge_leg_returns = hedge_notional * aligned_overlay["cand"] / book_gross
-                    hedged_returns = aligned_overlay["book"] + hedge_leg_returns
+                if len(comparison_index) > 0 and book_gross:
+                    hedge_leg_returns = (
+                        hedge_notional * candidate_returns / book_gross
+                    )
+                    hedged_returns = comparison_book_returns + hedge_leg_returns
 
                 if hedged_returns is not None:
                     try:
-                        es_after = clean(historical_es(hedged_returns, confidence=0.975))
+                        es_after = clean(
+                            historical_es(hedged_returns, confidence=0.975)
+                        )
                     except InsufficientDataError:
                         es_after = None
-                    if es_before is not None and es_after is not None:
-                        protection = es_before - es_after
+                    if comparison_es_before is not None and es_after is not None:
+                        protection = comparison_es_before - es_after
 
-                    aligned_h = pd.concat({"book": hedged_returns, "bench": bench_returns}, axis=1).dropna()
+                    aligned_h = pd.concat(
+                        {"book": hedged_returns, "bench": bench_returns},
+                        axis=1,
+                        sort=False,
+                    ).dropna()
                     if len(aligned_h) >= _BETA_WINDOW + 2:
                         try:
                             rb_series = rolling_beta(
-                                aligned_h["book"], aligned_h["bench"], window=_BETA_WINDOW, rf=0.0
+                                aligned_h["book"],
+                                aligned_h["bench"],
+                                window=_BETA_WINDOW,
+                                rf=0.0,
                             )
                             rb_valid = rb_series.dropna()
                             if len(rb_valid):
@@ -356,24 +621,52 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
 
         results.append(
             HedgeCandidateOut(
-                symbol=csym,
+                symbol=candidate.symbol,
                 beta=clean(beta_cand),
-                unusable=unusable,
+                unusable=candidate.unusable,
                 hedge_qty=clean(hedge_qty),
                 hedge_notional=clean(hedge_notional),
-                es_before=es_before,
+                es_before=comparison_es_before,
                 es_after=es_after,
                 protection=clean(protection),
                 residual_beta=residual_beta,
-                corr_stability=corr_stability,
+                corr_stability=candidate.corr_stability,
+            )
+        )
+
+    if default_scan_omitted:
+        skipped_candidates.append(
+            HedgeCandidateSkipOut(
+                symbol="<remaining cached candidates>",
+                reason=(
+                    f"{default_scan_omitted} additional cached candidates were not "
+                    "inspected because the default candidate scan limit "
+                    f"({_MAX_DEFAULT_CANDIDATE_SCAN}) was reached"
+                ),
             )
         )
 
     n_evaluated = len(results)
-    if n_evaluated == 0:
+    if req.candidates is not None and skipped_candidates:
+        details = "; ".join(
+            f"{candidate.symbol}: {candidate.reason}"
+            for candidate in skipped_candidates
+        )
         raise HTTPException(
             422,
-            detail="no usable candidates: none of the candidate symbols had sufficient cached data",
+            detail=f"requested hedge candidates unavailable: {details}",
+        )
+    if n_evaluated == 0:
+        details = "; ".join(
+            f"{candidate.symbol}: {candidate.reason}"
+            for candidate in skipped_candidates
+        )
+        raise HTTPException(
+            422,
+            detail=(
+                "no usable candidates: none of the candidate symbols had sufficient "
+                f"cached data{f' ({details})' if details else ''}"
+            ),
         )
 
     # Rank by protection descending (Engineering Constraint 12: cointegration
@@ -381,14 +674,38 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     # candidates sort last but are still returned, flagged.
     results.sort(key=lambda r: (r.protection is None, -(r.protection if r.protection is not None else 0.0)))
 
+    hedge_fx = complete_fx_evidence(fx_converter, base_currency=base_currency)
+    if fx_sources:
+        hedge_fx = hedge_fx.model_copy(
+            update={
+                "status": "converted",
+                "source": ", ".join(sorted(fx_sources)),
+                "as_of": min(fx_as_of_dates) if fx_as_of_dates else None,
+                "fetched_at": (
+                    min(fx_fetched_at_values) if fx_fetched_at_values else None
+                ),
+                "note": (
+                    f"Book and hedge candidates are normalized to {base_currency} "
+                    "with dated FX evidence."
+                ),
+            }
+        )
     return HedgeResponse(
+        fx=hedge_fx,
         benchmark=benchmark,
         objective=req.objective,
         book_value=clean(book_value),
         book_beta=book_beta,
         es_before=es_before,
+        comparison_as_of=(
+            iso(comparison_index[-1]) if has_comparable_candidate else None
+        ),
+        comparison_n_obs=(
+            len(comparison_index) if has_comparable_candidate else 0
+        ),
         n_candidates_evaluated=n_evaluated,
         candidates=results[:_MAX_CANDIDATES_OUT],
+        skipped_candidates=skipped_candidates,
         as_of=iso(book_prices.index[-1]) if len(book_prices) else None,
     )
 
@@ -401,6 +718,7 @@ def leverage(request: Request, req: LeverageRequest) -> LeverageResponse:
     the legs are). Thin composition over quantmind.hedge.core."""
     store = request.app.state.store
     symbol_map = store.read_symbol_map()
+    base_currency = request.app.state.base_currency
 
     if req.book is not None:
         book_positions = req.book
@@ -423,7 +741,15 @@ def leverage(request: Request, req: LeverageRequest) -> LeverageResponse:
     if unknown:
         raise HTTPException(422, detail=f"unknown symbols: {unknown}")
 
-    series_map = {sym: read_close_series(store, symbol_map[sym], sym, req.years) for sym in unique_book}
+    asserted_currencies = collect_currency_assertions(book_positions)
+    series_map, _currencies, fx_converter = load_base_currency_series(
+        store,
+        symbol_map,
+        unique_book,
+        years=req.years,
+        base_currency=base_currency,
+        asserted_currencies=asserted_currencies,
+    )
     # Non-finite last close -> a NaN gross would slip past `gross <= 0` (NaN<=0
     # is False) and return a 200 of nulls; name the 422 instead (mirrors /hedge).
     unpriceable = sorted(sym for sym in unique_book if clean(float(series_map[sym].iloc[-1])) is None)
@@ -455,6 +781,7 @@ def leverage(request: Request, req: LeverageRequest) -> LeverageResponse:
         div_ratio = None  # single instrument or degenerate -> undefined
 
     return LeverageResponse(
+        fx=complete_fx_evidence(fx_converter, base_currency=base_currency),
         symbols=unique_book,
         n_obs=len(book_returns),
         max_drawdown=clean(mdd),

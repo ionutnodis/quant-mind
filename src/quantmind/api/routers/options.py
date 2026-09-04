@@ -29,7 +29,13 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
-from quantmind.api.routers._shared import PositionIn, clean, iso
+from quantmind.api.routers._shared import (
+    PositionIn,
+    clean,
+    collect_currency_assertions,
+    iso,
+    resolve_symbol_currencies,
+)
 from quantmind.api.routers.book import (
     read_book,
     read_book_positions,
@@ -349,6 +355,25 @@ def book_greeks(request: Request, req: BookGreeksRequest) -> BookGreeksResponse:
             detail=(
                 "book Greeks do not support security types: "
                 f"{unsupported_security_types}"
+            ),
+        )
+
+    asserted_currencies = collect_currency_assertions(positions)
+    currencies = resolve_symbol_currencies(
+        store,
+        [position.symbol for position in positions],
+        asserted=asserted_currencies,
+    )
+    non_base_currencies = sorted(
+        {currency for currency in currencies.values() if currency != request.app.state.base_currency}
+    )
+    if non_base_currencies:
+        raise HTTPException(
+            422,
+            detail=(
+                "cross-currency book Greeks are unavailable until dollar delta, vega, "
+                "theta, and stress P&L are normalized leg-by-leg; currencies: "
+                f"{non_base_currencies}"
             ),
         )
 

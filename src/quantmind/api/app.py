@@ -108,6 +108,7 @@ def create_app(
     api_token: str = "",
     broker=None,
     allowed_origins: tuple[str, ...] | None = None,
+    base_currency: str = "USD",
 ) -> FastAPI:
     app = FastAPI(title="QuantMind API", version="0.4.0.0")
 
@@ -123,6 +124,7 @@ def create_app(
     # Shared state for domain routers (routers/*.py): read via request.app.state
     app.state.store = store
     app.state.benchmark = benchmark
+    app.state.base_currency = base_currency
     app.state.broker = broker
     app.state.broker_connection_status = "connected" if broker is not None else "unavailable"
     app.state.broker_connection_error = None

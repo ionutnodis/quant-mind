@@ -2,7 +2,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quantmind.sources.fred import net_liquidity, parse_fred_csv
+from quantmind.sources.fred import fetch_series, net_liquidity, parse_fred_csv
+from quantmind.sources.http import ExternalPayloadTooLarge
 
 CSV = """DATE,DGS3MO
 2026-07-20,4.35
@@ -46,3 +47,50 @@ def test_net_liquidity_validator_rejects_unit_errors():
     unit_bug = pd.Series([-822_876.0], index=pd.DatetimeIndex(["2026-07-24"]))
     with pytest.raises(ValueError, match="implausible"):
         validate_net_liquidity(unit_bug)
+
+
+class _HttpResponse:
+    def __init__(self, payload: bytes, content_length: str | None = None):
+        import io
+
+        self._body = io.BytesIO(payload)
+        self.headers = {}
+        if content_length is not None:
+            self.headers["Content-Length"] = content_length
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self, limit: int) -> bytes:
+        return self._body.read(limit)
+
+
+def test_fred_fetch_rejects_oversized_declared_response(monkeypatch):
+    import quantmind.sources.fred as fred
+
+    monkeypatch.setattr(fred, "_MAX_FRED_RESPONSE_BYTES", 10)
+    monkeypatch.setattr(
+        fred.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _HttpResponse(b"", content_length="11"),
+    )
+
+    with pytest.raises(ExternalPayloadTooLarge, match="declared"):
+        fetch_series("DGS10")
+
+
+def test_fred_fetch_rejects_streamed_response_over_limit(monkeypatch):
+    import quantmind.sources.fred as fred
+
+    monkeypatch.setattr(fred, "_MAX_FRED_RESPONSE_BYTES", 10)
+    monkeypatch.setattr(
+        fred.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _HttpResponse(b"x" * 11),
+    )
+
+    with pytest.raises(ExternalPayloadTooLarge, match="exceeded"):
+        fetch_series("DGS10")

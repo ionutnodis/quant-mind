@@ -38,7 +38,7 @@ test("uses phones as a read-only setup companion and tablets as an authoring sur
       contentType: "application/json",
       body: JSON.stringify({
         overall: "needs_attention",
-        api: { status: "ready", version: "0.4.0.0" },
+        api: { status: "ready", version: "0.5.0.0" },
         broker: { status: "connected", provider: "IBKR", mode: "paper", error: null },
         market_data: {
           status: "ready",
@@ -69,6 +69,21 @@ test("uses phones as a read-only setup companion and tablets as an authoring sur
           stale_chains: [],
           chain_as_of: null,
           chain_age_days: null,
+        },
+        fx_data: {
+          status: "not_required",
+          base_currency: "USD",
+          required_currencies: [],
+          missing_currencies: [],
+          provider: null,
+          as_of: null,
+        },
+        ucits_data: {
+          status: "not_required",
+          total_etfs: 0,
+          ready_profiles: 0,
+          missing_symbols: [],
+          stale_symbols: [],
         },
         book: {
           status: "not_pinned",
@@ -127,12 +142,31 @@ test("keeps every analysis route inside a tablet viewport", async ({ page }) => 
 });
 
 test("uses the available analytical canvas on a wide monitor", async ({ page }) => {
-  await page.setViewportSize({ width: 2560, height: 1440 });
+  await page.setViewportSize({ width: 3440, height: 1440 });
   await page.goto("/risk");
   await page.waitForLoadState("networkidle");
 
   const canvasWidth = await page.locator("main > div").first().evaluate(
     (element) => element.getBoundingClientRect().width,
   );
-  expect(canvasWidth).toBeGreaterThan(2200);
+  expect(canvasWidth).toBeGreaterThan(3000);
+});
+
+test("honors exact companion and authoring viewport boundaries", async ({ page }) => {
+  await page.goto("/risk");
+  const run = page.getByRole("button", { name: "Run Monte Carlo" });
+
+  for (const viewport of [
+    { width: 320, height: 600 },
+    { width: 767, height: 600 },
+    { width: 768, height: 599 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await expect(run).toBeHidden();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
+
+  await page.setViewportSize({ width: 768, height: 600 });
+  await expect(run).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

@@ -10,11 +10,25 @@ Constraints). Unknown symbol -> 422 (pattern: routers/risk.py).
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
+from typing import Literal
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from quantmind.api.routers._shared import (
+    FxEvidenceOut,
+    complete_fx_evidence,
+    load_base_currency_series,
+    read_instrument_metadata_map,
+)
+from quantmind.instruments.metadata import (
+    UCITS_PROFILE_MAX_AGE_DAYS,
+    ProfileFreshness,
+    UcitsEtfProfileV1,
+    is_ucits_profile_fresh,
+)
 from quantmind.risk.returns import InsufficientDataError, annualized_vol, rolling_beta, simple_returns
 
 router = APIRouter()
@@ -53,29 +67,210 @@ def _bars_for(request: Request, symbol: str) -> tuple[pd.DataFrame, int]:
     return bars, con_id
 
 
-def _beta_vs_benchmark(store, close: pd.Series, symbol: str, benchmark: str) -> float | None:
-    if symbol == benchmark:
-        return 1.0
-    symbol_map = store.read_symbol_map()
-    bench_con_id = symbol_map.get(benchmark)
-    if bench_con_id is None:
-        return None
+class InstrumentRiskReadiness(BaseModel):
+    status: Literal["ready", "partial", "unavailable"]
+    reason: Literal[
+        "fx_unavailable", "missing_benchmark", "insufficient_history"
+    ] | None
+    benchmark: str
+    base_currency: str
+    fx: FxEvidenceOut
+    note: str
+
+
+def _has_price_history(store, symbol_map: dict[str, int], symbol: str) -> bool:
+    con_id = symbol_map.get(symbol)
+    if con_id is None:
+        return False
     try:
-        bench_bars, _ = store.read_bars(con_id=bench_con_id, bar_size="1d")
+        bars, _ = store.read_bars(con_id=con_id, bar_size="1d")
     except (FileNotFoundError, KeyError, OSError, ValueError):
-        return None
-    aligned = pd.concat({"a": close, "b": bench_bars["close"]}, axis=1).dropna()
+        return False
+    return "close" in bars and not bars["close"].dropna().empty
+
+
+def _risk_state(
+    *,
+    status: Literal["ready", "partial", "unavailable"],
+    reason: Literal[
+        "fx_unavailable", "missing_benchmark", "insufficient_history"
+    ] | None,
+    benchmark: str,
+    base_currency: str,
+    fx: FxEvidenceOut,
+    note: str,
+) -> InstrumentRiskReadiness:
+    return InstrumentRiskReadiness(
+        status=status,
+        reason=reason,
+        benchmark=benchmark,
+        base_currency=base_currency,
+        fx=fx,
+        note=note,
+    )
+
+
+def _base_currency_risk_stats(
+    request: Request, symbol: str, benchmark: str
+) -> tuple[float | None, float | None, InstrumentRiskReadiness]:
+    """Return independently available stats plus discriminated evidence."""
+    store = request.app.state.store
+    symbol_map = store.read_symbol_map()
+    base_currency = getattr(request.app.state, "base_currency", "USD")
+    benchmark_available = _has_price_history(store, symbol_map, benchmark)
+
+    # Volatility depends only on the instrument. Resolve that evidence first so
+    # an unavailable foreign benchmark cannot suppress a metric we can compute
+    # honestly from the instrument's own base-normalized history.
+    try:
+        asset_series, _asset_currencies, asset_converter = load_base_currency_series(
+            store,
+            symbol_map,
+            [symbol],
+            years=0,
+            base_currency=base_currency,
+        )
+    except (HTTPException, KeyError) as exc:
+        metadata = read_instrument_metadata_map(store)
+        missing_currencies = sorted(
+            {
+                str((metadata.get(item) or {}).get("currency") or "UNKNOWN")
+                .strip()
+                .upper()
+                for item in [symbol]
+                if str((metadata.get(item) or {}).get("currency") or "UNKNOWN")
+                .strip()
+                .upper()
+                != base_currency
+            }
+        )
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        fx = FxEvidenceOut(
+            status="incomplete",
+            base_currency=base_currency,
+            source=None,
+            as_of=None,
+            fetched_at=None,
+            missing_currencies=missing_currencies or ["UNKNOWN"],
+            note=f"Dated FX normalization is unavailable: {detail}",
+        )
+        return None, None, _risk_state(
+            status="unavailable",
+            reason="fx_unavailable",
+            benchmark=benchmark,
+            base_currency=base_currency,
+            fx=fx,
+            note="Risk metrics are unavailable because dated FX evidence is missing.",
+        )
+
+    asset_fx = complete_fx_evidence(asset_converter, base_currency=base_currency)
+    asset = asset_series[symbol]
+    try:
+        vol = _clean(annualized_vol(simple_returns(asset)))
+    except InsufficientDataError:
+        vol = None
+
+    if not benchmark_available:
+        return vol, None, _risk_state(
+            status="partial" if vol is not None else "unavailable",
+            reason="missing_benchmark",
+            benchmark=benchmark,
+            base_currency=base_currency,
+            fx=asset_fx,
+            note=(
+                f"Benchmark {benchmark} is not cached; volatility uses "
+                f"{base_currency}-normalized history, but beta is unavailable."
+            ),
+        )
+
+    try:
+        series, _currencies, converter = load_base_currency_series(
+            store,
+            symbol_map,
+            [symbol, benchmark],
+            years=0,
+            base_currency=base_currency,
+        )
+    except (HTTPException, KeyError) as exc:
+        metadata = read_instrument_metadata_map(store)
+        benchmark_currency = (
+            str((metadata.get(benchmark) or {}).get("currency") or "UNKNOWN")
+            .strip()
+            .upper()
+        )
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        missing = (
+            [benchmark_currency]
+            if benchmark_currency != base_currency
+            else ["UNKNOWN"]
+        )
+        fx = FxEvidenceOut(
+            status="incomplete",
+            base_currency=base_currency,
+            source=asset_fx.source,
+            as_of=asset_fx.as_of,
+            fetched_at=asset_fx.fetched_at,
+            missing_currencies=missing,
+            note=f"Benchmark FX normalization is unavailable: {detail}",
+        )
+        return vol, None, _risk_state(
+            status="partial" if vol is not None else "unavailable",
+            reason="fx_unavailable",
+            benchmark=benchmark,
+            base_currency=base_currency,
+            fx=fx,
+            note=(
+                f"Volatility uses {base_currency}-normalized instrument history, "
+                f"but beta vs {benchmark} is unavailable because benchmark FX is missing."
+            ),
+        )
+
+    fx = complete_fx_evidence(converter, base_currency=base_currency)
+    asset = series[symbol]
+    benchmark_close = series[benchmark]
+    aligned = pd.concat({"a": asset, "b": benchmark_close}, axis=1).dropna()
     window = min(_BETA_WINDOW, len(aligned) - 2)
     if window < 5:
-        return None
+        return vol, None, _risk_state(
+            status="partial" if vol is not None else "unavailable",
+            reason="insufficient_history",
+            benchmark=benchmark,
+            base_currency=base_currency,
+            fx=fx,
+            note=f"Insufficient overlapping history for beta vs {benchmark}.",
+        )
     a_ret = simple_returns(aligned["a"])
     b_ret = simple_returns(aligned["b"])
     try:
         beta_series = rolling_beta(a_ret, b_ret, window=window)
     except InsufficientDataError:
-        return None
+        return vol, None, _risk_state(
+            status="partial" if vol is not None else "unavailable",
+            reason="insufficient_history",
+            benchmark=benchmark,
+            base_currency=base_currency,
+            fx=fx,
+            note=f"Insufficient overlapping history for beta vs {benchmark}.",
+        )
     valid = beta_series.dropna()
-    return _clean(valid.iloc[-1]) if len(valid) else None
+    beta = _clean(valid.iloc[-1]) if len(valid) else None
+    if beta is None or vol is None:
+        return vol, beta, _risk_state(
+            status="partial" if vol is not None or beta is not None else "unavailable",
+            reason="insufficient_history",
+            benchmark=benchmark,
+            base_currency=base_currency,
+            fx=fx,
+            note=f"Insufficient usable history for complete risk metrics vs {benchmark}.",
+        )
+    return vol, beta, _risk_state(
+        status="ready",
+        reason=None,
+        benchmark=benchmark,
+        base_currency=base_currency,
+        fx=fx,
+        note=f"Volatility and beta are ready from {base_currency}-normalized history.",
+    )
 
 
 class InstrumentResponse(BaseModel):
@@ -88,6 +283,16 @@ class InstrumentResponse(BaseModel):
     industry: str | None
     region: str | None
     provider: str | None
+    isin: str | None
+    primary_exchange: str | None
+    local_symbol: str | None
+    trading_class: str | None
+    stock_type: str | None
+    valid_exchanges: list[str]
+    issuer_id: str | None
+    ucits_profile_status: ProfileFreshness | None
+    ucits_profile_reason: str | None
+    ucits_profile: UcitsEtfProfileV1 | None
     last_close: float | None
     high_52w: float | None
     low_52w: float | None
@@ -96,6 +301,10 @@ class InstrumentResponse(BaseModel):
     ann_vol: float | None
     beta: float | None
     beta_benchmark: str
+    risk_base_currency: str
+    risk_fx_source: str | None
+    risk_fx_as_of: str | None
+    risk: InstrumentRiskReadiness
     as_of: str | None
 
 
@@ -132,14 +341,31 @@ def instrument(request: Request, symbol: str) -> InstrumentResponse:
         _clean(last / low_52w - 1.0) if last is not None and low_52w not in (None, 0) else None
     )
 
-    try:
-        vol = _clean(annualized_vol(simple_returns(close)))
-    except InsufficientDataError:
-        vol = None
+    vol, beta, risk = _base_currency_risk_stats(request, symbol, benchmark)
 
-    beta = _beta_vs_benchmark(store, close, symbol, benchmark)
-
-    meta = store.read_instrument_metadata(symbol) or {}
+    meta = read_instrument_metadata_map(store).get(symbol) or {}
+    profile = None
+    profile_status = meta.get("ucits_profile_status")
+    profile_reason = meta.get("ucits_profile_reason")
+    profile_isin = meta.get("ucits_profile_isin")
+    if profile_status == ProfileFreshness.FRESH.value and profile_isin:
+        try:
+            profile = store.read_ucits_profile(profile_isin)
+        except ValueError:
+            profile_status = ProfileFreshness.MISSING.value
+            profile_reason = "cached UCITS profile is corrupt; run sync"
+        if profile is None and profile_status == ProfileFreshness.FRESH.value:
+            profile_status = ProfileFreshness.MISSING.value
+            profile_reason = "cached UCITS profile is missing; run sync"
+        elif profile is not None and not is_ucits_profile_fresh(
+            profile, now=datetime.now(timezone.utc)
+        ):
+            profile = None
+            profile_status = ProfileFreshness.STALE.value
+            profile_reason = (
+                f"cached UCITS profile exceeds the {UCITS_PROFILE_MAX_AGE_DAYS:g}-day "
+                "freshness window; run sync"
+            )
 
     return InstrumentResponse(
         symbol=symbol,
@@ -151,6 +377,16 @@ def instrument(request: Request, symbol: str) -> InstrumentResponse:
         industry=meta.get("industry"),
         region=meta.get("region"),
         provider=meta.get("provider"),
+        isin=meta.get("isin"),
+        primary_exchange=meta.get("primary_exchange"),
+        local_symbol=meta.get("local_symbol"),
+        trading_class=meta.get("trading_class"),
+        stock_type=meta.get("stock_type"),
+        valid_exchanges=list(meta.get("valid_exchanges") or []),
+        issuer_id=meta.get("issuer_id"),
+        ucits_profile_status=profile_status,
+        ucits_profile_reason=profile_reason,
+        ucits_profile=profile,
         last_close=last,
         high_52w=high_52w,
         low_52w=low_52w,
@@ -159,6 +395,10 @@ def instrument(request: Request, symbol: str) -> InstrumentResponse:
         ann_vol=vol,
         beta=beta,
         beta_benchmark=benchmark,
+        risk_base_currency=risk.base_currency,
+        risk_fx_source=risk.fx.source,
+        risk_fx_as_of=risk.fx.as_of,
+        risk=risk,
         as_of=_iso(close.index[-1]) if len(close) else None,
     )
 

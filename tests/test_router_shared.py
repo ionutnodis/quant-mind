@@ -21,11 +21,45 @@ from fastapi import HTTPException
 from quantmind.api.routers._shared import (
     PositionIn,
     clean,
+    collect_currency_assertions,
     downsample,
     iso,
     read_close_series,
+    resolve_symbol_currencies,
     weighted_portfolio_returns,
 )
+from quantmind.datastore.store import BarStore
+
+
+def test_collect_currency_assertions_normalizes_duplicate_symbol_claims():
+    positions = [
+        PositionIn(symbol="IWDA", qty=1, currency="eur"),
+        PositionIn(symbol="IWDA", qty=2, currency=" EUR "),
+        PositionIn(symbol="SPY", qty=1),
+    ]
+
+    assert collect_currency_assertions(positions) == {"IWDA": "EUR"}
+
+
+def test_collect_currency_assertions_rejects_conflicting_duplicate_symbol_claims():
+    positions = [
+        PositionIn(symbol="IWDA", qty=1, currency="EUR"),
+        PositionIn(symbol="IWDA", qty=2, currency="GBP"),
+    ]
+
+    with pytest.raises(HTTPException, match="conflicting currency assertions"):
+        collect_currency_assertions(positions)
+
+
+def test_currency_resolution_names_a_corrupt_instrument_master(tmp_path):
+    store = BarStore(tmp_path)
+    (tmp_path / "instruments.json").write_text('["not", "a", "mapping"]')
+
+    with pytest.raises(HTTPException) as error:
+        resolve_symbol_currencies(store, ["SPY"])
+
+    assert error.value.status_code == 422
+    assert "instrument metadata cache is corrupt" in error.value.detail
 
 
 def test_clean_passes_through_finite_numbers():

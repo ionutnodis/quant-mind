@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -133,6 +135,76 @@ def test_instrument_metadata_round_trip(tmp_path):
     )
     got = store.read_instrument_metadata("SPY")
     assert got == {"con_id": 756733, "long_name": "SPDR S&P 500", "exchange": "ARCA", "provider": "ibkr"}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "[]",
+        "null",
+        '"metadata"',
+        '{"SPY": []}',
+        '{"SPY": null}',
+        '{"SPY": "not-an-object"}',
+    ],
+)
+def test_all_instrument_metadata_rejects_non_object_shapes_with_stable_error(
+    tmp_path, payload
+):
+    store = BarStore(tmp_path)
+    (tmp_path / "instruments.json").write_text(payload)
+
+    with pytest.raises(
+        ValueError,
+        match="instruments.json must map symbols to metadata objects",
+    ):
+        store.read_all_instrument_metadata()
+
+
+def test_single_instrument_metadata_read_rejects_invalid_record_shape(tmp_path):
+    store = BarStore(tmp_path)
+    (tmp_path / "instruments.json").write_text('{"SPY": 42}')
+
+    with pytest.raises(
+        ValueError,
+        match="instruments.json must map symbols to metadata objects",
+    ):
+        store.read_instrument_metadata("SPY")
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"currency": []},
+        {"valid_exchanges": "SMART"},
+        {"valid_exchanges": ["SMART", 7]},
+        {"external_identifiers": ["ISIN", "IE00B4L5Y983"]},
+        {"external_identifiers": {"ISIN": "IE00B4L5Y983"}},
+        {"ucits_profile_status": "READY"},
+        {"con_id": True},
+    ],
+)
+def test_instrument_metadata_rejects_invalid_known_field_values(tmp_path, fields):
+    store = BarStore(tmp_path)
+    path = tmp_path / "instruments.json"
+    path.write_text(json.dumps({"SPY": fields}))
+
+    with pytest.raises(
+        ValueError,
+        match="instruments.json contains invalid metadata for 'SPY'",
+    ):
+        store.read_all_instrument_metadata()
+
+
+def test_instrument_metadata_write_rejects_invalid_fields_without_publishing(
+    tmp_path,
+):
+    store = BarStore(tmp_path)
+
+    with pytest.raises(ValueError, match="valid_exchanges"):
+        store.write_instrument_metadata("SPY", {"valid_exchanges": "SMART"})
+
+    assert not (tmp_path / "instruments.json").exists()
 
 
 def test_instrument_metadata_write_merges_not_overwrites(tmp_path):

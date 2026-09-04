@@ -12,7 +12,7 @@ afterAll(() => server.close());
 
 const EMPTY_STATUS = {
   overall: "needs_attention",
-  api: { status: "ready", version: "0.4.0.0" },
+  api: { status: "ready", version: "0.5.0.0" },
   broker: { status: "unavailable", provider: "IBKR", mode: "paper", error: null },
   market_data: {
     status: "empty",
@@ -43,6 +43,21 @@ const EMPTY_STATUS = {
     stale_chains: [],
     chain_as_of: null,
     chain_age_days: null,
+  },
+  fx_data: {
+    status: "not_required",
+    base_currency: "USD",
+    required_currencies: [],
+    missing_currencies: [],
+    provider: null,
+    as_of: null,
+  },
+  ucits_data: {
+    status: "not_required",
+    total_etfs: 0,
+    ready_profiles: 0,
+    missing_symbols: [],
+    stale_symbols: [],
   },
   book: {
     status: "not_pinned",
@@ -77,12 +92,14 @@ test("shows the exact first action and the state of every setup dependency", asy
   renderSetup();
 
   expect(await screen.findByRole("heading", { name: "Finish local setup" })).toBeInTheDocument();
-  expect(screen.getByTestId("overall-status")).toHaveTextContent("▲ ACTION REQUIRED · v0.4.0.0");
+  expect(screen.getByTestId("overall-status")).toHaveTextContent("▲ ACTION REQUIRED · v0.5.0.0");
   expect(screen.getByText("Start IBKR Gateway or TWS")).toBeInTheDocument();
   const broker = within(screen.getByLabelText("IBKR Gateway status"));
   const market = within(screen.getByLabelText("Market cache status"));
   const macro = within(screen.getByLabelText("Macro evidence status"));
   const options = within(screen.getByLabelText("Held option evidence status"));
+  const fx = within(screen.getByLabelText("FX evidence status"));
+  const ucits = within(screen.getByLabelText("UCITS metadata status"));
   const book = within(screen.getByLabelText("Current book status"));
   expect(broker.getByText("Unavailable")).toBeInTheDocument();
   expect(broker.getByTestId("status-glyph")).toHaveTextContent("×");
@@ -90,8 +107,46 @@ test("shows the exact first action and the state of every setup dependency", asy
   expect(market.getByTestId("status-glyph")).toHaveTextContent("◇");
   expect(macro.getByText("Empty")).toBeInTheDocument();
   expect(options.getByText("Not required")).toBeInTheDocument();
+  expect(fx.getByText("Not required")).toBeInTheDocument();
+  expect(ucits.getByText("Not required")).toBeInTheDocument();
   expect(book.getByText("Not pinned")).toBeInTheDocument();
   expect(book.getByTestId("status-glyph")).toHaveTextContent("◇");
+  expect(screen.getByTestId("setup-readiness-grid")).toHaveClass(
+    "grid-cols-1",
+    "sm:grid-cols-2",
+    "xl:grid-cols-4"
+  );
+});
+
+test("syncs missing dated FX evidence using the normal sync job", async () => {
+  const missingFx = {
+    ...EMPTY_STATUS,
+    broker: { ...EMPTY_STATUS.broker, status: "connected" },
+    fx_data: {
+      status: "missing",
+      base_currency: "GBP",
+      required_currencies: ["EUR"],
+      missing_currencies: ["EUR"],
+      provider: null,
+      as_of: null,
+    },
+    next_action: "sync_fx_data",
+  };
+  server.use(
+    http.get("/api/setup/status", () => HttpResponse.json(missingFx)),
+    http.post("/api/sync", () => HttpResponse.json({ job_id: "fx-sync" })),
+    http.get("/api/sync/fx-sync", () =>
+      HttpResponse.json({ state: "done", result: "synced ECB FX", error: null })
+    )
+  );
+
+  renderSetup();
+  expect(await screen.findByText("Sync dated FX evidence")).toBeInTheDocument();
+  const fx = within(screen.getByLabelText("FX evidence status"));
+  expect(fx.getByText("Missing")).toBeInTheDocument();
+  expect(fx.getByText(/EUR → GBP/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Sync FX data" }));
+  expect(await screen.findByText("synced ECB FX")).toBeInTheDocument();
 });
 
 test("syncs stale evidence and refreshes readiness without reloading the page", async () => {
@@ -185,7 +240,7 @@ test("pins the live IBKR book and exposes the same snapshot to analysis pages", 
   fireEvent.click(pinButton);
 
   expect(await screen.findByText("Book pinned · abc123def456")).toBeInTheDocument();
-  await waitFor(() => expect(screen.getByTestId("overall-status")).toHaveTextContent("● READY · v0.4.0.0"));
+  await waitFor(() => expect(screen.getByTestId("overall-status")).toHaveTextContent("● READY · v0.5.0.0"));
   expect(screen.getByRole("link", { name: "Open Portfolio" })).toHaveAttribute(
     "href",
     "/portfolio?book_ref=abc123def456"
@@ -379,7 +434,7 @@ test("surfaces a pin failure and keeps the action available for retry", async ()
   renderSetup();
   fireEvent.click(await screen.findByRole("button", { name: "Pin current book" }));
 
-  expect(await screen.findByText(/broker portfolio unavailable/i)).toBeInTheDocument();
+  expect(await screen.findByRole("alert")).toHaveTextContent(/broker portfolio unavailable/i);
   expect(screen.getByRole("button", { name: "Pin current book" })).toBeEnabled();
 });
 

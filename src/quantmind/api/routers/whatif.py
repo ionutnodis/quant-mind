@@ -21,10 +21,13 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
 from quantmind.api.routers._shared import (
+    FxEvidenceOut,
     PositionIn,
     clean,
+    collect_currency_assertions,
+    complete_fx_evidence,
     iso,
-    read_close_series,
+    load_base_currency_series,
     refuse_unsupported_contract_legs,
     weighted_portfolio_returns,
 )
@@ -113,6 +116,7 @@ class BenchmarkOut(BaseModel):
 
 
 class WhatIfResponse(BaseModel):
+    fx: FxEvidenceOut
     weights: list[WeightOut]
     beta: float | None
     es_975: float | None
@@ -127,6 +131,7 @@ class WhatIfResponse(BaseModel):
 def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
     store = request.app.state.store
     benchmark = request.app.state.benchmark
+    base_currency = request.app.state.base_currency
     symbol_map = store.read_symbol_map()
 
     # book_ref resolves to the same PositionIn shape as an inline book
@@ -156,18 +161,26 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
     # Inner-join every symbol involved (book legs + benchmark) on trading
     # dates: portfolio daily returns are only well-defined where every leg
     # (and the benchmark, for beta) has a price.
-    series_map: dict[str, pd.Series] = {}
-    for sym in [*unique_needed, benchmark]:
-        if sym in series_map:
-            continue
-        series_map[sym] = read_close_series(store, symbol_map[sym], sym, req.years)
+    asserted_currencies = collect_currency_assertions(positions)
+    series_map, _currencies, fx_converter = load_base_currency_series(
+        store,
+        symbol_map,
+        [*unique_needed, benchmark],
+        years=req.years,
+        base_currency=base_currency,
+        asserted_currencies=asserted_currencies,
+    )
 
     # NaN/Inf last close (corrupted/partial sync data) makes a leg
     # unpriceable, and every downstream number (weights -> beta/ES/vol/MC)
     # keys off these prices. Reject with a named 422 rather than letting a
     # NaN propagate (never-crash / NaN-never-serialized policy).
-    last_close = {sym: clean(float(s.iloc[-1])) for sym, s in series_map.items()}
-    unpriceable = sorted(sym for sym in unique_needed if last_close[sym] is None)
+    raw_last_close = {
+        sym: clean(float(series.iloc[-1])) for sym, series in series_map.items()
+    }
+    unpriceable = sorted(
+        sym for sym in unique_needed if raw_last_close[sym] is None
+    )
     if unpriceable:
         raise HTTPException(
             422,
@@ -177,13 +190,7 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
             ),
         )
 
-    market_values = [p.qty * last_close[p.symbol] for p in positions]
-    gross = sum(abs(mv) for mv in market_values)
-    if gross <= 0:
-        raise HTTPException(422, detail="portfolio has zero gross market value")
-    weight_values = [mv / gross for mv in market_values]
-
-    prices = pd.concat(series_map, axis=1).dropna()
+    prices = pd.concat(series_map, axis=1, sort=False).dropna()
     if len(prices) < _BETA_WINDOW + 2:
         raise HTTPException(
             422,
@@ -192,6 +199,31 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
                 f"need > window+1 ({_BETA_WINDOW + 1})"
             ),
         )
+
+    # The displayed marks, portfolio weights, return history, and response
+    # as-of must describe one coherent observation set. A newer quote for
+    # only one listing must not leak into a result dated to an older common
+    # row after the inner join.
+    last_close = {
+        sym: clean(float(prices.iloc[-1][sym])) for sym in series_map
+    }
+    aligned_unpriceable = sorted(
+        sym for sym in unique_needed if last_close[sym] is None
+    )
+    if aligned_unpriceable:
+        raise HTTPException(
+            422,
+            detail=(
+                "non-finite common-date close in cached bars for: "
+                f"{aligned_unpriceable} — re-sync before computing"
+            ),
+        )
+
+    market_values = [p.qty * last_close[p.symbol] for p in positions]
+    gross = sum(abs(mv) for mv in market_values)
+    if gross <= 0:
+        raise HTTPException(422, detail="portfolio has zero gross market value")
+    weight_values = [mv / gross for mv in market_values]
 
     returns = prices.pct_change().dropna()
     bench_returns = returns[benchmark]
@@ -270,6 +302,7 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
     ]
 
     return WhatIfResponse(
+        fx=complete_fx_evidence(fx_converter, base_currency=base_currency),
         weights=weights_out,
         beta=beta,
         es_975=es,

@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from quantmind.api.app import create_app
 from quantmind.datastore.options_store import OptionsSnapshotMeta, OptionsStore
 from quantmind.datastore.store import BarMeta, BarStore
+from quantmind.fx import EcbFxProvider, sync_ecb_fx
 from quantmind.portfolio import Portfolio, Position
 
 
@@ -85,9 +86,32 @@ def rich_store(tmp_path) -> BarStore:
     return s
 
 
-def _client(store: BarStore, broker=None) -> TestClient:
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken", broker=broker)
+def _client(store: BarStore, broker=None, *, base_currency: str = "USD") -> TestClient:
+    app = create_app(
+        store=store,
+        benchmark="SPY",
+        api_token="testtoken",
+        broker=broker,
+        base_currency=base_currency,
+    )
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+
+
+def _seed_european_fx(store: BarStore, *, end: date | None = None) -> None:
+    as_of = end or date.today()
+    csv = f"""CURRENCY,TIME_PERIOD,OBS_VALUE
+USD,{as_of.isoformat()},1.1000
+GBP,{as_of.isoformat()},0.8800
+CHF,{as_of.isoformat()},0.9350
+"""
+    sync_ecb_fx(
+        store,
+        EcbFxProvider(fetcher=lambda _url: csv),
+        {"USD", "EUR", "GBP", "CHF"},
+        today=as_of,
+        years=1,
+        fetched_at=f"{as_of.isoformat()}T17:00:00Z",
+    )
 
 
 def _chain_df(rows: list[dict]) -> pd.DataFrame:
@@ -171,6 +195,55 @@ def test_portfolio_two_positions_market_values_and_weights(store):
     assert spy["weight"] is None
 
 
+def test_portfolio_positions_expose_exact_broker_reconciliation_identity(store):
+    expiry = _expiry_str(45)
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=1,
+                symbol="SPY",
+                qty=10,
+                sec_type="STK",
+                multiplier=1.0,
+                currency="USD",
+                exchange="ARCA",
+            ),
+            Position(
+                con_id=4002,
+                symbol="OPT_XYZ",
+                qty=-2,
+                sec_type="OPT",
+                multiplier=100.0,
+                strike=5.0,
+                expiry=expiry,
+                right="P",
+                currency="USD",
+                exchange="SMART",
+            ),
+        ),
+        as_of=date.today().isoformat(),
+    )
+
+    response = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+
+    assert response.status_code == 200
+    equity, option = response.json()["positions"]
+    assert equity["con_id"] == 1
+    assert equity["sec_type"] == "STK"
+    assert equity["multiplier"] == pytest.approx(1.0)
+    assert equity["exchange"] == "ARCA"
+    assert equity["strike"] is None
+    assert equity["expiry"] is None
+    assert equity["right"] is None
+    assert option["con_id"] == 4002
+    assert option["sec_type"] == "OPT"
+    assert option["multiplier"] == pytest.approx(100.0)
+    assert option["exchange"] == "SMART"
+    assert option["strike"] == pytest.approx(5.0)
+    assert option["expiry"] == expiry
+    assert option["right"] == "P"
+
+
 def test_portfolio_position_without_cached_bars_returns_null_price_fields(store):
     portfolio = Portfolio(
         positions=(
@@ -224,6 +297,65 @@ def test_stale_stock_mark_cannot_make_portfolio_valuation_complete(store):
     assert body["totals"]["market_value"] is None
     assert body["totals"]["priced_positions"] == 0
     assert body["totals"]["valuation_status"] == "partial"
+    assert body["exposure"] == []
+
+
+def test_fresh_option_chain_cannot_use_a_stale_underlier_for_greeks(store):
+    stale_date = date.today() - timedelta(days=10)
+    store.write_bars(
+        con_id=1,
+        bar_size="1d",
+        bars=_flat_bars(100.0, end=stale_date),
+        meta=BarMeta(
+            bar_type="ADJUSTED_LAST",
+            adjusted_asof=stale_date.isoformat(),
+        ),
+    )
+    expiry = _expiry_str(45)
+    _write_chain(
+        store,
+        "SPY",
+        [
+            {
+                "expiry": expiry,
+                "strike": 105.0,
+                "right": "C",
+                "con_id": 4010,
+                "bid": 1.0,
+                "ask": 1.2,
+                "iv": 0.25,
+                "delta": 0.5,
+                "multiplier": 100.0,
+            }
+        ],
+        spot=100.0,
+        as_of=str(date.today()),
+    )
+    client = _client(store, broker=None)
+    pinned = client.post(
+        "/api/book/pin",
+        json={
+            "positions": [
+                {
+                    "symbol": "SPY",
+                    "qty": 1,
+                    "strike": 105.0,
+                    "expiry": expiry,
+                    "right": "C",
+                }
+            ]
+        },
+    ).json()
+
+    body = client.get(
+        "/api/portfolio", params={"book_ref": pinned["snapshot_id"]}
+    ).json()
+
+    assert body["exposure"] == []
+    assert body["options_sleeve"]["available"] is False
+    assert body["options_sleeve"]["status"] == "unavailable"
+    assert "SPY" in body["options_sleeve"]["reason"]
+    assert "sync bars" in body["options_sleeve"]["reason"]
 
 
 def test_portfolio_corrupt_cached_bars_degrade_to_null_price_fields(store):
@@ -296,6 +428,46 @@ def test_avg_cost_missing_from_broker_is_honest_null(store):
     assert spy["unrealized_pnl"] is None
 
 
+def test_foreign_avg_cost_exposes_local_pnl_but_withholds_base_pnl(store):
+    store.write_instrument_metadata("ASML", {"currency": "EUR", "exchange": "AEB"})
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=1,
+                symbol="ASML",
+                qty=10,
+                sec_type="STK",
+                multiplier=1.0,
+                currency="EUR",
+            ),
+        ),
+        as_of="2026-07-24",
+    )
+    today = date.today()
+    sync_ecb_fx(
+        store,
+        EcbFxProvider(
+            fetcher=lambda _url: (
+                "CURRENCY,TIME_PERIOD,OBS_VALUE\n"
+                f"USD,{today.isoformat()},1.20\n"
+            )
+        ),
+        {"USD", "EUR"},
+        today=today,
+    )
+
+    body = _client(
+        store, broker=FakeBroker(portfolio, avg_costs={1: 90.0})
+    ).get("/api/portfolio").json()
+
+    position = body["positions"][0]
+    assert position["unrealized_pnl_local"] == pytest.approx(100.0)
+    assert position["unrealized_pnl"] is None
+    assert body["totals"]["unrealized_pnl"] is None
+    assert body["totals"]["reported_unrealized_pnl"] is None
+    assert body["totals"]["pnl_status"] == "partial"
+
+
 # --- Ledger essentials: account summary ---
 
 
@@ -311,7 +483,14 @@ def test_account_summary_populated_when_broker_supports_it(store):
     broker = FakeBroker(portfolio, account_summary=summary)
     client = _client(store, broker=broker)
     body = client.get("/api/portfolio").json()
-    assert body["account"] == summary
+    assert body["account"] == {
+        **summary,
+        "source_currency": "USD",
+        "net_liquidation_base": summary["net_liquidation"],
+        "total_cash_value_base": summary["total_cash_value"],
+        "gross_position_value_base": summary["gross_position_value"],
+        "buying_power_base": summary["buying_power"],
+    }
     assert body["account_note"] is None
 
 
@@ -345,7 +524,7 @@ def test_account_summary_without_an_explicit_currency_is_withheld_not_rejected(s
     assert "currency" in response.json()["account_note"].lower()
 
 
-def test_non_usd_account_summary_is_blocked_until_fx_normalization_exists(store):
+def test_non_usd_account_summary_keeps_local_totals_until_fx_exists(store):
     portfolio = Portfolio(positions=(), as_of="2026-07-24")
     summary = {
         "net_liquidation": 125000.5,
@@ -359,8 +538,40 @@ def test_non_usd_account_summary_is_blocked_until_fx_normalization_exists(store)
         store, broker=FakeBroker(portfolio, account_summary=summary)
     ).get("/api/portfolio")
 
-    assert response.status_code == 422
-    assert "HKD" in response.json()["detail"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["account"]["currency"] == "HKD"
+    assert body["account"]["net_liquidation"] == pytest.approx(125000.5)
+    assert body["account"]["net_liquidation_base"] is None
+    assert "HKD" in body["account_note"]
+    assert "run sync" in body["account_note"].lower()
+    assert body["fx"]["status"] == "incomplete"
+    assert body["fx"]["missing_currencies"] == ["HKD"]
+
+
+def test_foreign_account_only_reports_conversion_provenance(store):
+    _seed_european_fx(store)
+    portfolio = Portfolio(positions=(), as_of=date.today().isoformat())
+    summary = {
+        "net_liquidation": 100_000.0,
+        "total_cash_value": 10_000.0,
+        "gross_position_value": 90_000.0,
+        "buying_power": 20_000.0,
+        "currency": "EUR",
+    }
+
+    body = _client(
+        store,
+        broker=FakeBroker(portfolio, account_summary=summary),
+        base_currency="GBP",
+    ).get("/api/portfolio").json()
+
+    assert body["account"]["net_liquidation_base"] == pytest.approx(88_000.0)
+    assert body["fx"]["status"] == "converted"
+    assert body["fx"]["source"] == "ECB"
+    assert body["fx"]["as_of"] == date.today().isoformat()
+    assert body["fx"]["fetched_at"] == f"{date.today().isoformat()}T17:00:00Z"
+    assert body["fx"]["missing_currencies"] == []
 
 
 def test_disconnected_live_broker_is_not_reported_as_an_empty_portfolio(store):
@@ -427,6 +638,22 @@ def test_pinned_live_book_rejects_a_different_current_broker_mode(store):
     assert "mode" in response.json()["detail"]
 
 
+def test_pinned_book_requires_repin_after_configured_base_currency_changes(store):
+    usd_client = _client(store)
+    pinned = usd_client.post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 10}]}
+    ).json()
+
+    response = _client(store, base_currency="GBP").get(
+        "/api/portfolio", params={"book_ref": pinned["snapshot_id"]}
+    )
+
+    assert response.status_code == 409
+    assert "re-pin" in response.json()["detail"]
+    assert "USD" in response.json()["detail"]
+    assert "GBP" in response.json()["detail"]
+
+
 def test_pinned_portfolio_response_preserves_snapshot_identity_and_valuation_time(store):
     from quantmind.api.routers.book import _account_fingerprint, _pin_and_respond
 
@@ -464,7 +691,7 @@ def test_pinned_portfolio_response_preserves_snapshot_identity_and_valuation_tim
     assert body["valuation_ts"] == valuation_ts
 
 
-def test_non_usd_live_position_is_blocked_until_fx_normalization_exists(store):
+def test_non_base_live_position_without_fx_is_local_only_and_honestly_partial(store):
     portfolio = Portfolio(
         positions=(
             Position(
@@ -478,10 +705,224 @@ def test_non_usd_live_position_is_blocked_until_fx_normalization_exists(store):
         as_of="2026-09-04",
     )
 
-    response = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+    response = _client(
+        store, broker=FakeBroker(portfolio), base_currency="GBP"
+    ).get("/api/portfolio")
 
-    assert response.status_code == 422
-    assert "FX normalization" in response.json()["detail"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["base_currency"] == "GBP"
+    assert body["positions"][0]["currency"] == "EUR"
+    assert body["positions"][0]["last_close"] == pytest.approx(100.0)
+    assert body["positions"][0]["local_market_value"] == pytest.approx(1000.0)
+    assert body["positions"][0]["fx_rate_to_base"] is None
+    assert body["positions"][0]["market_value"] is None
+    assert body["totals"]["valuation_status"] == "partial"
+    assert body["fx"]["status"] == "incomplete"
+    assert body["fx"]["missing_currencies"] == ["EUR"]
+
+
+def test_european_position_and_account_are_converted_to_selected_base(store):
+    _seed_european_fx(store)
+    store.write_symbol_map({**store.read_symbol_map(), "ASML": 1})
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=1,
+                symbol="ASML",
+                qty=10,
+                currency="EUR",
+                exchange="AEB",
+            ),
+        ),
+        as_of=date.today().isoformat(),
+    )
+    account = {
+        "net_liquidation": 100_000.0,
+        "total_cash_value": 10_000.0,
+        "gross_position_value": 90_000.0,
+        "buying_power": 20_000.0,
+        "currency": "EUR",
+    }
+
+    response = _client(
+        store,
+        broker=FakeBroker(portfolio, account_summary=account),
+        base_currency="GBP",
+    ).get("/api/portfolio")
+
+    assert response.status_code == 200
+    body = response.json()
+    position = body["positions"][0]
+    assert body["base_currency"] == "GBP"
+    assert position["currency"] == "EUR"
+    assert position["last_close"] == pytest.approx(100.0)  # local quote retained
+    assert position["fx_rate_to_base"] == pytest.approx(0.88)
+    assert position["local_market_value"] == pytest.approx(1_000.0)
+    assert position["market_value"] == pytest.approx(880.0)
+    assert body["totals"]["market_value"] == pytest.approx(880.0)
+    assert body["fx"]["status"] == "converted"
+    assert body["fx"]["source"] == "ECB"
+    assert body["account"]["source_currency"] == "EUR"
+    assert body["account"]["currency"] == "EUR"
+    assert body["account"]["net_liquidation"] == pytest.approx(100_000.0)
+    assert body["account"]["net_liquidation_base"] == pytest.approx(88_000.0)
+    assert body["exposure"][0]["currency"] == "EUR"
+    assert body["exposure"][0]["fx_rate_to_base"] == pytest.approx(0.88)
+    assert body["exposure"][0]["dollar_delta"] == pytest.approx(880.0)
+
+
+def test_spot_valuation_uses_each_market_marks_observation_date_for_fx(store):
+    latest_business_date = pd.bdate_range(end=date.today(), periods=1)[0].date()
+    older_business_date = pd.bdate_range(
+        end=latest_business_date - timedelta(days=1), periods=1
+    )[0].date()
+    csv = f"""CURRENCY,TIME_PERIOD,OBS_VALUE
+USD,{older_business_date.isoformat()},1.1000
+GBP,{older_business_date.isoformat()},0.8000
+USD,{latest_business_date.isoformat()},1.1000
+GBP,{latest_business_date.isoformat()},0.9000
+"""
+    sync_ecb_fx(
+        store,
+        EcbFxProvider(fetcher=lambda _url: csv),
+        {"USD", "EUR", "GBP"},
+        today=date.today(),
+        years=1,
+        fetched_at=f"{date.today().isoformat()}T17:00:00Z",
+    )
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today()))
+    store.write_bars(
+        con_id=4,
+        bar_size="1d",
+        bars=_flat_bars(100.0, n=1, end=older_business_date),
+        meta=meta,
+    )
+    store.write_bars(
+        con_id=5,
+        bar_size="1d",
+        bars=_flat_bars(100.0, n=1, end=latest_business_date),
+        meta=meta,
+    )
+    store.write_symbol_map({**store.read_symbol_map(), "ASML": 4, "SAP": 5})
+    store.write_instrument_metadata("ASML", {"currency": "EUR", "exchange": "AEB"})
+    store.write_instrument_metadata("SAP", {"currency": "EUR", "exchange": "IBIS"})
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=4, symbol="ASML", qty=10, currency="EUR", exchange="AEB"),
+            Position(con_id=5, symbol="SAP", qty=10, currency="EUR", exchange="IBIS"),
+        ),
+        as_of=date.today().isoformat(),
+    )
+
+    body = _client(
+        store, broker=FakeBroker(portfolio), base_currency="GBP"
+    ).get("/api/portfolio").json()
+
+    positions = {position["symbol"]: position for position in body["positions"]}
+    assert positions["ASML"]["fx_rate_to_base"] == pytest.approx(0.8)
+    assert positions["ASML"]["market_value"] == pytest.approx(800.0)
+    assert positions["ASML"]["weight"] == pytest.approx(8 / 17)
+    assert positions["SAP"]["fx_rate_to_base"] == pytest.approx(0.9)
+    assert positions["SAP"]["market_value"] == pytest.approx(900.0)
+    assert positions["SAP"]["weight"] == pytest.approx(9 / 17)
+    exposures = {row["underlier"]: row for row in body["exposure"]}
+    assert exposures["ASML"]["fx_rate_to_base"] == pytest.approx(0.8)
+    assert exposures["ASML"]["dollar_delta"] == pytest.approx(800.0)
+    assert exposures["SAP"]["fx_rate_to_base"] == pytest.approx(0.9)
+    assert exposures["SAP"]["dollar_delta"] == pytest.approx(900.0)
+
+
+def test_european_history_is_normalized_before_beta_and_attribution(tmp_path):
+    store = BarStore(tmp_path)
+    bars = _random_bars(seed=11, start=100.0)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today()))
+    store.write_bars(1, "1d", bars, meta)
+    store.write_bars(2, "1d", bars.copy(), meta)
+    store.write_symbol_map({"SPY": 1, "IWDA": 2})
+    store.write_instrument_metadata("SPY", {"currency": "USD"})
+    store.write_instrument_metadata("IWDA", {"currency": "EUR"})
+    rows = ["CURRENCY,TIME_PERIOD,OBS_VALUE"]
+    for timestamp in bars.index:
+        day = timestamp.date().isoformat()
+        rows.extend([f"USD,{day},1.1000", f"GBP,{day},0.8800"])
+    sync_ecb_fx(
+        store,
+        EcbFxProvider(fetcher=lambda _url: "\n".join(rows)),
+        {"USD", "EUR", "GBP"},
+        today=date.today(),
+        years=5,
+        fetched_at=f"{date.today().isoformat()}T17:00:00Z",
+    )
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=2, symbol="IWDA", qty=10, currency="EUR"),
+        ),
+        as_of=date.today().isoformat(),
+    )
+
+    body = _client(
+        store,
+        broker=FakeBroker(portfolio),
+        base_currency="GBP",
+    ).get("/api/portfolio").json()
+
+    exposure = body["exposure"][0]
+    assert exposure["underlier"] == "IWDA"
+    assert exposure["beta"] == pytest.approx(1.0, abs=1e-6)
+    assert exposure["dollar_delta"] == pytest.approx(
+        10 * bars["close"].iloc[-1] * 0.88
+    )
+    assert body["attribution"]["available"] is True
+    assert body["attribution"]["beta"] == pytest.approx(1.0, abs=1e-6)
+    assert body["attribution"]["n_obs"] > 0
+
+
+def test_exposure_loads_fx_for_a_foreign_benchmark_not_held_in_the_book(tmp_path):
+    store = BarStore(tmp_path)
+    bars = _random_bars(seed=14, start=100.0)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today()))
+    store.write_bars(1, "1d", bars, meta)
+    store.write_bars(2, "1d", bars.copy(), meta)
+    store.write_symbol_map({"UKBENCH": 1, "IWDA": 2})
+    store.write_instrument_metadata("UKBENCH", {"currency": "GBP"})
+    store.write_instrument_metadata("IWDA", {"currency": "EUR"})
+    rows = ["CURRENCY,TIME_PERIOD,OBS_VALUE"]
+    for timestamp in bars.index:
+        day = timestamp.date().isoformat()
+        rows.extend([f"USD,{day},1.1000", f"GBP,{day},0.8800"])
+    sync_ecb_fx(
+        store,
+        EcbFxProvider(fetcher=lambda _url: "\n".join(rows)),
+        {"USD", "EUR", "GBP"},
+        today=date.today(),
+        years=5,
+        fetched_at=f"{date.today().isoformat()}T17:00:00Z",
+    )
+    portfolio = Portfolio(
+        positions=(Position(con_id=2, symbol="IWDA", qty=10, currency="EUR"),),
+        as_of=date.today().isoformat(),
+    )
+    app = create_app(
+        store=store,
+        benchmark="UKBENCH",
+        api_token="testtoken",
+        broker=FakeBroker(portfolio),
+        base_currency="USD",
+    )
+    client = TestClient(
+        app,
+        base_url="http://127.0.0.1",
+        headers={"Authorization": "Bearer testtoken"},
+    )
+
+    response = client.get("/api/portfolio")
+
+    assert response.status_code == 200, response.text
+    exposure = response.json()["exposure"][0]
+    assert exposure["underlier"] == "IWDA"
+    assert exposure["beta"] == pytest.approx(1.0, abs=1e-6)
+    assert exposure["beta_note"] is None
 
 
 def test_unsupported_live_security_type_is_blocked(store):
@@ -503,6 +944,28 @@ def test_unsupported_live_security_type_is_blocked(store):
 
     assert response.status_code == 422
     assert "FUT" in response.json()["detail"]
+
+
+def test_option_with_unknown_currency_is_refused_before_monetary_aggregation(store):
+    store.write_symbol_map({**store.read_symbol_map(), "NOCURR": 2})
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=2,
+                symbol="NOCURR",
+                qty=1,
+                sec_type="OPT",
+                multiplier=100,
+                currency=None,
+            ),
+        ),
+        as_of=date.today().isoformat(),
+    )
+
+    response = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+
+    assert response.status_code == 422
+    assert "UNKNOWN" in response.json()["detail"]
 
 
 def test_unsupported_pinned_security_type_is_not_reconstructed_as_stock(store):
@@ -1163,7 +1626,16 @@ def test_options_sleeve_distinct_reason_when_option_underlier_not_in_cache(store
     # entry (or no cached bars) used to fall through to the generic "chain
     # not ingested" reason — it must name the real problem instead.
     portfolio = Portfolio(
-        positions=(Position(con_id=555, symbol="NOPE", qty=1, sec_type="OPT", multiplier=100.0),),
+        positions=(
+            Position(
+                con_id=555,
+                symbol="NOPE",
+                qty=1,
+                sec_type="OPT",
+                multiplier=100.0,
+                currency="USD",
+            ),
+        ),
         as_of="2026-07-24",
     )
     client = _client(store, broker=FakeBroker(portfolio))

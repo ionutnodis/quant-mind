@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from quantmind.api.app import create_app
 from quantmind.datastore.store import BarMeta, BarStore
+from quantmind.fx import EcbFxProvider, sync_ecb_fx
 
 
 def _bars(n=300, seed=1):
@@ -20,6 +21,48 @@ def _bars(n=300, seed=1):
     )
 
 
+def _write_usd_metadata(store, *symbols):
+    for symbol in symbols:
+        store.write_instrument_metadata(symbol, {"currency": "USD", "exchange": "SMART"})
+
+
+def _european_risk_client(tmp_path):
+    store = BarStore(tmp_path)
+    benchmark = _bars(seed=7)
+    rates = np.cumprod(
+        1 + np.random.default_rng(99).normal(0, 0.02, len(benchmark))
+    )
+    european = benchmark.copy()
+    for column in ("open", "high", "low", "close"):
+        european[column] = benchmark[column].to_numpy() / rates
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(1, "1d", benchmark, meta)
+    store.write_bars(2, "1d", european, meta)
+    store.write_symbol_map({"SPY": 1, "IWDA": 2})
+    store.write_instrument_metadata("SPY", {"currency": "USD", "exchange": "ARCA"})
+    store.write_instrument_metadata("IWDA", {"currency": "EUR", "exchange": "AEB"})
+    rows = ["CURRENCY,TIME_PERIOD,OBS_VALUE"]
+    for timestamp, usd_per_eur in zip(benchmark.index, rates, strict=True):
+        rows.append(f"USD,{timestamp.date().isoformat()},{usd_per_eur:.12f}")
+    sync_ecb_fx(
+        store,
+        EcbFxProvider(fetcher=lambda _url: "\n".join(rows)),
+        {"USD", "EUR"},
+        today=benchmark.index[-1].date(),
+        fetched_at="2026-07-24T17:00:00Z",
+    )
+    return TestClient(
+        create_app(
+            store=store,
+            benchmark="SPY",
+            api_token="testtoken",
+            base_currency="USD",
+        ),
+        base_url="http://127.0.0.1",
+        headers={"Authorization": "Bearer testtoken"},
+    )
+
+
 @pytest.fixture
 def client(tmp_path):
     store = BarStore(tmp_path)
@@ -27,6 +70,7 @@ def client(tmp_path):
     store.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)
     store.write_bars(con_id=2, bar_size="1d", bars=_bars(seed=2), meta=meta)
     store.write_symbol_map({"SPY": 1, "QQQ": 2})
+    _write_usd_metadata(store, "SPY", "QQQ")
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
@@ -78,6 +122,7 @@ def client_with_mapped_but_barless_symbol(tmp_path):
     store.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)
     # GHOST is in the symbol map but has no cached bars at any bar size.
     store.write_symbol_map({"SPY": 1, "GHOST": 99})
+    _write_usd_metadata(store, "SPY", "GHOST")
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
@@ -172,6 +217,7 @@ def client_with_zero_close(tmp_path):
     meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
     store.write_bars(con_id=1, bar_size="1d", bars=_bars_with_zero_close(seed=1), meta=meta)
     store.write_symbol_map({"SPY": 1, "ZERO": 1})
+    _write_usd_metadata(store, "SPY", "ZERO")
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
@@ -190,6 +236,7 @@ def client_with_named_series(tmp_path):
     store.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)
     store.write_bars(con_id=2, bar_size="1d", bars=_bars(seed=2), meta=meta)
     store.write_symbol_map({"SPY": 1, "MTUM": 2})
+    _write_usd_metadata(store, "SPY", "MTUM")
     store.write_series("US10Y", _named_series(seed=3))
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
@@ -202,6 +249,7 @@ def client_with_rf(tmp_path):
     store.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)
     store.write_bars(con_id=2, bar_size="1d", bars=_bars(seed=2), meta=meta)
     store.write_symbol_map({"SPY": 1, "MTUM": 2})
+    _write_usd_metadata(store, "SPY", "MTUM")
     store.write_series("US10Y", _named_series(seed=3))
     # US3M cached as a DECIMAL LEVEL (~4.5%), the true rf source: daily rf = level/252.
     store.write_series("US3M", _named_series(seed=4, start=0.045, scale=0.0001))
@@ -239,6 +287,66 @@ def test_risk_applies_rf_jensen_alpha_when_us3m_present(client_with_rf):
     body = r.json()
     assert body["alpha_annualized"] is not None
     assert body["alpha_note"] == "excess-return Jensen alpha vs SPY, rf=US3M/252"
+
+
+def test_risk_beta_normalizes_european_prices_before_return_math(tmp_path):
+    response = _european_risk_client(tmp_path).get(
+        "/api/risk/IWDA", params={"window": 60, "years": 1}
+    )
+
+    assert response.status_code == 200
+    betas = [point["beta"] for point in response.json()["beta_series"]]
+    assert betas[-1] == pytest.approx(1.0, abs=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "request_kwargs"),
+    [
+        ("get", "/api/risk/IWDA", {"params": {"window": 60, "years": 1}}),
+        (
+            "post",
+            "/api/risk/montecarlo",
+            {"json": {"symbol": "IWDA", "horizon": 5, "n_paths": 100, "seed": 1}},
+        ),
+        (
+            "get",
+            "/api/risk/IWDA/regression",
+            {"params": {"factors": "SPY", "years": 1}},
+        ),
+    ],
+)
+def test_risk_responses_expose_base_currency_fx_evidence(
+    tmp_path, method, path, request_kwargs
+):
+    client = _european_risk_client(tmp_path)
+
+    response = getattr(client, method)(path, **request_kwargs)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["fx"] == {
+        "status": "converted",
+        "base_currency": "USD",
+        "source": "ECB",
+        "as_of": "2026-07-24",
+        "fetched_at": "2026-07-24T17:00:00Z",
+        "missing_currencies": [],
+        "note": "Prices are normalized to USD with dated ECB evidence.",
+    }
+
+
+def test_non_usd_risk_suppresses_usd_risk_free_alpha(tmp_path):
+    client = _european_risk_client(tmp_path)
+    client.app.state.base_currency = "EUR"
+    client.app.state.store.write_series(
+        "US3M", _named_series(seed=4, start=0.045, scale=0.0001)
+    )
+
+    response = client.get("/api/risk/IWDA", params={"window": 60, "years": 1})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["alpha_annualized"] is None
+    assert "EUR risk-free evidence is not configured" in response.json()["alpha_note"]
+    assert "USD-only" in response.json()["alpha_note"]
 
 
 def test_regression_suppresses_alpha_when_us3m_missing(client_with_named_series):

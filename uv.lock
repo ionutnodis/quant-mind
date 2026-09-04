@@ -364,18 +364,6 @@ wheels = [
 ]
 
 [[package]]
-name = "fredapi"
-version = "0.5.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pandas" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/6f/3c/e9281ecda4c6ee5c7d50a4bcf00dc5df1a7ff325e604c9b9510c5bdd8514/fredapi-0.5.2.tar.gz", hash = "sha256:405ca048abed4207d93dbc9b7ee8c46d6b473483650323e2f1c094af83d4b247", size = 14735, upload-time = "2024-05-05T11:42:11.444Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/73/64/1db43417cf7ed430f104a347126b5260a1724ee9a1b7d0b1622262c9c4df/fredapi-0.5.2-py3-none-any.whl", hash = "sha256:961817ec8d70e58886ff7302d3dda908614ad99f77831a59833c4fc3f6150155", size = 11854, upload-time = "2024-05-05T11:42:09.559Z" },
-]
-
-[[package]]
 name = "gitdb"
 version = "4.0.12"
 source = { registry = "https://pypi.org/simple" }
@@ -1212,9 +1200,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-macro = [
-    { name = "fredapi" },
-]
 ui = [
     { name = "plotly" },
     { name = "streamlit" },
@@ -1232,7 +1217,6 @@ requires-dist = [
     { name = "certifi", specifier = ">=2026.7.22" },
     { name = "duckdb", specifier = ">=1.0" },
     { name = "fastapi", specifier = ">=0.140.0" },
-    { name = "fredapi", marker = "extra == 'macro'", specifier = ">=0.5" },
     { name = "ib-async", specifier = ">=1.0" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pandas", specifier = ">=2.2" },
@@ -1245,7 +1229,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.51.0" },
     { name = "yfinance", specifier = ">=1.5.2" },
 ]
-provides-extras = ["ui", "macro"]
+provides-extras = ["ui"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -17,6 +17,12 @@ from pydantic import BaseModel
 
 from quantmind.api.routers.book import _account_fingerprint, list_books
 from quantmind.datastore.options_store import OptionsStore
+from quantmind.fx import FxConversionUnavailable, FxConverter, FxObservationStale
+from quantmind.instruments.metadata import (
+    ProfileFreshness,
+    is_potential_ucits_isin,
+    is_ucits_profile_fresh,
+)
 
 router = APIRouter()
 
@@ -73,6 +79,23 @@ class OptionsDataReadiness(BaseModel):
     chain_age_days: int | None
 
 
+class FxDataReadiness(BaseModel):
+    status: Literal["not_required", "missing", "stale", "ready"]
+    base_currency: str
+    required_currencies: list[str]
+    missing_currencies: list[str]
+    provider: str | None
+    as_of: str | None
+
+
+class UcitsDataReadiness(BaseModel):
+    status: Literal["not_required", "incomplete", "stale", "ready"]
+    total_etfs: int
+    ready_profiles: int
+    missing_symbols: list[str]
+    stale_symbols: list[str]
+
+
 class BookReadiness(BaseModel):
     status: Literal["not_pinned", "stale", "unsupported", "ready"]
     snapshot_count: int
@@ -90,6 +113,8 @@ class BookReadiness(BaseModel):
         "stale_snapshot",
         "invalid_timestamp",
         "legacy_scope",
+        "base_currency_mismatch",
+        "cross_currency_option",
         "account_mismatch",
         "mode_mismatch",
         "unsupported_currency",
@@ -104,6 +129,8 @@ class SetupStatus(BaseModel):
     market_data: MarketDataReadiness
     macro_data: MacroDataReadiness
     options_data: OptionsDataReadiness
+    fx_data: FxDataReadiness
+    ucits_data: UcitsDataReadiness
     book: BookReadiness
     next_action: Literal[
         "configure_account",
@@ -111,9 +138,11 @@ class SetupStatus(BaseModel):
         "wait_for_gateway",
         "sync_market_data",
         "sync_option_data",
+        "sync_fx_data",
         "pin_book",
         "resolve_currency",
         "resolve_instruments",
+        "rebase_option_book",
         "ready",
     ]
 
@@ -136,6 +165,10 @@ def _market_data_status(store, benchmark: str) -> MarketDataReadiness:
         )
 
     has_required_manifest = bool(required_symbols)
+    try:
+        instrument_metadata = store.read_all_instrument_metadata()
+    except Exception:
+        instrument_metadata = {}
     required_symbols = list(dict.fromkeys([benchmark, *required_symbols]))
     if not symbol_map:
         return MarketDataReadiness(
@@ -174,6 +207,19 @@ def _market_data_status(store, benchmark: str) -> MarketDataReadiness:
         if watermark is None:
             missing_symbols.append(symbol)
             continue
+        if has_required_manifest:
+            metadata = instrument_metadata.get(symbol)
+            currency = str((metadata or {}).get("currency") or "").strip().upper()
+            if not metadata or not currency:
+                missing_symbols.append(symbol)
+                continue
+            if (
+                metadata.get("con_id") != con_id
+                or len(currency) != 3
+                or not currency.isalpha()
+            ):
+                corrupt_symbols.append(symbol)
+                continue
         watermarks.append(watermark)
         age = _business_age_days(watermark.date(), today)
         if age > 3:
@@ -255,8 +301,8 @@ def _macro_data_status(store) -> MacroDataReadiness:
     )
 
 
-def _book_status(store, state) -> BookReadiness:
-    snapshots = list_books(store)
+def _book_status(store, state, *, snapshots=None) -> BookReadiness:
+    snapshots = list_books(store) if snapshots is None else snapshots
 
     if not snapshots:
         return BookReadiness(
@@ -283,13 +329,24 @@ def _book_status(store, state) -> BookReadiness:
     except ValueError:
         age_days = None
 
-    unsupported_currencies = sorted(
+    unknown_currencies = sorted(
         {
             position.currency or "UNKNOWN"
             for position in latest.positions
-            if position.currency != latest.base_currency
+            if not position.currency or position.currency == "UNKNOWN"
         }
     )
+    cross_currency_options = sorted(
+        {
+            position.currency
+            for position in latest.positions
+            if position.sec_type == "OPT"
+            and position.currency
+            and position.currency != "UNKNOWN"
+            and position.currency != getattr(state, "base_currency", "USD")
+        }
+    )
+    unsupported_currencies = sorted({*unknown_currencies, *cross_currency_options})
     unsupported_security_types = sorted(
         {
             position.sec_type
@@ -300,10 +357,14 @@ def _book_status(store, state) -> BookReadiness:
     reason = None
     if not latest.positions:
         reason = "empty_book"
-    elif unsupported_currencies:
+    elif unknown_currencies:
         reason = "unsupported_currency"
+    elif cross_currency_options:
+        reason = "cross_currency_option"
     elif unsupported_security_types:
         reason = "unsupported_security_type"
+    elif latest.base_currency != getattr(state, "base_currency", "USD"):
+        reason = "base_currency_mismatch"
     elif age_days is None:
         reason = "invalid_timestamp"
     elif age_days > 0:
@@ -328,7 +389,12 @@ def _book_status(store, state) -> BookReadiness:
             "ready"
             if reason is None
             else "unsupported"
-            if reason in {"unsupported_currency", "unsupported_security_type"}
+            if reason
+            in {
+                "unsupported_currency",
+                "unsupported_security_type",
+                "cross_currency_option",
+            }
             else "stale"
         ),
         snapshot_count=len(snapshots),
@@ -468,14 +534,163 @@ def _options_data_status(store) -> OptionsDataReadiness:
     )
 
 
+def _fx_data_status(
+    store,
+    default_base_currency: str = "USD",
+    *,
+    snapshots=None,
+) -> FxDataReadiness:
+    snapshots = list_books(store) if snapshots is None else snapshots
+    if not snapshots:
+        return FxDataReadiness(
+            status="not_required",
+            base_currency=default_base_currency,
+            required_currencies=[],
+            missing_currencies=[],
+            provider=None,
+            as_of=None,
+        )
+    latest = max(snapshots, key=lambda snapshot: snapshot.valuation_ts)
+    if latest.base_currency != default_base_currency:
+        return FxDataReadiness(
+            status="missing",
+            base_currency=default_base_currency,
+            required_currencies=[],
+            missing_currencies=[],
+            provider=None,
+            as_of=None,
+        )
+    required = sorted(
+        {
+            position.currency
+            for position in latest.positions
+            if position.currency
+            and position.currency != "UNKNOWN"
+            and position.currency != latest.base_currency
+        }
+    )
+    if not required:
+        return FxDataReadiness(
+            status="not_required",
+            base_currency=latest.base_currency,
+            required_currencies=[],
+            missing_currencies=[],
+            provider=None,
+            as_of=None,
+        )
+    try:
+        converter = FxConverter.from_store(
+            store,
+            base_currency=latest.base_currency,
+            currencies=set(required),
+        )
+    except (FxConversionUnavailable, ValueError):
+        return FxDataReadiness(
+            status="missing",
+            base_currency=latest.base_currency,
+            required_currencies=required,
+            missing_currencies=required,
+            provider=None,
+            as_of=None,
+        )
+
+    today = datetime.now(timezone.utc).date()
+    missing: list[str] = []
+    stale: list[str] = []
+    for currency in required:
+        try:
+            converter.rate(currency, today)
+        except FxObservationStale:
+            stale.append(currency)
+        except FxConversionUnavailable:
+            missing.append(currency)
+    return FxDataReadiness(
+        status="stale" if stale else "missing" if missing else "ready",
+        base_currency=latest.base_currency,
+        required_currencies=required,
+        missing_currencies=sorted({*missing, *stale}),
+        provider=converter.source,
+        as_of=converter.as_of,
+    )
+
+
+def _ucits_data_status(store) -> UcitsDataReadiness:
+    try:
+        metadata = store.read_all_instrument_metadata()
+    except (OSError, TypeError, ValueError):
+        return UcitsDataReadiness(
+            status="incomplete",
+            total_etfs=0,
+            ready_profiles=0,
+            missing_symbols=["INSTRUMENT_METADATA"],
+            stale_symbols=[],
+        )
+    etfs = {
+        symbol: fields
+        for symbol, fields in metadata.items()
+        if str(fields.get("stock_type") or "").strip().upper() == "ETF"
+        and is_potential_ucits_isin(fields.get("isin"))
+    }
+    if not etfs:
+        return UcitsDataReadiness(
+            status="not_required",
+            total_etfs=0,
+            ready_profiles=0,
+            missing_symbols=[],
+            stale_symbols=[],
+        )
+    ready = 0
+    missing: list[str] = []
+    stale: list[str] = []
+    for symbol, fields in etfs.items():
+        status = fields.get("ucits_profile_status")
+        if status == ProfileFreshness.FRESH.value:
+            try:
+                profile = store.read_ucits_profile(fields.get("ucits_profile_isin") or "")
+            except (TypeError, ValueError):
+                profile = None
+            if profile is not None and is_ucits_profile_fresh(
+                profile, now=datetime.now(timezone.utc)
+            ):
+                ready += 1
+            elif profile is not None:
+                stale.append(symbol)
+            else:
+                missing.append(symbol)
+        elif status == ProfileFreshness.STALE.value:
+            stale.append(symbol)
+        else:
+            missing.append(symbol)
+    return UcitsDataReadiness(
+        status=(
+            "incomplete"
+            if missing
+            else "stale"
+            if stale
+            else "ready"
+        ),
+        total_etfs=len(etfs),
+        ready_profiles=ready,
+        missing_symbols=sorted(missing),
+        stale_symbols=sorted(stale),
+    )
+
+
 @router.get("/setup/status", response_model=SetupStatus)
 def get_setup_status(request: Request) -> SetupStatus:
     state = request.app.state
+    snapshots = list_books(state.store)
     broker_status = state.broker_connection_status
     market_data = _market_data_status(state.store, request.app.state.benchmark)
     macro_data = _macro_data_status(state.store)
-    book = _book_status(state.store, state)
+    book = _book_status(state.store, state, snapshots=snapshots)
     options_data = _options_data_status(state.store)
+    fx_data = _fx_data_status(
+        state.store,
+        getattr(state, "base_currency", "USD"),
+        snapshots=snapshots,
+    )
+    ucits_data = _ucits_data_status(state.store)
 
     if state.broker_connection_error == "account_selection_required":
         next_action = "configure_account"
@@ -485,12 +700,16 @@ def get_setup_status(request: Request) -> SetupStatus:
         next_action = "wait_for_gateway"
     elif market_data.status != "ready" or macro_data.status != "ready":
         next_action = "sync_market_data"
+    elif book.reason == "cross_currency_option":
+        next_action = "rebase_option_book"
     elif book.reason == "unsupported_security_type":
         next_action = "resolve_instruments"
     elif book.status == "unsupported":
         next_action = "resolve_currency"
     elif book.status != "ready":
         next_action = "pin_book"
+    elif fx_data.status not in {"not_required", "ready"}:
+        next_action = "sync_fx_data"
     elif options_data.status not in {"not_required", "ready"}:
         next_action = "sync_option_data"
     else:
@@ -507,6 +726,8 @@ def get_setup_status(request: Request) -> SetupStatus:
         market_data=market_data,
         macro_data=macro_data,
         options_data=options_data,
+        fx_data=fx_data,
+        ucits_data=ucits_data,
         book=book,
         next_action=next_action,
     )

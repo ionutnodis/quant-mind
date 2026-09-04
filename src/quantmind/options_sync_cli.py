@@ -19,9 +19,10 @@ import sys
 from ib_async import IB
 
 from quantmind.broker.connection import ConnectionManager
+from quantmind.config import Settings
+from quantmind.datastore.locking import exclusive_sync_lock
 from quantmind.datastore.options_store import OptionsStore
 from quantmind.datastore.store import BarStore
-from quantmind.config import Settings
 from quantmind.sources.options_sync import sync_options_chains
 
 DEFAULT_UNDERLIERS = ["SPY", "QQQ"]
@@ -29,17 +30,30 @@ DEFAULT_UNDERLIERS = ["SPY", "QQQ"]
 
 async def main(underliers: list[str]) -> None:
     settings = Settings()
-    bar_store = BarStore(settings.data_dir)
-    options_store = OptionsStore(settings.data_dir)
-    ib = IB()
-    mgr = ConnectionManager(
-        ib, host=settings.host, port=settings.port, client_id=settings.client_id, max_attempts=3
-    )
-    await mgr.ensure_connected()
-    counts = await sync_options_chains(options_store, bar_store, ib, underliers=underliers, pace_seconds=1.0)
-    for underlier, n in counts.items():
-        print(f"{underlier:>5} snapshotted {n} option contracts")
-    ib.disconnect()
+    with exclusive_sync_lock(settings.data_dir):
+        bar_store = BarStore(settings.data_dir)
+        options_store = OptionsStore(settings.data_dir)
+        ib = IB()
+        try:
+            mgr = ConnectionManager(
+                ib,
+                host=settings.host,
+                port=settings.port,
+                client_id=settings.client_id,
+                max_attempts=3,
+            )
+            await mgr.ensure_connected()
+            counts = await sync_options_chains(
+                options_store,
+                bar_store,
+                ib,
+                underliers=underliers,
+                pace_seconds=1.0,
+            )
+            for underlier, n in counts.items():
+                print(f"{underlier:>5} snapshotted {n} option contracts")
+        finally:
+            ib.disconnect()
 
 
 if __name__ == "__main__":

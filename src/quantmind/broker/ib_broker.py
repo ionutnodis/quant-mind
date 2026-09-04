@@ -267,6 +267,51 @@ class IbBroker(ReadOnlyBroker):
             raise LookupError(f"could not resolve contract for symbol {symbol!r}")
         return details[0].contract.conId
 
+    async def resolve_option_underlying_con_id(self, option_con_id: int) -> int:
+        """Resolve an underlier from the exact held option contract identity."""
+        from ib_async import Contract
+
+        if (
+            isinstance(option_con_id, bool)
+            or not isinstance(option_con_id, int)
+            or option_con_id <= 0
+        ):
+            raise ValueError("option conId must be a positive integer")
+        details = await self._ib.reqContractDetailsAsync(
+            Contract(conId=option_con_id)
+        )
+        if not details:
+            raise LookupError(
+                f"could not resolve underlying for option con_id {option_con_id}"
+            )
+
+        underlying_con_ids: set[int] = set()
+        for detail in details:
+            contract = getattr(detail, "contract", None)
+            if (
+                getattr(contract, "conId", None) != option_con_id
+                or getattr(contract, "secType", None) != "OPT"
+            ):
+                raise ValueError(
+                    f"contract details do not match held option {option_con_id}"
+                )
+            underlying_con_id = getattr(detail, "underConId", None)
+            if (
+                isinstance(underlying_con_id, bool)
+                or not isinstance(underlying_con_id, int)
+                or underlying_con_id <= 0
+            ):
+                raise LookupError(
+                    f"option {option_con_id} has no authoritative underlying conId"
+                )
+            underlying_con_ids.add(underlying_con_id)
+        if len(underlying_con_ids) != 1:
+            raise ValueError(
+                f"conflicting underlying conIds for option {option_con_id}: "
+                f"{sorted(underlying_con_ids)}"
+            )
+        return next(iter(underlying_con_ids))
+
     async def get_daily_bars(self, con_id: int, years: int = 5) -> pd.DataFrame:
         from ib_async import Contract, util
 
@@ -331,10 +376,47 @@ class IbBroker(ReadOnlyBroker):
         if not details:
             raise LookupError(f"could not fetch contract details for con_id {con_id}")
         d = details[0]
-        return {
+        identifiers: dict[str, set[str]] = {}
+        for item in getattr(d, "secIdList", None) or []:
+            tag = str(getattr(item, "tag", "") or "").strip().upper()
+            value = str(getattr(item, "value", "") or "").strip().upper()
+            if tag and value:
+                identifiers.setdefault(tag, set()).add(value)
+        isins = identifiers.get("ISIN", set())
+        if len(isins) > 1:
+            raise ValueError(f"conflicting ISIN identifiers for con_id {con_id}")
+
+        result = {
             "long_name": d.longName or None,
             "exchange": d.contract.exchange or None,
             "currency": d.contract.currency or None,
             "sec_type": d.contract.secType or None,
             "industry": (d.industry or None) if hasattr(d, "industry") else None,
         }
+        optional = {
+            "primary_exchange": getattr(d.contract, "primaryExchange", None),
+            "local_symbol": getattr(d.contract, "localSymbol", None),
+            "trading_class": getattr(d.contract, "tradingClass", None),
+            "stock_type": getattr(d, "stockType", None),
+            "issuer_id": getattr(d.contract, "issuerId", None),
+            "isin": next(iter(isins)) if isins else None,
+        }
+        result.update(
+            {
+                key: str(value).strip()
+                for key, value in optional.items()
+                if value is not None and str(value).strip()
+            }
+        )
+        valid_exchanges = [
+            exchange.strip()
+            for exchange in str(getattr(d, "validExchanges", "") or "").split(",")
+            if exchange.strip()
+        ]
+        if valid_exchanges:
+            result["valid_exchanges"] = valid_exchanges
+        if identifiers:
+            result["external_identifiers"] = {
+                key: sorted(values) for key, values in sorted(identifiers.items())
+            }
+        return result
