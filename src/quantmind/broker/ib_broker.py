@@ -207,6 +207,15 @@ class IbBroker(ReadOnlyBroker):
         candidates: dict[str, list[object]] = {
             key: [] for key in self._ACCOUNT_SUMMARY_TAGS.values()
         }
+        base_currencies = {
+            str(getattr(value, "value", "") or "").strip().upper()
+            for value in values
+            if getattr(value, "tag", None) == "BaseCurrency"
+            and str(getattr(value, "value", "") or "").strip()
+        }
+        base_currency = (
+            next(iter(base_currencies)) if len(base_currencies) == 1 else None
+        )
         for v in values:
             key = self._ACCOUNT_SUMMARY_TAGS.get(v.tag)
             if key is None:
@@ -214,6 +223,7 @@ class IbBroker(ReadOnlyBroker):
             candidates[key].append(v)
 
         currencies: set[str] = set()
+        selected_base_total = False
         for key, rows in candidates.items():
             if not rows:
                 continue
@@ -224,6 +234,7 @@ class IbBroker(ReadOnlyBroker):
             ]
             if base_rows:
                 selected = base_rows[-1]
+                selected_base_total = True
             else:
                 row_currencies = {
                     str(getattr(row, "currency", "") or "").strip()
@@ -238,7 +249,13 @@ class IbBroker(ReadOnlyBroker):
                 out[key] = float(selected.value)
             except (TypeError, ValueError):
                 out[key] = None
-        out["currency"] = next(iter(currencies)) if len(currencies) == 1 else None
+        out["currency"] = (
+            base_currency
+            if selected_base_total
+            else next(iter(currencies))
+            if len(currencies) == 1
+            else None
+        )
         return out
 
     async def resolve_stock_con_id(self, symbol: str, exchange: str = "SMART", currency: str = "USD") -> int:
