@@ -37,7 +37,8 @@ bunx playwright test
 ```
 
 `bun run build` type-checks the client and creates `web/dist`. The FastAPI server serves
-that bundle when it is present, so daily local use can run through the API alone.
+that repository-relative bundle when it is present, so daily local use can run through the
+API alone. Set `QM_WEB_DIST` only when a deployment keeps the built bundle elsewhere.
 
 ## API types
 

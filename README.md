@@ -32,11 +32,11 @@ QuantMind does not try to replace TradingView, Koyfin, or an execution platform.
 | Book truth | Canonical book contract, immutable snapshots, provenance manifests, corruption detection, and explicit `book_ref` pinning |
 | Factor risk | CAPM and multi-factor regression, rolling beta, alpha only when risk-free evidence exists, variance decomposition, and attribution |
 | Risk | Historical expected shortfall, annualised volatility, horizon Monte Carlo, drawdown context, and scenario tooling |
-| Options | Read-only IBKR option-chain ingestion seam, stored chains, book Greeks, and option-aware risk boundaries |
+| Options | Read-only IBKR chain ingestion for bounded surfaces plus exact held contracts, stored bid/ask marks, book Greeks, and option-aware risk boundaries |
 | Decisions | What-If analysis, hedge candidate ranking/sizing, leverage checks, and saved local scenarios |
 | Market context | Regime, macro, rotation, instruments, news adapters, and a research-model lab |
 | Data | IBKR-first daily-bar sync, explicit yfinance fallback allowlist, FRED macro data, Parquet/DuckDB cache |
-| Product | FastAPI API, React 19 web client, generated OpenAPI types, and a dark professional alpha workbench |
+| Product | Guided first-run readiness, FastAPI API, React 19 web client, generated OpenAPI types, and a dark professional alpha workbench |
 
 The current release is a single-book alpha. Multi-book onboarding, wider vendor ingestion, production broker jobs, and the full SaaS layer are intentionally future work.
 
