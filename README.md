@@ -405,6 +405,7 @@ The following images are **design-review mockups, not v0.5 product screenshots**
 - [Design system and product decisions](DESIGN.md)
 - [First-user installation and acceptance runbook](docs/FIRST_USER_RUNBOOK.md)
 - [Contributor and engineering notes](CLAUDE.md)
+- [Agent workflow routing](AGENTS.md)
 - [Data-source boundaries and provenance](DATA_SOURCES.md)
 - [Security policy](SECURITY.md)
 - [Web-client setup and API type generation](web/README.md)
