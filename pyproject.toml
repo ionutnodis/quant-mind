@@ -1,6 +1,6 @@
 [project]
 name = "quantmind"
-version = "0.3.0.0"
+version = "0.4.0.0"
 description = "Personal IBKR macro cockpit and options-aware portfolio risk engine"
 requires-python = ">=3.12"
 dependencies = [

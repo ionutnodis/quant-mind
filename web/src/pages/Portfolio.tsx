@@ -8,9 +8,7 @@
 // Book source (Task A1's book-flow spine): defaults to the LIVE broker book;
 // an `?book_ref=` in the URL (set by another page's "open in…" link, see
 // lib/book.ts) re-points the whole page at a pinned snapshot instead — the
-// only way an option leg's strike/expiry ever reaches this page (live-broker
-// OPT positions can't carry them; see routers/portfolio.py's module
-// docstring for the same limit).
+// stable analysis path shared by Setup and the downstream workbenches.
 import { useQuery } from "@tanstack/react-query";
 import { Panel, Skeleton } from "../components/Panel";
 import { PortfolioAttributionChart, type AttributionPoint } from "../components/PortfolioAttributionChart";
@@ -33,11 +31,17 @@ interface Position {
 
 interface Totals {
   market_value: number | null;
+  priced_market_value: number | null;
   n_positions: number;
+  priced_positions: number;
+  valuation_status: "empty" | "partial" | "complete";
   unrealized_pnl: number | null;
+  reported_unrealized_pnl: number | null;
+  pnl_status: "empty" | "partial" | "complete";
 }
 
 interface Account {
+  currency: string;
   net_liquidation: number | null;
   total_cash_value: number | null;
   gross_position_value: number | null;
@@ -63,6 +67,13 @@ interface SleeveUnderlying {
 
 interface OptionsSleeve {
   available: boolean;
+  status?: "complete" | "partial" | "unavailable";
+  total_positions?: number;
+  priced_positions?: number;
+  missing_positions?: number;
+  chain_as_of?: string | null;
+  chain_age_days?: number | null;
+  chain_stale?: boolean | null;
   reason: string | null;
   underlyings: SleeveUnderlying[];
   stress_grid: StressGrid | null;
@@ -155,13 +166,35 @@ export function Portfolio() {
   if (!data) return null;
 
   const note = `snapshot ${data.snapshot_id} · as of ${data.valuation_ts.slice(0, 10)}${bookRef ? ` · book_ref ${bookRef}` : ""}`;
+  const hasNoOptionPositions = (data.options_sleeve.total_positions ?? 0) === 0;
+  const accountCurrency = data.account?.currency ?? data.base_currency;
+  const valuationComplete = data.totals.valuation_status === "complete";
+  const pnlComplete = data.totals.pnl_status === "complete";
+  const footerMarketValue = valuationComplete
+    ? data.totals.market_value
+    : data.totals.priced_market_value;
+  const footerUnrealizedPnl = pnlComplete
+    ? data.totals.unrealized_pnl
+    : data.totals.reported_unrealized_pnl;
 
   return (
-    <div className="space-y-3 max-w-[1600px]">
+    <div className="w-full space-y-3">
+      <header className="flex items-center justify-between gap-3 border-b border-hairline pb-3">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.18em] text-muted">Current book</div>
+          <h1 className="mt-1 text-2xl font-medium">Portfolio</h1>
+        </div>
+        <a
+          href="/book/setup"
+          className="qm-target num inline-flex items-center border border-hairline px-3 py-1.5 text-[12px] text-muted hover:border-market hover:text-ink"
+        >
+          Setup status
+        </a>
+      </header>
       {/* Ledger essentials: account values */}
       <Panel title="Ledger" note={note}>
         {data.account ? (
-          <div className="grid grid-cols-4 gap-x-4 gap-y-2">
+          <div className="grid grid-cols-2 gap-x-4 gap-y-2 lg:grid-cols-4">
             {(
               [
                 ["Net liquidation", data.account.net_liquidation],
@@ -171,7 +204,9 @@ export function Portfolio() {
               ] as [string, number | null][]
             ).map(([label, v]) => (
               <div key={label}>
-                <div className="text-[10px] tracking-wider uppercase text-muted">{label}</div>
+                <div className="text-[10px] tracking-wider uppercase text-muted">
+                  {label} ({accountCurrency})
+                </div>
                 <div className="num text-lg text-you">{fmtNum(v, 0)}</div>
               </div>
             ))}
@@ -191,6 +226,26 @@ export function Portfolio() {
         </Panel>
       ) : (
         <Panel title="Positions" note={`${data.totals.n_positions} positions`}>
+          {(!valuationComplete || !pnlComplete) && (
+            <div
+              className="mb-3 space-y-1 border border-warning/40 px-3 py-2 text-[11px] text-warning"
+              data-testid="portfolio-completeness-warning"
+            >
+              {!valuationComplete && (
+                <p>
+                  Pricing incomplete — {data.totals.priced_positions} of {data.totals.n_positions}{" "}
+                  positions priced. Total market value and portfolio weights are unavailable; the
+                  footer shows the priced subtotal only.
+                </p>
+              )}
+              {!pnlComplete && (
+                <p>
+                  P&amp;L incomplete — the footer shows reported unrealized P&amp;L only, excluding
+                  positions without reported cost basis.
+                </p>
+              )}
+            </div>
+          )}
           <table className="w-full text-[12px]" data-testid="positions-table">
             <thead>
               <tr className="text-[10px] tracking-wider uppercase text-muted border-b border-hairline">
@@ -221,15 +276,21 @@ export function Portfolio() {
             <tfoot>
               <tr className="border-t border-hairline">
                 <td className="py-1.5 text-ink" colSpan={2}>
-                  Total ({data.totals.n_positions})
+                  {valuationComplete
+                    ? `Total (${data.totals.n_positions})`
+                    : `Priced subtotal (${data.totals.priced_positions}/${data.totals.n_positions})`}
                 </td>
                 <td />
                 <td />
                 <td />
                 <td className="num py-1.5 text-right text-you" data-testid="totals-unrealized-pnl">
-                  {fmtNum(data.totals.unrealized_pnl)}
+                  <div>{fmtNum(footerUnrealizedPnl)}</div>
+                  {!pnlComplete && <div className="text-[9px] text-warning">reported only</div>}
                 </td>
-                <td className="num py-1.5 text-right text-you">{fmtNum(data.totals.market_value)}</td>
+                <td className="num py-1.5 text-right text-you" data-testid="totals-market-value">
+                  <div>{fmtNum(footerMarketValue)}</div>
+                  {!valuationComplete && <div className="text-[9px] text-warning">priced only</div>}
+                </td>
                 <td />
               </tr>
             </tfoot>
@@ -272,11 +333,24 @@ export function Portfolio() {
       </Panel>
 
       {/* Options sleeve: per-underlying Greeks + stress grid */}
-      <Panel title="Options Sleeve" note="Γ / vega / θ · spot x vol stress">
+      <Panel
+        title="Options Sleeve"
+        note={`${data.options_sleeve.priced_positions ?? 0}/${data.options_sleeve.total_positions ?? 0} priced${data.options_sleeve.chain_as_of ? ` · chain ${data.options_sleeve.chain_as_of}` : ""}`}
+      >
         {!data.options_sleeve.available ? (
-          <p className="text-muted text-[12px]">{data.options_sleeve.reason}</p>
+          <p className={`text-[12px] ${hasNoOptionPositions ? "text-market" : "text-warning"}`}>
+            {data.options_sleeve.reason}
+          </p>
         ) : (
           <div className="space-y-3">
+            {(data.options_sleeve.status === "partial" || data.options_sleeve.chain_stale) && (
+              <p className="border border-warning/40 px-3 py-2 text-[12px] text-warning">
+                {data.options_sleeve.chain_stale
+                  ? `Option evidence is stale${data.options_sleeve.chain_age_days != null ? ` (${data.options_sleeve.chain_age_days} days old)` : ""}. `
+                  : ""}
+                {data.options_sleeve.reason ?? "Refresh the option chains before relying on full-book Greeks."}
+              </p>
+            )}
             <table className="w-full text-[12px]">
               <thead>
                 <tr className="text-[10px] tracking-wider uppercase text-muted border-b border-hairline">
@@ -304,7 +378,7 @@ export function Portfolio() {
 
       {/* Expiry buckets */}
       <Panel title="Expiry Buckets" note="option legs by days-to-expiry">
-        <div className="grid grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           {EXPIRY_BUCKETS.map(({ key, label }) => {
             const legs = data.expiry_buckets[key];
             return (
@@ -336,7 +410,7 @@ export function Portfolio() {
           <p className="text-muted text-[12px]">{data.attribution.reason}</p>
         ) : (
           <div className="space-y-3">
-            <div className="grid grid-cols-3 gap-x-4 gap-y-2">
+            <div className="grid grid-cols-1 gap-x-4 gap-y-2 sm:grid-cols-3">
               <div>
                 <div className="text-[10px] tracking-wider uppercase text-muted">Total P&L</div>
                 <div className="num text-lg text-you" data-testid="attribution-total-pnl">{fmtNum(data.attribution.total_pnl, 0)}</div>

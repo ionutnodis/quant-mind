@@ -73,12 +73,22 @@ const TWO_POSITIONS = {
       last_close: 5.0,
       market_value: 2500.0,
       weight: 0.7142857142857143,
-      avg_cost: null,
-      unrealized_pnl: null,
+      avg_cost: 4.0,
+      unrealized_pnl: 500.0,
     },
   ],
-  totals: { market_value: 3500.0, n_positions: 2, unrealized_pnl: 100.0 },
+  totals: {
+    market_value: 3500.0,
+    priced_market_value: 3500.0,
+    n_positions: 2,
+    priced_positions: 2,
+    valuation_status: "complete",
+    unrealized_pnl: 600.0,
+    reported_unrealized_pnl: 600.0,
+    pnl_status: "complete",
+  },
   account: {
+    currency: "USD",
     net_liquidation: 125000.5,
     total_cash_value: 20000.0,
     gross_position_value: 105000.5,
@@ -106,7 +116,16 @@ const EMPTY = {
   valuation_ts: "2026-07-25T00:00:00Z",
   base_currency: "USD",
   positions: [],
-  totals: { market_value: null, n_positions: 0, unrealized_pnl: null },
+  totals: {
+    market_value: null,
+    priced_market_value: null,
+    n_positions: 0,
+    priced_positions: 0,
+    valuation_status: "empty",
+    unrealized_pnl: null,
+    reported_unrealized_pnl: null,
+    pnl_status: "empty",
+  },
   account: null,
   account_note: "NO MATERIAL LINK — no broker connected",
   exposure: [],
@@ -151,13 +170,64 @@ test("null price fields render as em-dash placeholders, not crashes", async () =
         last_close: null, market_value: null, weight: null, avg_cost: null, unrealized_pnl: null,
       },
     ],
-    totals: { market_value: null, n_positions: 1, unrealized_pnl: null },
+    totals: {
+      market_value: null,
+      priced_market_value: null,
+      n_positions: 1,
+      priced_positions: 0,
+      valuation_status: "partial",
+      unrealized_pnl: null,
+      reported_unrealized_pnl: null,
+      pnl_status: "partial",
+    },
   };
   server.use(http.get("/api/portfolio", () => HttpResponse.json(withMissingPrice)));
   renderPortfolio();
   expect(await screen.findByText("UNKNOWN")).toBeInTheDocument();
   const dashes = screen.getAllByText("—");
   expect(dashes.length).toBeGreaterThanOrEqual(5); // last, avg cost, unrealized, mkt value, weight
+});
+
+test("partial valuations expose priced subtotals without presenting complete portfolio totals", async () => {
+  const partial = {
+    ...TWO_POSITIONS,
+    positions: [
+      { ...TWO_POSITIONS.positions[0], weight: null },
+      {
+        ...TWO_POSITIONS.positions[1],
+        last_close: null,
+        market_value: null,
+        weight: null,
+        avg_cost: null,
+        unrealized_pnl: null,
+      },
+    ],
+    totals: {
+      market_value: null,
+      priced_market_value: 1000.0,
+      n_positions: 2,
+      priced_positions: 1,
+      valuation_status: "partial",
+      unrealized_pnl: null,
+      reported_unrealized_pnl: 100.0,
+      pnl_status: "partial",
+    },
+  };
+  server.use(http.get("/api/portfolio", () => HttpResponse.json(partial)));
+  renderPortfolio();
+
+  const warning = await screen.findByTestId("portfolio-completeness-warning");
+  expect(warning).toHaveTextContent("Pricing incomplete — 1 of 2 positions priced");
+  expect(warning).toHaveTextContent("Total market value and portfolio weights are unavailable");
+  expect(warning).toHaveTextContent("P&L incomplete");
+
+  const table = within(screen.getByTestId("positions-table"));
+  expect(table.queryByText("Total (2)")).not.toBeInTheDocument();
+  expect(table.getByText("Priced subtotal (1/2)")).toBeInTheDocument();
+  expect(table.getByTestId("totals-market-value")).toHaveTextContent("1000.00");
+  expect(table.getByTestId("totals-market-value")).toHaveTextContent("priced only");
+  expect(table.getByTestId("totals-unrealized-pnl")).toHaveTextContent("100.00");
+  expect(table.getByTestId("totals-unrealized-pnl")).toHaveTextContent("reported only");
 });
 
 test("empty paper book shows honest empty state, not a crash", async () => {
@@ -170,7 +240,10 @@ test("empty paper book shows honest empty state, not a crash", async () => {
 test("account block renders ledger essentials when the broker reports them", async () => {
   server.use(http.get("/api/portfolio", () => HttpResponse.json(TWO_POSITIONS)));
   renderPortfolio();
-  expect(await screen.findByText("Net liquidation")).toBeInTheDocument();
+  expect(await screen.findByText("Net liquidation (USD)")).toBeInTheDocument();
+  expect(screen.getByText("Total cash (USD)")).toBeInTheDocument();
+  expect(screen.getByText("Gross position value (USD)")).toBeInTheDocument();
+  expect(screen.getByText("Buying power (USD)")).toBeInTheDocument();
   expect(screen.getByText("125001")).toBeInTheDocument();
 });
 
@@ -185,7 +258,9 @@ test("delta-adjusted exposure table renders per-underlier rows", async () => {
 test("options sleeve shows honest empty reason when unavailable", async () => {
   server.use(http.get("/api/portfolio", () => HttpResponse.json(TWO_POSITIONS)));
   renderPortfolio();
-  expect(await screen.findByText("no option positions")).toBeInTheDocument();
+  const reason = await screen.findByText("no option positions");
+  expect(reason).toHaveClass("text-market");
+  expect(reason).not.toHaveClass("text-warning");
 });
 
 test("options sleeve renders greeks table and stress grid when available", async () => {

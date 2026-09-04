@@ -15,7 +15,10 @@ from ib_async import IB
 from quantmind.broker.connection import ConnectionManager
 from quantmind.broker.ib_broker import IbBroker
 from quantmind.config import Settings
+from quantmind.datastore.options_store import OptionsStore
 from quantmind.datastore.store import BarStore
+from quantmind.portfolio import Portfolio
+from quantmind.sources.options_sync import sync_options_chains
 from quantmind.sources.providers.yfinance_provider import YFinanceProvider
 from quantmind.sources.sync import (
     sync_daily_bars,
@@ -56,6 +59,20 @@ DEFAULT_UNIVERSE = [
 INDEX_UNIVERSE = {"VIX": "CBOE", "SPX": "CBOE"}
 
 
+def portfolio_sync_targets(portfolio: Portfolio) -> tuple[list[str], list[str]]:
+    """Return unique daily-bar targets and held option underliers in book order."""
+    daily: list[str] = []
+    options: list[str] = []
+    for position in portfolio.positions:
+        if position.sec_type not in {"STK", "OPT"}:
+            continue
+        if position.symbol not in daily:
+            daily.append(position.symbol)
+        if position.sec_type == "OPT" and position.symbol not in options:
+            options.append(position.symbol)
+    return daily, options
+
+
 async def main(symbols: list[str]) -> None:
     settings = Settings()
     store = BarStore(settings.data_dir)
@@ -64,8 +81,38 @@ async def main(symbols: list[str]) -> None:
         ib, host=settings.host, port=settings.port, client_id=settings.client_id, max_attempts=3
     )
     await mgr.ensure_connected()
-    broker = IbBroker(ib)
-    symbol_map = await sync_daily_bars(store, broker, symbols, years=5, pace_seconds=2.0)
+    broker = IbBroker(ib, account_id=settings.account_id)
+    held_symbols: list[str] = []
+    option_underliers: list[str] = []
+    held_option_contracts = []
+    held_stock_con_ids: dict[str, int] = {}
+    warnings: list[str] = []
+    try:
+        portfolio = await broker.get_portfolio()
+        held_symbols, option_underliers = portfolio_sync_targets(portfolio)
+        held_option_contracts = [
+            position for position in portfolio.positions if position.sec_type == "OPT"
+        ]
+        held_stock_con_ids = {
+            position.symbol: position.con_id
+            for position in portfolio.positions
+            if position.sec_type == "STK"
+        }
+    except Exception as exc:
+        warnings.append("live portfolio unavailable")
+        print(f"WARNING: live portfolio unavailable ({type(exc).__name__}); syncing starter universe only")
+
+    sync_symbols = list(
+        dict.fromkeys([getattr(settings, "benchmark", "SPY"), *symbols, *held_symbols])
+    )
+    symbol_map = await sync_daily_bars(
+        store,
+        broker,
+        sync_symbols,
+        years=5,
+        pace_seconds=2.0,
+        known_con_ids=held_stock_con_ids,
+    )
     for symbol, con_id in symbol_map.items():
         wm = store.watermark(con_id=con_id, bar_size="1d")
         print(f"{symbol:>5} conId={con_id:<12} bars through {wm.date()}")
@@ -78,9 +125,29 @@ async def main(symbols: list[str]) -> None:
     extra_tags = {sym: {"region": region} for sym, region in WORLD_ETF_REGIONS.items()}
     ibkr_map = {**symbol_map, **index_map}
     await sync_instrument_metadata(store, broker, ibkr_map, extra_tags=extra_tags, pace_seconds=1.0)
+
+    if option_underliers:
+        try:
+            counts = await sync_options_chains(
+                OptionsStore(settings.data_dir),
+                store,
+                ib,
+                underliers=option_underliers,
+                held_contracts=held_option_contracts,
+                pace_seconds=1.0,
+            )
+            for underlier, count in counts.items():
+                print(f"{underlier:>5} snapshotted {count} option contracts")
+        except Exception as exc:
+            warnings.append("held-option chain unavailable")
+            print(
+                f"WARNING: held-option chain sync unavailable ({type(exc).__name__}: {exc}); "
+                "daily bars remain usable"
+            )
     ib.disconnect()
 
     yfinance_symbols = settings.yfinance_symbol_list()
+    skipped: list[str] = []
     if yfinance_symbols:
         yf_map, skipped = sync_yfinance_bars(store, YFinanceProvider(), yfinance_symbols, years=5)
         for symbol in skipped:
@@ -92,10 +159,22 @@ async def main(symbols: list[str]) -> None:
             if symbol not in skipped:
                 print(f"{symbol:>5} conId={con_id:<12} synced via yfinance")
 
+    required_symbols = [
+        *sync_symbols,
+        *INDEX_UNIVERSE,
+        *(symbol for symbol in yfinance_symbols if symbol not in skipped),
+    ]
+    store.write_required_symbols(required_symbols)
+
     from quantmind.sources.fred import sync_fred
 
     for name, last in sync_fred(store).items():
         print(f"{name:>14} series through {last}")
+
+    if warnings:
+        print(f"SYNC_RESULT: partial · {'; '.join(warnings)}")
+    else:
+        print("SYNC_RESULT: complete")
 
 
 if __name__ == "__main__":

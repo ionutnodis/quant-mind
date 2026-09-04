@@ -10,14 +10,17 @@
  */
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { http, HttpResponse } from "msw";
+import { delay, http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "vitest";
 import { WhatIf } from "../pages/WhatIf";
 
 const server = setupServer();
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
-afterEach(() => server.resetHandlers());
+afterEach(() => {
+  server.resetHandlers();
+  window.history.replaceState(null, "", "/");
+});
 afterAll(() => server.close());
 
 beforeEach(() => {
@@ -79,7 +82,9 @@ function addSecondRow() {
 
 test("position builder renders with honest awaiting states before compute", async () => {
   renderWhatIf();
-  expect(await screen.findByRole("button", { name: /^compute$/i })).toBeInTheDocument();
+  const compute = await screen.findByRole("button", { name: /^compute$/i });
+  expect(compute.closest(".authoring-only-block")).not.toBeNull();
+  expect(compute).not.toHaveClass("border-you", "bg-you/10", "text-you");
   expect(screen.getByLabelText(/symbol row 1/i)).toBeInTheDocument();
   expect(screen.getByLabelText(/qty row 1/i)).toBeInTheDocument();
   expect(screen.getAllByText(/awaiting compute/i).length).toBeGreaterThan(0);
@@ -223,6 +228,32 @@ test("load current book populates rows and computes by book_ref", async () => {
   // Replaced the default row (qty 100) with the loaded book's own qty (25),
   // proving the row came from the explicit pin command, not the page default.
   await screen.findByDisplayValue("25", {}, BOOK_FETCH_TIMEOUT);
+
+  fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
+  await screen.findByTestId("whatif-weights");
+});
+
+test("book_ref query loads and submits the pinned book without showing defaults", async () => {
+  window.history.replaceState(null, "", "/whatif?book_ref=url-snapshot");
+  server.use(
+    http.get("/api/book/url-snapshot", async () => {
+      await delay(50);
+      return HttpResponse.json({ ...CURRENT_BOOK, snapshot_id: "url-snapshot" });
+    }),
+    http.post("/api/whatif", async ({ request }) => {
+      const body = (await request.json()) as { book_ref?: string; positions?: unknown };
+      expect(body.book_ref).toBe("url-snapshot");
+      expect(body.positions).toBeUndefined();
+      return HttpResponse.json(WHATIF_RESPONSE);
+    }),
+  );
+
+  renderWhatIf();
+
+  expect(screen.queryByDisplayValue("100")).not.toBeInTheDocument();
+  expect(await screen.findByText("Loading pinned book url-snapshot…")).toBeInTheDocument();
+  await screen.findByDisplayValue("25", {}, BOOK_FETCH_TIMEOUT);
+  expect(screen.getByDisplayValue("SPY")).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
   await screen.findByTestId("whatif-weights");

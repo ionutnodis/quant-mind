@@ -77,7 +77,11 @@ from quantmind.api.routers._shared import (
     refuse_unsupported_contract_legs,
     weighted_portfolio_returns,
 )
-from quantmind.api.routers.book import read_book_positions
+from quantmind.api.routers.book import (
+    read_book,
+    read_book_positions,
+    validate_pinned_book_scope,
+)
 from quantmind.hedge.core import diversification_ratio, leverage_headroom, max_drawdown
 from quantmind.risk.returns import InsufficientDataError, historical_es, rolling_beta
 
@@ -197,7 +201,12 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     # (read_book_positions 422s naming the ref if it's unknown); Field's
     # min_length/max_length=1..50 only runs on an inline `book` body, so a
     # book_ref-resolved list gets the same bounds check by hand here.
-    book_positions = req.book if req.book is not None else read_book_positions(store, req.book_ref)
+    if req.book is not None:
+        book_positions = req.book
+    else:
+        pinned = read_book(store, req.book_ref)
+        validate_pinned_book_scope(request.app.state, pinned)
+        book_positions = read_book_positions(store, req.book_ref)
     if not book_positions:
         raise HTTPException(422, detail="book_ref resolved to an empty book")
     if len(book_positions) > _MAX_BOOK_POSITIONS:
@@ -393,7 +402,12 @@ def leverage(request: Request, req: LeverageRequest) -> LeverageResponse:
     store = request.app.state.store
     symbol_map = store.read_symbol_map()
 
-    book_positions = req.book if req.book is not None else read_book_positions(store, req.book_ref)
+    if req.book is not None:
+        book_positions = req.book
+    else:
+        pinned = read_book(store, req.book_ref)
+        validate_pinned_book_scope(request.app.state, pinned)
+        book_positions = read_book_positions(store, req.book_ref)
     if not book_positions:
         raise HTTPException(422, detail="book_ref resolved to an empty book")
     if len(book_positions) > _MAX_BOOK_POSITIONS:

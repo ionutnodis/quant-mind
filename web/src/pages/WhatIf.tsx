@@ -11,12 +11,12 @@
 // reads the authoritative pinned snapshot directly; editing any row after a
 // load reverts to submitting the edited `positions` inline (see
 // `handleRowsChange` below).
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { BookBuilder, newBookRow, rowsToPositions, snapshotToRows, type BookRow } from "../components/BookBuilder";
 import { Panel, Skeleton } from "../components/Panel";
 import { api, request } from "../lib/api";
-import type { BookSnapshotOut } from "../lib/book";
+import { getBook, readActiveBookRef, type BookSnapshotOut } from "../lib/book";
 
 interface Scenario {
   positions: { symbol: string; qty: string }[];
@@ -105,12 +105,28 @@ function num(x: number | null, digits = 4): string {
 export function WhatIf() {
   const brief = useQuery({ queryKey: ["brief"], queryFn: api.brief, staleTime: 60 * 60 * 1000 });
 
-  const [rows, setRows] = useState<BookRow[]>([newBookRow({ symbol: "SPY", qty: "100" })]);
+  const [requestedBookRef] = useState(() => readActiveBookRef()?.trim() || null);
+  const [rows, setRows] = useState<BookRow[]>(() =>
+    requestedBookRef ? [] : [newBookRow({ symbol: "SPY", qty: "100" })],
+  );
   // book_ref (wave-3 Task A1's book-flow spine): set when "Load current
   // book" resolves, cleared as soon as the user edits any row — an edited
   // book is no longer the exact pinned snapshot, so it submits by the
   // (now-inline) positions instead.
   const [bookRef, setBookRef] = useState<string | null>(null);
+  const [linkedBookLoaded, setLinkedBookLoaded] = useState(requestedBookRef === null);
+  const linkedBook = useQuery({
+    queryKey: ["book", requestedBookRef],
+    queryFn: () => getBook(requestedBookRef!),
+    enabled: requestedBookRef !== null,
+    staleTime: Infinity,
+  });
+  useEffect(() => {
+    if (!linkedBook.data) return;
+    setRows(snapshotToRows(linkedBook.data));
+    setBookRef(linkedBook.data.snapshot_id);
+    setLinkedBookLoaded(true);
+  }, [linkedBook.data]);
   const [years, setYears] = useState(5);
   const [horizon, setHorizon] = useState(126);
   const [nPaths, setNPaths] = useState(10_000);
@@ -176,16 +192,31 @@ export function WhatIf() {
   const data = compute.data;
   const errorMessage = compute.isError ? String((compute.error as Error)?.message ?? compute.error) : null;
 
+  if (requestedBookRef && !linkedBookLoaded) {
+    return (
+      <Panel title="Book builder" note={`book ${requestedBookRef}`}>
+        {linkedBook.isError ? (
+          <p className="text-down text-[11px]">
+            Pinned book {requestedBookRef} unavailable: {String(linkedBook.error)}
+          </p>
+        ) : (
+          <p className="text-muted text-[11px]">Loading pinned book {requestedBookRef}…</p>
+        )}
+      </Panel>
+    );
+  }
+
   return (
-    <div className="space-y-3 max-w-[1400px]">
+    <div className="w-full space-y-3">
       <datalist id="whatif-symbols">
         {(brief.data?.tiles ?? []).map((t) => (
           <option key={t.symbol} value={t.symbol} />
         ))}
       </datalist>
 
-      <Panel title="Book builder" note="clone the book, modify, watch risk recompute">
-        <div className="space-y-2">
+      <div className="authoring-only-block">
+        <Panel title="Book builder" note="clone the book, modify, watch risk recompute">
+          <div className="space-y-2">
           <BookBuilder
             rows={rows}
             onRowsChange={handleRowsChange}
@@ -240,21 +271,22 @@ export function WhatIf() {
                 onChange={(e) => setSeed(e.target.value === "" ? undefined : Number(e.target.value))}
               />
             </label>
-            <button
-              type="button"
-              className="border border-you/60 bg-you/10 hover:bg-you/20 text-you text-[12px] px-3 py-1.5 disabled:opacity-40 disabled:text-muted disabled:border-hairline disabled:bg-transparent"
-              disabled={compute.isPending}
-              onClick={() => compute.mutate()}
-            >
-              {compute.isPending ? "Computing…" : "Compute"}
-            </button>
+              <button
+                type="button"
+                className="border border-hairline bg-elevated px-3 py-1.5 text-[12px] text-ink hover:border-market hover:bg-hairline disabled:border-hairline disabled:bg-transparent disabled:text-muted disabled:opacity-40"
+                disabled={compute.isPending}
+                onClick={() => compute.mutate()}
+              >
+                {compute.isPending ? "Computing…" : "Compute"}
+              </button>
           </div>
 
-          {errorMessage && <p className="text-down text-[11px]">{errorMessage}</p>}
-        </div>
-      </Panel>
+            {errorMessage && <p className="text-down text-[11px]">{errorMessage}</p>}
+          </div>
+        </Panel>
+      </div>
 
-      <div className="grid grid-cols-[1fr_1.4fr] gap-3">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_1.4fr]">
         <Panel title="Weights" note={data ? "gross-normalized" : undefined}>
           {!data && (
             <p className="text-muted text-[11px]">Awaiting compute — build a book and run Compute to see weights.</p>
@@ -284,7 +316,7 @@ export function WhatIf() {
             <p className="text-muted text-[11px]">Awaiting compute — book/benchmark risk lands here once you run Compute.</p>
           )}
           {data && (
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div data-testid="whatif-book-risk" className="text-you space-y-2">
                 <div className="text-[10px] tracking-wider uppercase text-you/70">This book (amber)</div>
                 <div className="num text-[12px]">
@@ -333,7 +365,7 @@ export function WhatIf() {
                 );
               })}
             </div>
-            <div className="grid grid-cols-3 gap-x-4">
+            <div className="grid grid-cols-1 gap-x-4 gap-y-2 sm:grid-cols-3">
               <div>
                 <div className="text-[10px] tracking-wider uppercase text-you/70">p5</div>
                 <div className="num text-[12px]">{pct(data.mc.p5)}</div>
@@ -359,7 +391,7 @@ export function WhatIf() {
       </Panel>
 
       <Panel title="Scenarios" note="localStorage · server persistence deferred">
-        <div className="flex items-end gap-2 mb-3">
+        <div className="authoring-only mb-3 items-end gap-2">
           <label className="flex flex-col gap-1 text-[10px] tracking-wider uppercase text-muted flex-1">
             Scenario name
             <input
@@ -394,7 +426,7 @@ export function WhatIf() {
               <button
                 type="button"
                 aria-label={`Delete scenario ${name}`}
-                className="text-[11px] text-muted hover:text-down"
+                className="authoring-only items-center justify-center text-[11px] text-muted hover:text-down"
                 onClick={() => deleteScenario(name)}
               >
                 ×

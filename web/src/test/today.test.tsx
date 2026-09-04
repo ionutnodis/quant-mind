@@ -95,7 +95,9 @@ test("empty cache shows empty state, not a crash", async () => {
   renderToday();
   expect(await screen.findByText(/No market data cached/)).toBeInTheDocument();
   // empty state gets a Sync now button too, not just the CLI hint
-  expect(await screen.findByTestId("sync-now")).toBeInTheDocument();
+  const sync = await screen.findByTestId("sync-now");
+  expect(sync).toBeInTheDocument();
+  expect(sync.closest(".authoring-only")).not.toBeNull();
 });
 
 test("sync now button renders in the staleness banner", async () => {
@@ -105,7 +107,9 @@ test("sync now button renders in the staleness banner", async () => {
   );
   renderToday();
   const staleness = await screen.findByTestId("staleness");
-  expect(await screen.findByTestId("sync-now")).toBeInTheDocument();
+  const sync = await screen.findByTestId("sync-now");
+  expect(sync).toBeInTheDocument();
+  expect(sync.closest(".authoring-only")).not.toBeNull();
   expect(staleness).toBeInTheDocument();
 });
 

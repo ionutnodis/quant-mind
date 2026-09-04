@@ -8,7 +8,7 @@ risk/analytics/hedge function consumes this type and nothing else.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Literal, Mapping
 
 import pandas as pd
 
@@ -20,6 +20,20 @@ class Position:
     qty: float
     sec_type: str = "STK"
     multiplier: float = 1.0
+    # Contract identity required to reprice a broker-sourced option after the
+    # live book is frozen. Plain equity/ETF positions leave these unset.
+    strike: float | None = None
+    expiry: str | None = None
+    right: Literal["C", "P"] | None = None
+    currency: str | None = None
+    exchange: str | None = None
+
+
+def option_terms_complete(
+    *, strike: float | None, expiry: str | None, right: str | None
+) -> bool:
+    """True only when an option has the identity required for repricing."""
+    return strike is not None and expiry is not None and right in {"C", "P"}
 
 
 @dataclass(frozen=True)

@@ -34,6 +34,8 @@ def store(tmp_path):
     s.write_bars(con_id=1, bar_size="1d", bars=_bars(price=452.0), meta=meta)
     s.write_bars(con_id=2, bar_size="1d", bars=_bars(price=380.0), meta=meta)
     s.write_symbol_map({"SPY": 1, "QQQ": 2})
+    s.write_instrument_metadata("SPY", {"currency": "USD", "exchange": "ARCA"})
+    s.write_instrument_metadata("QQQ", {"currency": "USD", "exchange": "NASDAQ"})
     return s
 
 
@@ -117,6 +119,67 @@ def test_book_greeks_stock_only_position(client):
     assert row["spy_equivalent_notional"] is None
 
 
+def test_book_greeks_rejects_live_book_from_a_different_account(client, store):
+    from quantmind.api.routers.book import _account_fingerprint, _pin_and_respond
+    from quantmind.portfolio import Portfolio, Position
+
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=1, symbol="SPY", qty=10, currency="USD"),
+        ),
+        as_of="2026-09-04T12:00:00Z",
+    )
+    pinned = _pin_and_respond(
+        store,
+        portfolio,
+        portfolio.as_of,
+        source="live_ibkr",
+        account_fingerprint=_account_fingerprint("DU_ACCOUNT_A"),
+        broker_mode="paper",
+    )
+    client.app.state.broker_account_id = "DU_ACCOUNT_B"
+    client.app.state.broker_mode = "paper"
+
+    response = client.post(
+        "/api/options/book-greeks", json={"book_ref": pinned.snapshot_id}
+    )
+
+    assert response.status_code == 409
+    assert "account" in response.json()["detail"]
+
+
+def test_book_greeks_rejects_a_pinned_non_equity_contract(client, store):
+    from quantmind.api.routers.book import _pin_and_respond
+    from quantmind.portfolio import Portfolio, Position
+
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=1,
+                symbol="SPY",
+                qty=1,
+                sec_type="FUT",
+                multiplier=50,
+                currency="USD",
+            ),
+        ),
+        as_of="2026-09-04T12:00:00Z",
+    )
+    pinned = _pin_and_respond(
+        store,
+        portfolio,
+        portfolio.as_of,
+        source="manual",
+    )
+
+    response = client.post(
+        "/api/options/book-greeks", json={"book_ref": pinned.snapshot_id}
+    )
+
+    assert response.status_code == 422
+    assert "FUT" in response.json()["detail"]
+
+
 def test_book_greeks_option_leg_pulls_iv_from_cached_chain(client, store):
     _write_spy_chain(store, as_of=str(date.today()))
     payload = {
@@ -132,6 +195,44 @@ def test_book_greeks_option_leg_pulls_iv_from_cached_chain(client, store):
     expected = bs_greeks(452.0, 440.0, expiry_years, 0.0, 0.18, True)
     assert row["delta"] == pytest.approx(2 * 100 * expected.delta, rel=1e-4)
     assert row["gamma"] == pytest.approx(2 * 100 * expected.gamma, rel=1e-4)
+
+
+def test_book_greeks_inline_leg_rejects_ambiguous_same_terms(client, store):
+    expiry = (date.today() + timedelta(days=45)).strftime("%Y%m%d")
+    chain = pd.DataFrame(
+        {
+            "expiry": [expiry, expiry],
+            "strike": [452.0, 452.0],
+            "right": ["C", "C"],
+            "con_id": [7001, 7002],
+            "bid": [4.0, 8.0],
+            "ask": [4.2, 8.2],
+            "iv": [0.12, 0.42],
+            "delta": [0.5, 0.5],
+            "multiplier": [100.0, 100.0],
+        }
+    )
+    OptionsStore(store.root).write_chain(
+        "SPY", chain, OptionsSnapshotMeta(as_of=str(date.today()), spot=452.0)
+    )
+
+    response = client.post(
+        "/api/options/book-greeks",
+        json={
+            "positions": [
+                {
+                    "symbol": "SPY",
+                    "qty": 1,
+                    "strike": 452.0,
+                    "expiry": expiry,
+                    "right": "C",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 422
+    assert "no cached quote" in response.json()["detail"]
 
 
 def test_book_greeks_unknown_option_leg_is_422_not_500(client, store):
@@ -224,6 +325,126 @@ def test_book_greeks_via_book_ref_option_leg_matches_inline(client, store):
     assert ref_row["delta"] == pytest.approx(inline_row["delta"])
     assert ref_row["gamma"] == pytest.approx(inline_row["gamma"])
     assert ref_row["dollar_delta"] == pytest.approx(inline_row["dollar_delta"])
+
+
+def test_book_greeks_uses_persisted_live_contract_id_for_same_terms(client, store):
+    from quantmind.api.routers.book import _account_fingerprint, _pin_and_respond
+    from quantmind.portfolio import Portfolio, Position
+
+    expiry = (date.today() + timedelta(days=45)).strftime("%Y%m%d")
+    chain = pd.DataFrame(
+        {
+            "expiry": [expiry, expiry],
+            "strike": [452.0, 452.0],
+            "right": ["C", "C"],
+            "con_id": [7001, 7002],
+            "bid": [4.0, 4.0],
+            "ask": [4.2, 4.2],
+            "iv": [0.12, 0.42],
+            "delta": [0.5, 0.5],
+            "multiplier": [100.0, 100.0],
+        }
+    )
+    OptionsStore(store.root).write_chain(
+        "SPY", chain, OptionsSnapshotMeta(as_of=str(date.today()), spot=452.0)
+    )
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=7002,
+                symbol="SPY",
+                qty=1,
+                sec_type="OPT",
+                multiplier=100.0,
+                strike=452.0,
+                expiry=expiry,
+                right="C",
+                currency="USD",
+                exchange="SMART",
+            ),
+        ),
+        as_of="2026-09-04T12:00:00Z",
+    )
+    account_id = "DU_ACCOUNT_A"
+    pinned = _pin_and_respond(
+        store,
+        portfolio,
+        "2026-09-04T12:00:00Z",
+        source="live_ibkr",
+        account_fingerprint=_account_fingerprint(account_id),
+        broker_mode="paper",
+    )
+    client.app.state.broker_account_id = account_id
+    client.app.state.broker_mode = "paper"
+
+    response = client.post(
+        "/api/options/book-greeks", json={"book_ref": pinned.snapshot_id}
+    )
+
+    assert response.status_code == 200
+    years = (date.today() + timedelta(days=45) - date.today()).days / 365.25
+    expected = bs_greeks(452.0, 452.0, years, 0.0, 0.42, True)
+    assert response.json()["underlyings"][0]["gamma"] == pytest.approx(
+        100 * expected.gamma, rel=1e-4
+    )
+
+
+def test_book_greeks_rejects_persisted_live_contract_without_exact_chain_id(client, store):
+    from quantmind.api.routers.book import _account_fingerprint, _pin_and_respond
+    from quantmind.portfolio import Portfolio, Position
+
+    expiry = (date.today() + timedelta(days=45)).strftime("%Y%m%d")
+    chain = pd.DataFrame(
+        {
+            "expiry": [expiry],
+            "strike": [452.0],
+            "right": ["C"],
+            "con_id": [7001],
+            "bid": [4.0],
+            "ask": [4.2],
+            "iv": [0.25],
+            "delta": [0.5],
+            "multiplier": [100.0],
+        }
+    )
+    OptionsStore(store.root).write_chain(
+        "SPY", chain, OptionsSnapshotMeta(as_of=str(date.today()), spot=452.0)
+    )
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=7999,
+                symbol="SPY",
+                qty=1,
+                sec_type="OPT",
+                multiplier=100.0,
+                strike=452.0,
+                expiry=expiry,
+                right="C",
+                currency="USD",
+                exchange="SMART",
+            ),
+        ),
+        as_of="2026-09-04T12:00:00Z",
+    )
+    account_id = "DU_ACCOUNT_A"
+    pinned = _pin_and_respond(
+        store,
+        portfolio,
+        "2026-09-04T12:00:00Z",
+        source="live_ibkr",
+        account_fingerprint=_account_fingerprint(account_id),
+        broker_mode="paper",
+    )
+    client.app.state.broker_account_id = account_id
+    client.app.state.broker_mode = "paper"
+
+    response = client.post(
+        "/api/options/book-greeks", json={"book_ref": pinned.snapshot_id}
+    )
+
+    assert response.status_code == 422
+    assert "no cached quote" in response.json()["detail"]
 
 
 def test_book_greeks_book_ref_with_invalid_format_is_422_not_500(client, store):

@@ -36,8 +36,10 @@ class FakeBroker:
     def __init__(self):
         self.con_ids = {"SPY": 756733, "QQQ": 320227571}
         self.bar_calls = []  # (con_id, years)
+        self.resolve_calls = []
 
     async def resolve_stock_con_id(self, symbol):
+        self.resolve_calls.append(symbol)
         return self.con_ids[symbol]
 
     async def get_daily_bars(self, con_id, years=5):
@@ -66,6 +68,29 @@ async def test_first_sync_fetches_full_history_and_saves_symbol_map(tmp_path):
     assert meta.bar_type == "ADJUSTED_LAST"
     # pacing between instruments (Engineering Constraint 6)
     assert sleeper.delays == [0.5, 0.5]
+
+
+async def test_sync_uses_authoritative_held_stock_con_id_without_symbol_resolution(tmp_path):
+    store = BarStore(tmp_path)
+    broker = FakeBroker()
+    sleeper = FakeSleeper()
+
+    symbol_map = await sync_daily_bars(
+        store,
+        broker,
+        ["DUAL"],
+        years=5,
+        sleep=sleeper,
+        known_con_ids={"DUAL": 424242},
+    )
+
+    assert symbol_map == {"DUAL": 424242}
+    assert broker.resolve_calls == []
+    assert all(years == 5 for _, years in broker.bar_calls)
+    bars, meta = store.read_bars(con_id=424242, bar_size="1d")
+    assert len(bars) == 250
+    assert meta.bar_type == "ADJUSTED_LAST"
+    assert sleeper.delays == [0.5]
 
 
 async def test_partial_universe_sync_preserves_existing_symbol_map_entries(tmp_path):

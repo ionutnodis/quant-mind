@@ -19,8 +19,8 @@ from quantmind.datastore.store import BarMeta, BarStore
 from quantmind.portfolio import Portfolio, Position
 
 
-def _flat_bars(price: float, n: int = 30) -> pd.DataFrame:
-    idx = pd.bdate_range(end="2026-07-24", periods=n)
+def _flat_bars(price: float, n: int = 30, end: date | None = None) -> pd.DataFrame:
+    idx = pd.bdate_range(end=end or date.today(), periods=n)
     close = np.full(n, price)
     return pd.DataFrame(
         {"open": close, "high": close, "low": close, "close": close, "volume": 1000.0}, index=idx
@@ -29,7 +29,7 @@ def _flat_bars(price: float, n: int = 30) -> pd.DataFrame:
 
 def _random_bars(n: int = 300, seed: int = 1, start: float = 100.0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
-    idx = pd.bdate_range(end="2026-07-24", periods=n)
+    idx = pd.bdate_range(end=date.today(), periods=n)
     close = start * np.abs(np.cumprod(1 + rng.normal(0, 0.01, n)))
     return pd.DataFrame(
         {"open": close, "high": close, "low": close, "close": close, "volume": 1000.0}, index=idx
@@ -59,11 +59,13 @@ class FakeBroker:
 @pytest.fixture
 def store(tmp_path) -> BarStore:
     s = BarStore(tmp_path)
-    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today()))
     s.write_bars(con_id=1, bar_size="1d", bars=_flat_bars(100.0), meta=meta)
     s.write_bars(con_id=2, bar_size="1d", bars=_flat_bars(5.0), meta=meta)
     s.write_bars(con_id=3, bar_size="1d", bars=_flat_bars(380.0), meta=meta)
     s.write_symbol_map({"SPY": 1, "OPT_XYZ": 2, "QQQ": 3})
+    for symbol in ("SPY", "OPT_XYZ", "QQQ"):
+        s.write_instrument_metadata(symbol, {"currency": "USD", "exchange": "SMART"})
     return s
 
 
@@ -74,10 +76,12 @@ def rich_store(tmp_path) -> BarStore:
     30-bar fixture (which exists precisely to exercise the honest
     insufficient-history degrade path)."""
     s = BarStore(tmp_path)
-    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today()))
     s.write_bars(con_id=1, bar_size="1d", bars=_random_bars(seed=1, start=450.0), meta=meta)
     s.write_bars(con_id=2, bar_size="1d", bars=_random_bars(seed=2, start=380.0), meta=meta)
     s.write_symbol_map({"SPY": 1, "QQQ": 2})
+    for symbol in ("SPY", "QQQ"):
+        s.write_instrument_metadata(symbol, {"currency": "USD", "exchange": "SMART"})
     return s
 
 
@@ -106,7 +110,16 @@ def test_portfolio_no_broker_is_structured_empty(store):
     assert r.status_code == 200
     body = r.json()
     assert body["positions"] == []
-    assert body["totals"] == {"market_value": None, "n_positions": 0, "unrealized_pnl": None}
+    assert body["totals"] == {
+        "market_value": None,
+        "priced_market_value": None,
+        "n_positions": 0,
+        "priced_positions": 0,
+        "valuation_status": "empty",
+        "unrealized_pnl": None,
+        "reported_unrealized_pnl": None,
+        "pnl_status": "empty",
+    }
     assert body["base_currency"] == "USD"
     assert body["valuation_ts"].endswith("Z")
     assert body["snapshot_id"]
@@ -146,13 +159,16 @@ def test_portfolio_two_positions_market_values_and_weights(store):
 
     assert opt["sec_type"] == "OPT"
     assert opt["multiplier"] == pytest.approx(100.0)
-    assert opt["last_close"] == pytest.approx(5.0)
-    assert opt["market_value"] == pytest.approx(2500.0)  # 5 * 100 * 5
+    # An option without contract terms and an exact cached-chain quote must
+    # never inherit its underlier's 5.0 close as an option premium.
+    assert opt["last_close"] is None
+    assert opt["market_value"] is None
+    assert opt["weight"] is None
 
-    total_mv = 1000.0 + 2500.0
-    assert body["totals"]["market_value"] == pytest.approx(total_mv)
-    assert spy["weight"] == pytest.approx(1000.0 / total_mv)
-    assert opt["weight"] == pytest.approx(2500.0 / total_mv)
+    assert body["totals"]["market_value"] is None
+    assert body["totals"]["priced_market_value"] == pytest.approx(1000.0)
+    assert body["totals"]["valuation_status"] == "partial"
+    assert spy["weight"] is None
 
 
 def test_portfolio_position_without_cached_bars_returns_null_price_fields(store):
@@ -177,8 +193,52 @@ def test_portfolio_position_without_cached_bars_returns_null_price_fields(store)
     # known position's market value/weight still computed off the priced subset
     spy = by_symbol["SPY"]
     assert spy["market_value"] == pytest.approx(1000.0)
-    assert spy["weight"] == pytest.approx(1.0)  # only priced position -> full weight
-    assert body["totals"]["market_value"] == pytest.approx(1000.0)
+    assert spy["weight"] is None
+    assert body["totals"]["market_value"] is None
+    assert body["totals"]["priced_market_value"] == pytest.approx(1000.0)
+    assert body["totals"]["valuation_status"] == "partial"
+
+
+def test_stale_stock_mark_cannot_make_portfolio_valuation_complete(store):
+    stale_date = date.today() - timedelta(days=10)
+    store.write_bars(
+        con_id=1,
+        bar_size="1d",
+        bars=_flat_bars(100.0, end=stale_date),
+        meta=BarMeta(
+            bar_type="ADJUSTED_LAST",
+            adjusted_asof=stale_date.isoformat(),
+        ),
+    )
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=1, symbol="SPY", qty=10, sec_type="STK", multiplier=1.0),
+        ),
+        as_of="2026-09-04",
+    )
+
+    body = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio").json()
+
+    assert body["positions"][0]["last_close"] is None
+    assert body["positions"][0]["market_value"] is None
+    assert body["totals"]["market_value"] is None
+    assert body["totals"]["priced_positions"] == 0
+    assert body["totals"]["valuation_status"] == "partial"
+
+
+def test_portfolio_corrupt_cached_bars_degrade_to_null_price_fields(store):
+    store._path(2, "1d").write_bytes(b"not parquet")
+    portfolio = Portfolio(
+        positions=(Position(con_id=2, symbol="OPT_XYZ", qty=3, sec_type="STK"),),
+        as_of="2026-07-24",
+    )
+
+    response = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+
+    assert response.status_code == 200
+    position = response.json()["positions"][0]
+    assert position["last_close"] is None
+    assert position["market_value"] is None
 
 
 def test_portfolio_no_broker_new_sections_are_structured_empty(store):
@@ -191,6 +251,13 @@ def test_portfolio_no_broker_new_sections_are_structured_empty(store):
     assert body["exposure"] == []
     assert body["options_sleeve"] == {
         "available": False,
+        "status": "unavailable",
+        "total_positions": 0,
+        "priced_positions": 0,
+        "missing_positions": 0,
+        "chain_as_of": None,
+        "chain_age_days": None,
+        "chain_stale": None,
         "reason": "no option positions",
         "underlyings": [],
         "stress_grid": None,
@@ -239,6 +306,7 @@ def test_account_summary_populated_when_broker_supports_it(store):
         "total_cash_value": 20000.0,
         "gross_position_value": 105000.5,
         "buying_power": 60000.0,
+        "currency": "USD",
     }
     broker = FakeBroker(portfolio, account_summary=summary)
     client = _client(store, broker=broker)
@@ -256,6 +324,216 @@ def test_account_summary_degrades_honestly_when_broker_lacks_it(store):
     body = r.json()
     assert body["account"] is None
     assert body["account_note"]
+
+
+def test_account_summary_without_an_explicit_currency_is_withheld_not_rejected(store):
+    portfolio = Portfolio(positions=(), as_of="2026-09-04")
+    summary = {
+        "net_liquidation": 125000.5,
+        "total_cash_value": 20000.0,
+        "gross_position_value": 105000.5,
+        "buying_power": 60000.0,
+        "currency": None,
+    }
+
+    response = _client(
+        store, broker=FakeBroker(portfolio, account_summary=summary)
+    ).get("/api/portfolio")
+
+    assert response.status_code == 200
+    assert response.json()["account"] is None
+    assert "currency" in response.json()["account_note"].lower()
+
+
+def test_non_usd_account_summary_is_blocked_until_fx_normalization_exists(store):
+    portfolio = Portfolio(positions=(), as_of="2026-07-24")
+    summary = {
+        "net_liquidation": 125000.5,
+        "total_cash_value": 20000.0,
+        "gross_position_value": 105000.5,
+        "buying_power": 60000.0,
+        "currency": "HKD",
+    }
+
+    response = _client(
+        store, broker=FakeBroker(portfolio, account_summary=summary)
+    ).get("/api/portfolio")
+
+    assert response.status_code == 422
+    assert "HKD" in response.json()["detail"]
+
+
+def test_disconnected_live_broker_is_not_reported_as_an_empty_portfolio(store):
+    client = _client(store, broker=None)
+    client.app.state.broker_connection_error = "broker_disconnected"
+
+    response = client.get("/api/portfolio")
+
+    assert response.status_code == 503
+    assert "live broker unavailable" in response.json()["detail"]
+
+
+def test_pinned_live_book_rejects_a_different_current_broker_account(store):
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=1,
+                symbol="SPY",
+                qty=10,
+                currency="USD",
+                exchange="ARCA",
+            ),
+        ),
+        as_of="2026-09-04T12:00:00Z",
+    )
+    client = _client(store, broker=FakeBroker(portfolio))
+    client.app.state.broker_account_id = "DU_ACCOUNT_A"
+    client.app.state.broker_mode = "paper"
+    pinned = client.post("/api/book/pin", json={}).json()
+    client.app.state.broker_account_id = "DU_ACCOUNT_B"
+
+    response = client.get(
+        "/api/portfolio", params={"book_ref": pinned["snapshot_id"]}
+    )
+
+    assert response.status_code == 409
+    assert "account" in response.json()["detail"]
+
+
+def test_pinned_live_book_rejects_a_different_current_broker_mode(store):
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=1,
+                symbol="SPY",
+                qty=10,
+                currency="USD",
+                exchange="ARCA",
+            ),
+        ),
+        as_of="2026-09-04T12:00:00Z",
+    )
+    client = _client(store, broker=FakeBroker(portfolio))
+    client.app.state.broker_account_id = "DU_ACCOUNT_A"
+    client.app.state.broker_mode = "paper"
+    pinned = client.post("/api/book/pin", json={}).json()
+    client.app.state.broker_mode = "live"
+
+    response = client.get(
+        "/api/portfolio", params={"book_ref": pinned["snapshot_id"]}
+    )
+
+    assert response.status_code == 409
+    assert "mode" in response.json()["detail"]
+
+
+def test_pinned_portfolio_response_preserves_snapshot_identity_and_valuation_time(store):
+    from quantmind.api.routers.book import _account_fingerprint, _pin_and_respond
+
+    valuation_ts = "2026-09-04T01:02:03Z"
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=1,
+                symbol="SPY",
+                qty=10,
+                currency="USD",
+                exchange="ARCA",
+            ),
+        ),
+        as_of=valuation_ts,
+    )
+    account_id = "DU_ACCOUNT_A"
+    pinned = _pin_and_respond(
+        store,
+        portfolio,
+        valuation_ts,
+        source="live_ibkr",
+        account_fingerprint=_account_fingerprint(account_id),
+        broker_mode="paper",
+    )
+    client = _client(store, broker=FakeBroker(portfolio))
+    client.app.state.broker_account_id = account_id
+    client.app.state.broker_mode = "paper"
+
+    body = client.get(
+        "/api/portfolio", params={"book_ref": pinned.snapshot_id}
+    ).json()
+
+    assert body["snapshot_id"] == pinned.snapshot_id
+    assert body["valuation_ts"] == valuation_ts
+
+
+def test_non_usd_live_position_is_blocked_until_fx_normalization_exists(store):
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=1,
+                symbol="ASML",
+                qty=10,
+                currency="EUR",
+                exchange="AEB",
+            ),
+        ),
+        as_of="2026-09-04",
+    )
+
+    response = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+
+    assert response.status_code == 422
+    assert "FX normalization" in response.json()["detail"]
+
+
+def test_unsupported_live_security_type_is_blocked(store):
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=1,
+                symbol="ES",
+                qty=1,
+                sec_type="FUT",
+                multiplier=50,
+                currency="USD",
+            ),
+        ),
+        as_of="2026-09-04",
+    )
+
+    response = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+
+    assert response.status_code == 422
+    assert "FUT" in response.json()["detail"]
+
+
+def test_unsupported_pinned_security_type_is_not_reconstructed_as_stock(store):
+    from quantmind.api.routers.book import _pin_and_respond
+
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=1,
+                symbol="SPY",
+                qty=1,
+                sec_type="FUT",
+                multiplier=50,
+                currency="USD",
+            ),
+        ),
+        as_of="2026-09-04T12:00:00Z",
+    )
+    pinned = _pin_and_respond(
+        store,
+        portfolio,
+        portfolio.as_of,
+        source="manual",
+    )
+
+    response = _client(store).get(
+        "/api/portfolio", params={"book_ref": pinned.snapshot_id}
+    )
+
+    assert response.status_code == 422
+    assert "FUT" in response.json()["detail"]
 
 
 # --- Delta-adjusted exposure ---
@@ -345,8 +623,287 @@ def test_options_sleeve_live_broker_opt_position_has_no_strike_expiry_degrades_h
     )
     client = _client(store, broker=FakeBroker(portfolio))
     body = client.get("/api/portfolio").json()
-    assert body["options_sleeve"]["available"] is False
-    assert body["options_sleeve"]["reason"] == "chain not ingested — run options_sync"
+    sleeve = body["options_sleeve"]
+    assert sleeve["available"] is False
+    assert sleeve["status"] == "unavailable"
+    assert sleeve["total_positions"] == 1
+    assert sleeve["priced_positions"] == 0
+    assert sleeve["missing_positions"] == 1
+    assert sleeve["chain_as_of"] is None
+    assert sleeve["chain_age_days"] is None
+    assert sleeve["chain_stale"] is None
+    assert sleeve["reason"] == "chain not ingested — run options_sync"
+
+
+def test_options_sleeve_prices_a_live_broker_option_when_contract_terms_are_complete(store):
+    expiry = _expiry_str(45)
+    _write_chain(
+        store,
+        "OPT_XYZ",
+        [
+            {
+                "expiry": expiry,
+                "strike": 5.0,
+                "right": "C",
+                "con_id": 2,
+                "bid": 0.5,
+                "ask": 0.6,
+                "iv": 0.35,
+                "delta": 0.55,
+                "multiplier": 100.0,
+            }
+        ],
+        spot=5.0,
+    )
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=2,
+                symbol="OPT_XYZ",
+                qty=5,
+                sec_type="OPT",
+                multiplier=100.0,
+                strike=5.0,
+                expiry=expiry,
+                right="C",
+                currency="USD",
+            ),
+        ),
+        as_of="2026-07-24",
+    )
+
+    body = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio").json()
+
+    assert body["options_sleeve"]["available"] is True
+    assert body["options_sleeve"]["underlyings"][0]["underlier"] == "OPT_XYZ"
+    assert body["expiry_buckets"]["le_90d"][0]["expiry"] == expiry
+
+
+def test_corrupt_option_chain_degrades_to_unavailable_sleeve(store):
+    expiry = _expiry_str(45)
+    chain_path = OptionsStore(store.root)._path("OPT_XYZ")
+    chain_path.parent.mkdir(parents=True, exist_ok=True)
+    chain_path.write_bytes(b"not parquet")
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=2,
+                symbol="OPT_XYZ",
+                qty=5,
+                sec_type="OPT",
+                multiplier=100.0,
+                strike=5.0,
+                expiry=expiry,
+                right="C",
+                currency="USD",
+            ),
+        ),
+        as_of="2026-07-24",
+    )
+
+    response = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+
+    assert response.status_code == 200
+    sleeve = response.json()["options_sleeve"]
+    assert sleeve["status"] == "unavailable"
+    assert sleeve["priced_positions"] == 0
+    assert sleeve["missing_positions"] == 1
+
+
+def test_live_option_prefers_held_contract_con_id_when_terms_are_ambiguous(store):
+    expiry = _expiry_str(45)
+    _write_chain(
+        store,
+        "OPT_XYZ",
+        [
+            {
+                "expiry": expiry,
+                "strike": 5.0,
+                "right": "C",
+                "con_id": 4001,
+                "bid": 1.0,
+                "ask": 1.2,
+                "iv": 0.25,
+                "delta": 0.5,
+                "multiplier": 100.0,
+            },
+            {
+                "expiry": expiry,
+                "strike": 5.0,
+                "right": "C",
+                "con_id": 4002,
+                "bid": 3.0,
+                "ask": 3.2,
+                "iv": 0.25,
+                "delta": 0.5,
+                "multiplier": 100.0,
+            },
+        ],
+        spot=5.0,
+    )
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=4002,
+                symbol="OPT_XYZ",
+                qty=1,
+                sec_type="OPT",
+                multiplier=100.0,
+                strike=5.0,
+                expiry=expiry,
+                right="C",
+                currency="USD",
+            ),
+        ),
+        as_of="2026-07-24",
+    )
+
+    body = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio").json()
+
+    assert body["positions"][0]["last_close"] == pytest.approx(3.1)
+
+
+def test_live_option_does_not_fall_back_to_same_terms_when_contract_id_differs(store):
+    expiry = _expiry_str(45)
+    _write_chain(
+        store,
+        "OPT_XYZ",
+        [
+            {
+                "expiry": expiry,
+                "strike": 5.0,
+                "right": "C",
+                "con_id": 4001,
+                "bid": 1.0,
+                "ask": 1.2,
+                "iv": 0.25,
+                "delta": 0.5,
+                "multiplier": 100.0,
+            }
+        ],
+        spot=5.0,
+    )
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=4999,
+                symbol="OPT_XYZ",
+                qty=1,
+                sec_type="OPT",
+                multiplier=100.0,
+                strike=5.0,
+                expiry=expiry,
+                right="C",
+                currency="USD",
+            ),
+        ),
+        as_of="2026-09-04",
+    )
+
+    body = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio").json()
+
+    assert body["positions"][0]["last_close"] is None
+    assert body["positions"][0]["market_value"] is None
+    assert body["options_sleeve"]["status"] == "unavailable"
+
+
+def test_manual_option_rejects_ambiguous_terms_without_matching_contract_id(store):
+    expiry = _expiry_str(45)
+    _write_chain(
+        store,
+        "SPY",
+        [
+            {
+                "expiry": expiry,
+                "strike": 105.0,
+                "right": "C",
+                "con_id": 4001,
+                "bid": 1.0,
+                "ask": 1.2,
+                "iv": 0.25,
+                "delta": 0.5,
+                "multiplier": 100.0,
+            },
+            {
+                "expiry": expiry,
+                "strike": 105.0,
+                "right": "C",
+                "con_id": 4002,
+                "bid": 3.0,
+                "ask": 3.2,
+                "iv": 0.25,
+                "delta": 0.5,
+                "multiplier": 100.0,
+            },
+        ],
+        spot=100.0,
+    )
+    client = _client(store, broker=None)
+    pinned = client.post(
+        "/api/book/pin",
+        json={
+            "positions": [
+                {
+                    "symbol": "SPY",
+                    "qty": 1,
+                    "strike": 105.0,
+                    "expiry": expiry,
+                    "right": "C",
+                    "currency": "USD",
+                }
+            ]
+        },
+    ).json()
+
+    body = client.get(
+        "/api/portfolio", params={"book_ref": pinned["snapshot_id"]}
+    ).json()
+
+    assert body["positions"][0]["last_close"] is None
+    assert body["options_sleeve"]["status"] == "unavailable"
+
+
+def test_zero_iv_option_degrades_to_unavailable_sleeve(store):
+    expiry = _expiry_str(45)
+    _write_chain(
+        store,
+        "OPT_XYZ",
+        [
+            {
+                "expiry": expiry,
+                "strike": 5.0,
+                "right": "C",
+                "con_id": 4002,
+                "bid": 1.0,
+                "ask": 1.2,
+                "iv": 0.0,
+                "delta": 0.5,
+                "multiplier": 100.0,
+            }
+        ],
+        spot=5.0,
+    )
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=4002,
+                symbol="OPT_XYZ",
+                qty=1,
+                sec_type="OPT",
+                multiplier=100.0,
+                strike=5.0,
+                expiry=expiry,
+                right="C",
+                currency="USD",
+            ),
+        ),
+        as_of="2026-07-24",
+    )
+
+    response = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+
+    assert response.status_code == 200
+    assert response.json()["options_sleeve"]["status"] == "unavailable"
 
 
 def test_options_sleeve_populated_via_book_ref_with_chain_data(store):
@@ -375,6 +932,13 @@ def test_options_sleeve_populated_via_book_ref_with_chain_data(store):
     body = r.json()
     sleeve = body["options_sleeve"]
     assert sleeve["available"] is True
+    assert sleeve["status"] == "complete"
+    assert sleeve["total_positions"] == 1
+    assert sleeve["priced_positions"] == 1
+    assert sleeve["missing_positions"] == 0
+    assert sleeve["chain_as_of"] == str(date.today())
+    assert sleeve["chain_age_days"] == 0
+    assert sleeve["chain_stale"] is False
     assert sleeve["reason"] is None
     assert len(sleeve["underlyings"]) == 1
     assert sleeve["underlyings"][0]["underlier"] == "SPY"
@@ -387,13 +951,11 @@ def test_options_sleeve_populated_via_book_ref_with_chain_data(store):
     assert exp["net_delta"] != pytest.approx(0.0)
 
 
-def test_multi_leg_book_ref_market_values_are_per_position_not_per_conid(store):
-    # Fix-round-1 CRITICAL (reviewer live repro): a book_ref book's legs all
-    # share the synthetic con_id (= symbol_map[underlier]), so any con_id-
-    # keyed dict in the ledger path collapses a multi-leg book — a 2-leg SPY
-    # book (qty 1 @ 105c, qty 5 @ 110c, underlier close 100.0) reported BOTH
-    # positions as market_value 50000.0 / weight 1.0 and totals 50000.0.
-    # Correct: 10000 / 50000, weights 1/6 / 5/6, total 60000.
+def test_multi_leg_book_ref_values_each_option_at_its_cached_midpoint(store):
+    # A pinned option book uses the underlier's conId only to find history.
+    # Its current marks come from each exact chain row: both rows quote
+    # 1.0 / 1.2, so each contract is worth the hand-derived midpoint 1.1,
+    # never SPY's 100.0 close and never another leg's quote.
     expiry = _expiry_str(45)
     rows = [
         {
@@ -421,11 +983,179 @@ def test_multi_leg_book_ref_market_values_are_per_position_not_per_conid(store):
     assert len(body["positions"]) == 2
 
     by_qty = {p["qty"]: p for p in body["positions"]}
-    assert by_qty[1]["market_value"] == pytest.approx(1 * 100.0 * 100.0)  # 10000, NOT 50000
-    assert by_qty[5]["market_value"] == pytest.approx(5 * 100.0 * 100.0)  # 50000
-    assert body["totals"]["market_value"] == pytest.approx(60000.0)
-    assert by_qty[1]["weight"] == pytest.approx(10000.0 / 60000.0)
-    assert by_qty[5]["weight"] == pytest.approx(50000.0 / 60000.0)
+    assert by_qty[1]["last_close"] == pytest.approx(1.1)
+    assert by_qty[5]["last_close"] == pytest.approx(1.1)
+    assert by_qty[1]["market_value"] == pytest.approx(1 * 100.0 * 1.1)
+    assert by_qty[5]["market_value"] == pytest.approx(5 * 100.0 * 1.1)
+    assert body["totals"]["market_value"] == pytest.approx(660.0)
+    assert by_qty[1]["weight"] == pytest.approx(1 / 6)
+    assert by_qty[5]["weight"] == pytest.approx(5 / 6)
+
+
+@pytest.mark.parametrize(
+    ("bid", "ask", "expected_mark"),
+    [(0.8, None, 0.8), (None, 1.25, 1.25)],
+)
+def test_book_ref_option_uses_the_available_one_sided_quote(
+    store, bid, ask, expected_mark
+):
+    expiry = _expiry_str(45)
+    _write_chain(
+        store,
+        "SPY",
+        [
+            {
+                "expiry": expiry,
+                "strike": 105.0,
+                "right": "C",
+                "con_id": 3000,
+                "bid": bid,
+                "ask": ask,
+                "iv": 0.25,
+                "delta": 0.5,
+                "multiplier": 100.0,
+            }
+        ],
+        spot=100.0,
+    )
+    client = _client(store, broker=None)
+    pinned = client.post(
+        "/api/book/pin",
+        json={
+            "positions": [
+                {
+                    "symbol": "SPY",
+                    "qty": 2,
+                    "strike": 105.0,
+                    "expiry": expiry,
+                    "right": "C",
+                }
+            ]
+        },
+    ).json()
+
+    body = client.get(
+        "/api/portfolio", params={"book_ref": pinned["snapshot_id"]}
+    ).json()
+
+    assert body["positions"][0]["last_close"] == pytest.approx(expected_mark)
+    assert body["positions"][0]["market_value"] == pytest.approx(
+        2 * 100 * expected_mark
+    )
+
+
+def test_options_sleeve_reports_partial_when_a_pinned_leg_has_no_exact_quote(store):
+    expiry = _expiry_str(45)
+    _write_chain(
+        store,
+        "SPY",
+        [
+            {
+                "expiry": expiry,
+                "strike": 105.0,
+                "right": "C",
+                "con_id": 3000,
+                "bid": 1.0,
+                "ask": 1.2,
+                "iv": 0.25,
+                "delta": 0.5,
+                "multiplier": 100.0,
+            }
+        ],
+        spot=100.0,
+    )
+    client = _client(store, broker=None)
+    pinned = client.post(
+        "/api/book/pin",
+        json={
+            "positions": [
+                {
+                    "symbol": "SPY",
+                    "qty": 1,
+                    "strike": 105.0,
+                    "expiry": expiry,
+                    "right": "C",
+                },
+                {
+                    "symbol": "SPY",
+                    "qty": 2,
+                    "strike": 110.0,
+                    "expiry": expiry,
+                    "right": "C",
+                },
+            ]
+        },
+    ).json()
+
+    body = client.get(
+        "/api/portfolio", params={"book_ref": pinned["snapshot_id"]}
+    ).json()
+    sleeve = body["options_sleeve"]
+
+    assert sleeve["available"] is True
+    assert sleeve["status"] == "partial"
+    assert sleeve["total_positions"] == 2
+    assert sleeve["priced_positions"] == 1
+    assert sleeve["missing_positions"] == 1
+    assert "1 of 2" in sleeve["reason"]
+    by_qty = {p["qty"]: p for p in body["positions"]}
+    assert by_qty[1]["last_close"] == pytest.approx(1.1)
+    assert by_qty[2]["last_close"] is None
+    assert by_qty[2]["market_value"] is None
+
+
+def test_options_sleeve_surfaces_stale_chain_without_reporting_complete(store):
+    expiry = _expiry_str(45)
+    chain_date = date.today() - timedelta(days=10)
+    _write_chain(
+        store,
+        "SPY",
+        [
+            {
+                "expiry": expiry,
+                "strike": 105.0,
+                "right": "C",
+                "con_id": 3000,
+                "bid": 1.0,
+                "ask": 1.2,
+                "iv": 0.25,
+                "delta": 0.5,
+                "multiplier": 100.0,
+            }
+        ],
+        spot=100.0,
+        as_of=str(chain_date),
+    )
+    client = _client(store, broker=None)
+    pinned = client.post(
+        "/api/book/pin",
+        json={
+            "positions": [
+                {
+                    "symbol": "SPY",
+                    "qty": 1,
+                    "strike": 105.0,
+                    "expiry": expiry,
+                    "right": "C",
+                }
+            ]
+        },
+    ).json()
+
+    body = client.get(
+        "/api/portfolio", params={"book_ref": pinned["snapshot_id"]}
+    ).json()
+    sleeve = body["options_sleeve"]
+
+    assert sleeve["status"] == "partial"
+    assert sleeve["chain_as_of"] == str(chain_date)
+    assert sleeve["chain_age_days"] == int(
+        np.busday_count(chain_date.isoformat(), date.today().isoformat())
+    )
+    assert sleeve["chain_stale"] is True
+    assert "stale" in sleeve["reason"]
+    assert body["positions"][0]["last_close"] is None
+    assert body["totals"]["valuation_status"] == "partial"
 
 
 def test_options_sleeve_distinct_reason_when_option_underlier_not_in_cache(store):
@@ -511,3 +1241,50 @@ def test_attribution_available_with_sufficient_history(rich_store):
     for point in attribution["series"]:
         assert point["date"].endswith("Z")
         assert point["total_pnl"] == pytest.approx(point["core_pnl"] + point["overlay_pnl"], abs=1e-6)
+
+
+def test_attribution_is_unavailable_for_option_book_without_option_price_history(rich_store):
+    expiry = _expiry_str(45)
+    _write_chain(
+        rich_store,
+        "QQQ",
+        [
+            {
+                "expiry": expiry,
+                "strike": 380.0,
+                "right": "C",
+                "con_id": 2,
+                "bid": 4.0,
+                "ask": 4.4,
+                "iv": 0.3,
+                "delta": 0.5,
+                "multiplier": 100.0,
+            }
+        ],
+        spot=380.0,
+    )
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=2,
+                symbol="QQQ",
+                qty=1,
+                sec_type="OPT",
+                multiplier=100.0,
+                strike=380.0,
+                expiry=expiry,
+                right="C",
+            ),
+        ),
+        as_of="2026-07-24",
+    )
+
+    body = _client(rich_store, broker=FakeBroker(portfolio)).get(
+        "/api/portfolio", params={"attribution_days": 90}
+    ).json()
+
+    assert body["options_sleeve"]["status"] == "complete"
+    attribution = body["attribution"]
+    assert attribution["available"] is False
+    assert "option price history" in attribution["reason"]
+    assert attribution["series"] == []

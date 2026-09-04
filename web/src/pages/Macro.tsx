@@ -125,10 +125,10 @@ export function Macro() {
 
   if (isLoading)
     return (
-      <div className="grid grid-cols-[1.4fr_1fr] gap-3">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1.4fr_1fr]">
         <Skeleton className="h-48" />
         <Skeleton className="h-48" />
-        <Skeleton className="h-56 col-span-2" />
+        <Skeleton className="h-56 lg:col-span-2" />
       </div>
     );
   if (error) return <p className="text-down">Macro unavailable: {String((error as Error).message ?? error)}</p>;
@@ -138,18 +138,18 @@ export function Macro() {
   const missingNote = data.missing.length > 0 ? `missing: ${data.missing.join(", ")}` : undefined;
 
   return (
-    <div className="space-y-3 max-w-[1400px]">
+    <div className="w-full space-y-3">
       {missingNote && (
         <p className="text-warning text-[12px] num border border-warning/40 px-3 py-1.5">
           Some series aren't cached yet — {missingNote}. Sync to fill them in.
         </p>
       )}
 
-      <div className="grid grid-cols-[1.4fr_1fr] gap-3">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1.4fr_1fr]">
         <Panel title="Yields" note={asOfNote}>
           {data.yields ? (
             <>
-              <div className="grid grid-cols-4 gap-x-4 gap-y-2 mb-3">
+              <div className="mb-3 grid grid-cols-2 gap-x-4 gap-y-2 lg:grid-cols-4">
                 <div>
                   <div className="text-[10px] tracking-wider uppercase text-muted">US 10Y</div>
                   <div className="num text-lg">{pct(data.yields.us10y)}</div>

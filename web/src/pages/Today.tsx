@@ -3,109 +3,14 @@
 // impact, analytics row with the saved-models console. Renders from cache;
 // staleness visible, never hidden. The book zone is honest about the empty
 // paper book — structure present, amber reserved for when positions exist.
-import { useEffect, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, request } from "../lib/api";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "../lib/api";
 import { GlanceCharts } from "../components/GlanceCharts";
 import { InstrumentHover } from "../components/InstrumentHover";
 import { NewsTicker } from "../components/NewsTicker";
 import { Panel, Skeleton } from "../components/Panel";
 import { RotationHeatmap } from "../components/RotationHeatmap";
-
-// Local, page-scoped types + calls for the sync job — api.ts is shared and not
-// owned here, so these stay in Today.tsx per the wave-2 ownership rule.
-interface SyncSubmitResponse {
-  job_id: string;
-}
-interface SyncStatusResponse {
-  state: "running" | "done" | "error" | "cancelled";
-  result?: string | null;
-  error?: string | null;
-}
-function postSync(): Promise<SyncSubmitResponse> {
-  return request<SyncSubmitResponse>("/api/sync", { method: "POST" });
-}
-function getSyncStatus(jobId: string): Promise<SyncStatusResponse> {
-  return request<SyncStatusResponse>(`/api/sync/${jobId}`);
-}
-
-const SYNC_POLL_MS = 2000;
-
-// "Sync now" — lives in both the staleness banner and the empty-cache state.
-// Submits the job, checks immediately, then polls every 2s while running;
-// on completion the brief query is invalidated so the page picks up fresh
-// data without a manual reload.
-function SyncButton() {
-  const queryClient = useQueryClient();
-  const [submitting, setSubmitting] = useState(false);
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [status, setStatus] = useState<SyncStatusResponse | null>(null);
-
-  const terminal = status?.state === "done" || status?.state === "error" || status?.state === "cancelled";
-  const running = submitting || (jobId !== null && !terminal);
-
-  useEffect(() => {
-    if (!jobId || terminal) return;
-    const id = setInterval(async () => {
-      try {
-        const s = await getSyncStatus(jobId);
-        setStatus(s);
-        if (s.state === "done") {
-          queryClient.invalidateQueries({ queryKey: ["brief"] });
-        }
-      } catch {
-        // transient poll failure — keep trying on the next tick
-      }
-    }, SYNC_POLL_MS);
-    return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobId, terminal]);
-
-  async function handleClick() {
-    setSubmitting(true);
-    setStatus(null);
-    let submittedJobId: string | null = null;
-    try {
-      const { job_id } = await postSync();
-      submittedJobId = job_id;
-      setJobId(job_id);
-      const s = await getSyncStatus(job_id);
-      setStatus(s);
-      if (s.state === "done") {
-        queryClient.invalidateQueries({ queryKey: ["brief"] });
-      }
-    } catch (err) {
-      if (submittedJobId === null) {
-        // The POST itself failed — no job exists. Surface the error in the
-        // status slot and clear any stale jobId so polling doesn't resume
-        // against a previous run.
-        setJobId(null);
-        setStatus({ state: "error", error: err instanceof Error ? err.message : String(err) });
-      }
-      // else: submit succeeded but the immediate status check failed —
-      // leave state as-is; the 2s poll loop owns retrying from here.
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <span className="inline-flex items-center gap-2 ml-2">
-      <button
-        type="button"
-        data-testid="sync-now"
-        onClick={handleClick}
-        disabled={running}
-        className="num text-[11px] border border-hairline px-2.5 py-1 text-ink hover:border-muted disabled:opacity-50 disabled:cursor-not-allowed"
-      >
-        {running ? "Syncing…" : "Sync now"}
-      </button>
-      {status?.state === "error" && (
-        <span className="text-down text-[11px]">{status.error ?? "sync failed"}</span>
-      )}
-    </span>
-  );
-}
+import { SyncButton } from "../components/SyncButton";
 
 function staleDays(asOf: string | null): number | null {
   if (!asOf) return null;
@@ -137,10 +42,10 @@ export function Today() {
 
   if (isLoading)
     return (
-      <div className="grid grid-cols-[1.4fr_1fr] gap-3">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1.4fr_1fr]">
         <Skeleton className="h-36" />
         <Skeleton className="h-36" />
-        <Skeleton className="h-28 col-span-2" />
+        <Skeleton className="h-28 lg:col-span-2" />
       </div>
     );
   if (error) return <p className="text-down">Brief unavailable: {String(error)}</p>;
@@ -151,7 +56,7 @@ export function Today() {
           No market data cached yet. With IB Gateway running, sync the universe:
         </p>
         <code className="num text-ink block mt-2">uv run python -m quantmind.sync_cli</code>
-        <div className="mt-3">
+        <div className="authoring-only mt-3">
           <SyncButton />
         </div>
       </Panel>
@@ -162,19 +67,21 @@ export function Today() {
   const asOfNote = `as of ${data.as_of?.slice(0, 10)}`;
 
   return (
-    <div className="space-y-3 max-w-[1400px]">
+    <div className="w-full space-y-3">
       {days !== null && days > 3 && (
         <p
           data-testid="staleness"
-          className="text-warning text-[12px] num border border-warning/40 px-3 py-1.5 flex items-center"
+          className="text-warning text-[12px] num border border-warning/40 px-3 py-1.5 flex flex-wrap items-center gap-2"
         >
           Data is {days} days old ({asOfNote}) — run the sync.
-          <SyncButton />
+          <span className="authoring-only">
+            <SyncButton />
+          </span>
         </p>
       )}
 
       {/* Zone A — regime + book vitals */}
-      <div className="grid grid-cols-[1.4fr_1fr] gap-3">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1.4fr_1fr]">
         <Panel title="Regime" note={asOfNote}>
           <p className="text-[20px] leading-snug font-medium max-w-[34ch]">
             {regimeLine(data.tiles)}
@@ -213,25 +120,27 @@ export function Today() {
         title="Overnight — ranked by move"
         note="book-impact ranking arrives with positions"
       >
-        <div className="grid grid-cols-11 gap-px bg-hairline -m-3">
-          {ranked.map((t) => (
-            <div key={t.symbol} className="bg-surface px-2.5 py-2">
-              <div className="text-[10px] tracking-wider text-muted">
-                <InstrumentHover symbol={t.symbol} change1d={t.change_1d}>
-                  {t.symbol}
-                </InstrumentHover>
+        <div className="-m-3 max-w-[calc(100%+1.5rem)] overflow-x-auto">
+          <div className="grid min-w-[760px] grid-cols-11 gap-px bg-hairline">
+            {ranked.map((t) => (
+              <div key={t.symbol} className="bg-surface px-2.5 py-2">
+                <div className="text-[10px] tracking-wider text-muted">
+                  <InstrumentHover symbol={t.symbol} change1d={t.change_1d}>
+                    {t.symbol}
+                  </InstrumentHover>
+                </div>
+                <div className="num text-[14px]">{t.last_close.toFixed(2)}</div>
+                <div className={`num text-[12px] ${t.change_1d >= 0 ? "text-up" : "text-down"}`}>
+                  {t.change_1d >= 0 ? "▲" : "▼"} {(Math.abs(t.change_1d) * 100).toFixed(2)}%
+                </div>
               </div>
-              <div className="num text-[14px]">{t.last_close.toFixed(2)}</div>
-              <div className={`num text-[12px] ${t.change_1d >= 0 ? "text-up" : "text-down"}`}>
-                {t.change_1d >= 0 ? "▲" : "▼"} {(Math.abs(t.change_1d) * 100).toFixed(2)}%
-              </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       </Panel>
 
       {/* Zone C — analytics + console */}
-      <div className="grid grid-cols-[1fr_1.2fr] gap-3">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_1.2fr]">
         <Panel title="Benchmark tail risk" note="daily ES 97.5% · 5y">
           {data.benchmark_es !== null && (
             <div className="num text-[26px]">{(data.benchmark_es * 100).toFixed(2)}%</div>

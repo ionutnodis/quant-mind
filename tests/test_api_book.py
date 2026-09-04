@@ -46,6 +46,8 @@ def store(tmp_path) -> BarStore:
     s.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)  # SPY
     s.write_bars(con_id=2, bar_size="1d", bars=_bars(seed=2), meta=meta)  # QQQ
     s.write_symbol_map({"SPY": 1, "QQQ": 2})
+    s.write_instrument_metadata("SPY", {"currency": "USD", "exchange": "ARCA"})
+    s.write_instrument_metadata("QQQ", {"currency": "USD", "exchange": "NASDAQ"})
     return s
 
 
@@ -76,6 +78,34 @@ def test_pin_unknown_symbol_is_422(store):
     r = client.post("/api/book/pin", json={"positions": [{"symbol": "NOPE", "qty": 1}]})
     assert r.status_code == 422
     assert "NOPE" in r.json()["detail"]
+
+
+def test_manual_pin_rejects_currency_that_conflicts_with_instrument_master(store):
+    response = _client(store).post(
+        "/api/book/pin",
+        json={"positions": [{"symbol": "SPY", "qty": 1, "currency": "EUR"}]},
+    )
+
+    assert response.status_code == 422
+    assert "currency" in response.json()["detail"]
+
+
+def test_manual_pin_without_authoritative_currency_cannot_enter_analysis(tmp_path):
+    store = BarStore(tmp_path)
+    store.write_symbol_map({"MYSTERY": 9})
+    client = _client(store)
+
+    pinned = client.post(
+        "/api/book/pin", json={"positions": [{"symbol": "MYSTERY", "qty": 1}]}
+    )
+
+    assert pinned.status_code == 200
+    assert pinned.json()["positions"][0]["currency"] == "UNKNOWN"
+    from quantmind.api.routers.book import read_book_positions
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException, match="FX normalization"):
+        read_book_positions(store, pinned.json()["snapshot_id"])
 
 
 @pytest.mark.parametrize(
@@ -195,6 +225,70 @@ def test_pin_current_book_with_broker_persists_a_resolvable_snapshot(store):
     assert r.json() == pinned.json()
 
 
+def test_broker_instrument_identity_survives_preview_pin_and_read(store):
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=987654,
+                symbol="ASML",
+                qty=12,
+                sec_type="STK",
+                multiplier=1.0,
+                currency="EUR",
+                exchange="AEB",
+            ),
+        ),
+        as_of="2026-09-04T00:00:00Z",
+    )
+    client = _client(store, broker=FakeBroker(portfolio))
+
+    preview = client.get("/api/book/current")
+    pinned = client.post("/api/book/pin", json={})
+    loaded = client.get(f"/api/book/{pinned.json()['snapshot_id']}")
+
+    assert preview.status_code == pinned.status_code == loaded.status_code == 200
+    for body in (preview.json(), pinned.json(), loaded.json()):
+        assert body["positions"][0]["currency"] == "EUR"
+        assert body["positions"][0]["exchange"] == "AEB"
+
+    persisted = json.loads(
+        (store.root / "books" / f"{pinned.json()['snapshot_id']}.json").read_text()
+    )
+    assert persisted["positions"][0]["currency"] == "EUR"
+    assert persisted["positions"][0]["exchange"] == "AEB"
+
+
+def test_legacy_book_without_instrument_identity_remains_readable(store):
+    snapshot_id = "abcdef012345"
+    books = store.root / "books"
+    books.mkdir()
+    (books / f"{snapshot_id}.json").write_text(
+        json.dumps(
+            {
+                "snapshot_id": snapshot_id,
+                "valuation_ts": "2026-09-04T12:00:00Z",
+                "base_currency": "USD",
+                "positions": [
+                    {
+                        "symbol": "SPY",
+                        "qty": 10,
+                        "con_id": 1,
+                        "sec_type": "STK",
+                        "multiplier": 1,
+                    }
+                ],
+            }
+        )
+    )
+
+    response = _client(store).get(f"/api/book/{snapshot_id}")
+
+    assert response.status_code == 200
+    position = response.json()["positions"][0]
+    assert position["currency"] is None
+    assert position["exchange"] is None
+
+
 def test_repinning_identical_content_at_the_same_valuation_ts_is_idempotent(store):
     # Content-hashed ids (quantmind.core.snapshot.BookSnapshot, unit-tested in
     # tests/test_snapshot.py for determinism): pinning the identical
@@ -266,6 +360,58 @@ def test_two_books_differing_only_by_strike_get_different_snapshot_ids(store):
     assert r1.json()["snapshot_id"] != r2.json()["snapshot_id"]
 
 
+def test_live_books_from_different_account_scopes_get_different_ids(store):
+    from quantmind.api.routers.book import _pin_and_respond
+
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=1,
+                symbol="SPY",
+                qty=10,
+                currency="USD",
+                exchange="ARCA",
+            ),
+        ),
+        as_of="2026-09-04T12:00:00Z",
+    )
+
+    first = _pin_and_respond(
+        store,
+        portfolio,
+        "2026-09-04T12:00:00Z",
+        source="live_ibkr",
+        account_fingerprint="aaaaaaaaaaaa",
+        broker_mode="paper",
+    )
+    second = _pin_and_respond(
+        store,
+        portfolio,
+        "2026-09-04T12:00:00Z",
+        source="live_ibkr",
+        account_fingerprint="bbbbbbbbbbbb",
+        broker_mode="paper",
+    )
+
+    assert first.snapshot_id != second.snapshot_id
+
+
+def test_v2_snapshot_rejects_valid_json_content_tampering(store):
+    client = _client(store)
+    pinned = client.post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 10}]}
+    ).json()
+    path = store.root / "books" / f"{pinned['snapshot_id']}.json"
+    payload = json.loads(path.read_text())
+    payload["positions"][0]["qty"] = 999
+    path.write_text(json.dumps(payload))
+
+    response = client.get(f"/api/book/{pinned['snapshot_id']}")
+
+    assert response.status_code == 422
+    assert "corrupted" in response.json()["detail"]
+
+
 def test_book_ref_with_invalid_format_is_422_not_500(store):
     client = _client(store)
     r = client.get("/api/book/does-not-exist")
@@ -296,6 +442,18 @@ def test_corrupted_book_snapshot_file_is_422_not_500(store):
     r = client.get(f"/api/book/{bad_id}")
     assert r.status_code == 422
     assert "corrupted" in r.json()["detail"].lower()
+
+
+def test_non_object_book_snapshot_file_is_422_not_500(store):
+    from quantmind.api.routers.book import _books_dir
+
+    bad_id = "abcdef012345"
+    (_books_dir(store) / f"{bad_id}.json").write_text("null")
+
+    response = _client(store).get(f"/api/book/{bad_id}")
+
+    assert response.status_code == 422
+    assert "corrupted" in response.json()["detail"].lower()
 
 
 def test_expiry_accepts_iso_and_yyyymmdd_forms(store):
@@ -329,7 +487,16 @@ def test_broker_sourced_option_leg_without_strike_is_422_on_book_ref_resolution(
     # leg, pinning it must not silently let downstream consumers treat
     # it as a bare stock position (finding 1.iv: honest refusal).
     portfolio = Portfolio(
-        positions=(Position(con_id=1, symbol="SPY", qty=2, sec_type="OPT", multiplier=100.0),),
+        positions=(
+            Position(
+                con_id=1,
+                symbol="SPY",
+                qty=2,
+                sec_type="OPT",
+                multiplier=100.0,
+                currency="USD",
+            ),
+        ),
         as_of="2026-07-24T00:00:00Z",
     )
     client = _client(store, broker=FakeBroker(portfolio))
@@ -343,4 +510,106 @@ def test_broker_sourced_option_leg_without_strike_is_422_on_book_ref_resolution(
     with pytest.raises(HTTPException) as exc_info:
         read_book_positions(store, snapshot_id)
     assert exc_info.value.status_code == 422
-    assert "strike/expiry" in exc_info.value.detail
+    assert "strike/expiry/right" in exc_info.value.detail
+
+
+def test_persisted_option_leg_without_right_is_refused(store):
+    from quantmind.api.routers.book import _books_dir, read_book_positions
+    from fastapi import HTTPException
+
+    snapshot_id = "abcdef012345"
+    (_books_dir(store) / f"{snapshot_id}.json").write_text(
+        json.dumps(
+            {
+                "snapshot_id": snapshot_id,
+                "valuation_ts": "2026-09-04T12:00:00Z",
+                "base_currency": "USD",
+                "positions": [
+                    {
+                        "symbol": "SPY",
+                        "qty": 1,
+                        "con_id": 1,
+                        "sec_type": "OPT",
+                        "multiplier": 100,
+                        "strike": 700,
+                        "expiry": "20261218",
+                        "right": None,
+                        "currency": "USD",
+                    }
+                ],
+            }
+        )
+    )
+
+    with pytest.raises(HTTPException, match="strike/expiry/right"):
+        read_book_positions(store, snapshot_id)
+
+
+@pytest.mark.parametrize("sec_type", ["FUT", "CFD", "BOND"])
+def test_resolved_non_stock_contract_type_is_preserved_and_refused(store, sec_type):
+    from fastapi import HTTPException
+
+    from quantmind.api.routers._shared import refuse_unsupported_contract_legs
+    from quantmind.api.routers.book import _books_dir, read_book_positions
+
+    snapshot_id = "abcdef012345"
+    (_books_dir(store) / f"{snapshot_id}.json").write_text(
+        json.dumps(
+            {
+                "snapshot_id": snapshot_id,
+                "valuation_ts": "2026-09-04T12:00:00Z",
+                "base_currency": "USD",
+                "positions": [
+                    {
+                        "symbol": "SPY",
+                        "qty": 1,
+                        "con_id": 1,
+                        "sec_type": sec_type,
+                        "multiplier": 1,
+                        "currency": "USD",
+                    }
+                ],
+            }
+        )
+    )
+
+    positions = read_book_positions(store, snapshot_id)
+
+    assert positions[0].sec_type == sec_type
+    with pytest.raises(HTTPException, match="cannot value"):
+        refuse_unsupported_contract_legs(positions, route_name="What-If")
+
+
+def test_broker_sourced_option_terms_survive_pin_and_book_ref_resolution(store):
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=777,
+                symbol="SPY",
+                qty=-2,
+                sec_type="OPT",
+                multiplier=100.0,
+                strike=700.0,
+                expiry="20261218",
+                right="P",
+                currency="USD",
+            ),
+        ),
+        as_of="2026-09-04T00:00:00Z",
+    )
+    client = _client(store, broker=FakeBroker(portfolio))
+
+    pinned = client.post("/api/book/pin", json={})
+
+    assert pinned.status_code == 200
+    assert pinned.json()["positions"][0]["strike"] == 700.0
+    assert pinned.json()["positions"][0]["expiry"] == "20261218"
+    assert pinned.json()["positions"][0]["right"] == "P"
+
+    from quantmind.api.routers.book import read_book_positions
+
+    legs = read_book_positions(store, pinned.json()["snapshot_id"])
+    assert legs[0].con_id == 777
+    assert legs[0].strike == 700.0
+    assert legs[0].expiry == "20261218"
+    assert legs[0].right == "P"

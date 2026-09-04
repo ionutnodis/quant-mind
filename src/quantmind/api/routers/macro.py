@@ -79,7 +79,7 @@ def _series_points(series: pd.Series, max_points: int) -> list[SeriesPoint]:
 def _read_named_series(store, name: str) -> pd.Series | None:
     try:
         s = store.read_series(name)
-    except FileNotFoundError:
+    except (FileNotFoundError, KeyError, OSError, ValueError):
         return None
     return s if len(s) > 0 else None
 
@@ -90,7 +90,7 @@ def _rotation_row(store, symbol_map: dict[str, int], symbol: str) -> tuple[Rotat
         return None, None
     try:
         bars, _ = store.read_bars(con_id=con_id, bar_size="1d")
-    except FileNotFoundError:
+    except (FileNotFoundError, KeyError, OSError, ValueError):
         return None, None
     close = bars["close"]
     if len(close) == 0:

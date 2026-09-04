@@ -183,3 +183,60 @@ async def snapshot_option_quotes(
             quotes.extend(_ticker_to_quote(chain.underlying_symbol, t) for t in tickers)
         await sleep(pace_seconds)
     return quotes
+
+
+async def snapshot_held_option_quotes(
+    ib,
+    positions: Sequence,
+    sleep=asyncio.sleep,
+    pace_seconds: float = 1.0,
+    batch_size: int = 50,
+    market_data_type: int = 4,
+) -> list[OptionQuote]:
+    """Snapshot exact held contracts, including weeklies, LEAPS and far strikes.
+
+    The authoritative IBKR conId is carried onto each request. Surface sampling
+    remains bounded, while the book itself is never excluded by that sample.
+    """
+    from ib_async import Option
+
+    if hasattr(ib, "reqMarketDataType"):
+        ib.reqMarketDataType(market_data_type)
+
+    contracts = []
+    for position in positions:
+        if (
+            getattr(position, "sec_type", None) != "OPT"
+            or getattr(position, "strike", None) is None
+            or getattr(position, "expiry", None) is None
+            or getattr(position, "right", None) not in {"C", "P"}
+        ):
+            continue
+        contract = Option(
+            position.symbol,
+            position.expiry,
+            position.strike,
+            position.right,
+            getattr(position, "exchange", None) or "SMART",
+            str(position.multiplier),
+            getattr(position, "currency", None) or "USD",
+        )
+        contract.conId = position.con_id
+        contracts.append(contract)
+
+    quotes: list[OptionQuote] = []
+    for i in range(0, len(contracts), batch_size):
+        batch = contracts[i : i + batch_size]
+        qualified_raw = await ib.qualifyContractsAsync(*batch)
+        qualified = [
+            contract
+            for contract in qualified_raw
+            if contract is not None and getattr(contract, "conId", None)
+        ]
+        if qualified:
+            tickers = await ib.reqTickersAsync(*qualified)
+            quotes.extend(
+                _ticker_to_quote(ticker.contract.symbol, ticker) for ticker in tickers
+            )
+        await sleep(pace_seconds)
+    return quotes

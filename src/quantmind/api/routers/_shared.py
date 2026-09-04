@@ -84,7 +84,7 @@ def read_close_series(store, con_id: int, symbol: str, years: int) -> pd.Series:
     the symbol, never a 500 (pattern shared by whatif.py and hedge.py)."""
     try:
         bars, _ = store.read_bars(con_id=con_id, bar_size="1d")
-    except FileNotFoundError:
+    except (FileNotFoundError, KeyError, OSError, ValueError):
         raise HTTPException(422, detail=f"symbol {symbol!r} has no cached bars")
     series = bars["close"]
     if years > 0:
@@ -107,6 +107,8 @@ class PositionIn(BaseModel):
     expiry: str | None = None
     right: Literal["C", "P"] | None = None
     multiplier: float | None = None
+    currency: str | None = None
+    exchange: str | None = None
 
     @field_validator("qty")
     @classmethod
@@ -152,7 +154,8 @@ def refuse_unsupported_contract_legs(
         {
             p.symbol
             for p in positions
-            if p.right is not None
+            if getattr(p, "sec_type", "STK") != "STK"
+            or p.right is not None
             or p.strike is not None
             or p.expiry is not None
             or (p.multiplier is not None and not math.isclose(p.multiplier, 1.0))
@@ -162,7 +165,7 @@ def refuse_unsupported_contract_legs(
         raise HTTPException(
             422,
             detail=(
-                f"{route_name} cannot value option contracts or non-unit-multiplier legs "
+                f"{route_name} cannot value option/non-stock contracts or non-unit-multiplier legs "
                 f"with the legacy share-return model: {unsupported}"
             ),
         )

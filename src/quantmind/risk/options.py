@@ -17,6 +17,8 @@ from typing import Sequence
 import pandas as pd
 from scipy.stats import norm
 
+_MIN_VOLATILITY = 1e-6
+
 
 @dataclass(frozen=True)
 class OptionLeg:
@@ -37,6 +39,8 @@ class Greeks:
 
 
 def _d1_d2(spot: float, strike: float, t: float, r: float, sigma: float) -> tuple[float, float]:
+    if not math.isfinite(sigma) or sigma <= 0:
+        raise ValueError("volatility must be finite and positive")
     d1 = (math.log(spot / strike) + (r + 0.5 * sigma**2) * t) / (sigma * math.sqrt(t))
     return d1, d1 - sigma * math.sqrt(t)
 
@@ -87,10 +91,11 @@ def stress_grid(
     def book_value(s: float, vol_shift: float) -> float:
         value = shares * s
         for leg in legs:
+            shocked_iv = max(leg.iv + vol_shift, _MIN_VOLATILITY)
             value += (
                 leg.qty
                 * leg.multiplier
-                * bs_price(s, leg.strike, leg.expiry_years, r, leg.iv + vol_shift, leg.is_call)
+                * bs_price(s, leg.strike, leg.expiry_years, r, shocked_iv, leg.is_call)
             )
         return value
 

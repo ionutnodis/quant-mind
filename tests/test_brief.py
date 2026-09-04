@@ -57,3 +57,12 @@ def test_brief_empty_store_yields_empty_brief(tmp_path):
     assert brief.tiles == []
     assert brief.benchmark_es is None
     assert brief.as_of is None
+
+
+def test_brief_skips_a_mapped_symbol_whose_cache_file_is_missing(store):
+    store.write_symbol_map({**store.read_symbol_map(), "MISSING": 999})
+
+    brief = build_brief(store, benchmark="SPY")
+
+    assert {tile.symbol for tile in brief.tiles} == {"SPY", "QQQ", "GLD"}
+    assert set(brief.correlation.columns) == {"SPY", "QQQ", "GLD"}

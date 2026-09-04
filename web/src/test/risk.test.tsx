@@ -172,6 +172,18 @@ test("renders symbol picker, factor builder, and single-factor regression stats 
   expect(screen.getByText(/2\.00%/)).toBeInTheDocument(); // idiosyncratic share
 });
 
+test("keeps Risk authoring controls in breakpoint-gated regions with neutral actions", async () => {
+  mockHappyPath();
+  renderRisk();
+  await screen.findByTestId("regression-scatter");
+
+  expect(screen.getByRole("combobox", { name: /^symbol$/i }).closest(".authoring-only")).not.toBeNull();
+  expect(screen.getByRole("combobox", { name: /primary factor/i }).closest(".authoring-only-block")).not.toBeNull();
+  const run = screen.getByRole("button", { name: /run monte carlo/i });
+  expect(run.closest(".authoring-only")).not.toBeNull();
+  expect(run).not.toHaveClass("border-you", "bg-you/10", "text-you");
+});
+
 test("empty cache shows structured empty state, not a crash", async () => {
   server.use(
     http.get("/api/brief", () =>

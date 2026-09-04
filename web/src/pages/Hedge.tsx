@@ -14,12 +14,12 @@
 // component (this page's own row builder was its base) adds "Load current
 // book" (explicit POST /api/book/pin) and book_ref submission — see WhatIf.tsx's
 // identical pattern.
-import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { BookBuilder, newBookRow, rowsToPositions, snapshotToRows, type BookRow } from "../components/BookBuilder";
 import { Panel } from "../components/Panel";
 import { request } from "../lib/api";
-import type { BookSnapshotOut } from "../lib/book";
+import { getBook, readActiveBookRef, type BookSnapshotOut } from "../lib/book";
 
 interface HedgeCandidate {
   symbol: string;
@@ -90,11 +90,25 @@ function pct(x: number | null | undefined): string {
 }
 
 export function Hedge() {
-  const [rows, setRows] = useState<BookRow[]>([newBookRow()]);
+  const [requestedBookRef] = useState(() => readActiveBookRef()?.trim() || null);
+  const [rows, setRows] = useState<BookRow[]>(() => requestedBookRef ? [] : [newBookRow()]);
   // book_ref (wave-3 Task A1's book-flow spine): set when "Load current
   // book" resolves, cleared on any row edit (see WhatIf.tsx's identical
   // pattern) — an edited book submits its (now-inline) positions instead.
   const [bookRef, setBookRef] = useState<string | null>(null);
+  const [linkedBookLoaded, setLinkedBookLoaded] = useState(requestedBookRef === null);
+  const linkedBook = useQuery({
+    queryKey: ["book", requestedBookRef],
+    queryFn: () => getBook(requestedBookRef!),
+    enabled: requestedBookRef !== null,
+    staleTime: Infinity,
+  });
+  useEffect(() => {
+    if (!linkedBook.data) return;
+    setRows(snapshotToRows(linkedBook.data));
+    setBookRef(linkedBook.data.snapshot_id);
+    setLinkedBookLoaded(true);
+  }, [linkedBook.data]);
   const [targetBeta, setTargetBeta] = useState(0);
   const [years, setYears] = useState(5);
   // Drawdown budget for the resilience / leverage-headroom lens (0.25 = 25%).
@@ -131,12 +145,27 @@ export function Hedge() {
     setBookRef(snapshot.snapshot_id);
   }
 
+  if (requestedBookRef && !linkedBookLoaded) {
+    return (
+      <Panel title="Book" note={`book ${requestedBookRef}`}>
+        {linkedBook.isError ? (
+          <p className="text-down text-[11px]">
+            Pinned book {requestedBookRef} unavailable: {String(linkedBook.error)}
+          </p>
+        ) : (
+          <p className="text-muted text-[11px]">Loading pinned book {requestedBookRef}…</p>
+        )}
+      </Panel>
+    );
+  }
+
   return (
-    <div className="grid grid-cols-[360px_1fr] gap-3 max-w-[1600px]">
+    <div className="grid w-full grid-cols-1 gap-3 xl:grid-cols-[360px_1fr]">
       {/* LEFT — Objective + Book builder */}
       <div className="space-y-3">
-        <Panel title="Objective" note="beta target">
-          <div className="space-y-3">
+        <div className="authoring-only-block space-y-3">
+          <Panel title="Objective" note="beta target">
+            <div className="space-y-3">
             <div>
               <label htmlFor="hedge-objective-kind" className="text-[10px] tracking-wider uppercase text-muted block mb-1">
                 Kind
@@ -195,35 +224,36 @@ export function Hedge() {
                 onChange={(e) => setDrawdownBudget(Number(e.target.value))}
               />
             </div>
-          </div>
-        </Panel>
+            </div>
+          </Panel>
 
-        <Panel title="Book" note={`${rows.length} row${rows.length === 1 ? "" : "s"}`}>
-          <BookBuilder
-            rows={rows}
-            onRowsChange={handleRowsChange}
-            onUseCurrentBook={handleUseCurrentBook}
-            label="Positions"
-          />
-        </Panel>
+          <Panel title="Book" note={`${rows.length} row${rows.length === 1 ? "" : "s"}`}>
+            <BookBuilder
+              rows={rows}
+              onRowsChange={handleRowsChange}
+              onUseCurrentBook={handleUseCurrentBook}
+              label="Positions"
+            />
+          </Panel>
 
-        <button
-          type="button"
-          className="w-full border border-you/60 bg-you/10 hover:bg-you/20 text-you text-[12px] py-1.5 disabled:opacity-40 disabled:text-muted disabled:border-hairline disabled:bg-transparent"
-          disabled={run.isPending}
-          onClick={() => {
-            run.mutate();
-            leverage.mutate();
-          }}
-        >
-          {run.isPending ? "Running…" : "Run"}
-        </button>
-        {run.isError && (
-          <p className="text-down text-[11px]">{String(run.error?.message ?? run.error)}</p>
-        )}
-        {leverage.isError && (
-          <p className="text-down text-[11px]">Resilience: {String(leverage.error?.message ?? leverage.error)}</p>
-        )}
+          <button
+            type="button"
+            className="w-full border border-hairline bg-elevated py-1.5 text-[12px] text-ink hover:border-market hover:bg-hairline disabled:border-hairline disabled:bg-transparent disabled:text-muted disabled:opacity-40"
+            disabled={run.isPending}
+            onClick={() => {
+              run.mutate();
+              leverage.mutate();
+            }}
+          >
+            {run.isPending ? "Running…" : "Run"}
+          </button>
+          {run.isError && (
+            <p className="text-down text-[11px]">{String(run.error?.message ?? run.error)}</p>
+          )}
+          {leverage.isError && (
+            <p className="text-down text-[11px]">Resilience: {String(leverage.error?.message ?? leverage.error)}</p>
+          )}
+        </div>
 
         {leverage.data && (
           <Panel title="Resilience" note={`drawdown budget ${pct(leverage.data.drawdown_budget)}`}>

@@ -10,6 +10,12 @@ def test_bs_price_matches_textbook_value():
     )
 
 
+@pytest.mark.parametrize("sigma", [0.0, -0.01])
+def test_bs_price_rejects_non_positive_volatility(sigma):
+    with pytest.raises(ValueError, match="volatility"):
+        bs_price(spot=100, strike=100, t=1.0, r=0.0, sigma=sigma, is_call=True)
+
+
 def test_put_call_parity():
     c = bs_price(spot=105, strike=100, t=0.5, r=0.03, sigma=0.25, is_call=True)
     p = bs_price(spot=105, strike=100, t=0.5, r=0.03, sigma=0.25, is_call=False)
@@ -41,6 +47,21 @@ def test_stress_grid_zero_shock_cell_is_zero_pnl():
     leg = OptionLeg(qty=1, strike=100, expiry_years=0.5, is_call=True, iv=0.25)
     grid = stress_grid([leg], spot=100, r=0.0, spot_shocks=(-0.1, 0.0, 0.1), vol_shocks=(-0.05, 0.0, 0.05))
     assert grid.loc[0.0, 0.0] == pytest.approx(0.0, abs=1e-9)
+
+
+@pytest.mark.parametrize("iv", [0.03, 0.05])
+def test_stress_grid_floors_low_iv_after_negative_vol_shock(iv):
+    leg = OptionLeg(qty=1, strike=100, expiry_years=0.5, is_call=True, iv=iv)
+
+    grid = stress_grid(
+        [leg],
+        spot=100,
+        r=0.0,
+        spot_shocks=(-0.1, 0.0, 0.1),
+        vol_shocks=(-0.05, 0.0, 0.05),
+    )
+
+    assert all(value == value and abs(value) != float("inf") for value in grid.to_numpy().flat)
 
 
 def test_stress_grid_long_call_direction_and_vega_sign():

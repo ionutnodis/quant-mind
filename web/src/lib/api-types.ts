@@ -405,6 +405,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/setup/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Setup Status */
+        get: operations["get_setup_status_api_setup_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sync": {
         parameters: {
             query?: never;
@@ -464,12 +481,24 @@ export interface components {
         AccountOut: {
             /** Buying Power */
             buying_power: number | null;
+            /** Currency */
+            currency: string;
             /** Gross Position Value */
             gross_position_value: number | null;
             /** Net Liquidation */
             net_liquidation: number | null;
             /** Total Cash Value */
             total_cash_value: number | null;
+        };
+        /** ApiReadiness */
+        ApiReadiness: {
+            /**
+             * Status
+             * @constant
+             */
+            status: "ready";
+            /** Version */
+            version: string;
         };
         /**
          * AttributionOut
@@ -583,6 +612,10 @@ export interface components {
         BookPositionOut: {
             /** Con Id */
             con_id: number | null;
+            /** Currency */
+            currency?: string | null;
+            /** Exchange */
+            exchange?: string | null;
             /** Expiry */
             expiry?: string | null;
             /** Multiplier */
@@ -598,14 +631,54 @@ export interface components {
             /** Symbol */
             symbol: string;
         };
+        /** BookReadiness */
+        BookReadiness: {
+            /** Account Fingerprint */
+            account_fingerprint: string | null;
+            /** Age Days */
+            age_days: number | null;
+            /** Broker Mode */
+            broker_mode: ("paper" | "live" | "custom") | null;
+            /** Latest Snapshot Id */
+            latest_snapshot_id: string | null;
+            /** Option Positions */
+            option_positions: number;
+            /** Reason */
+            reason: ("empty_book" | "stale_snapshot" | "invalid_timestamp" | "legacy_scope" | "account_mismatch" | "mode_mismatch" | "unsupported_currency" | "unsupported_security_type") | null;
+            /** Snapshot Count */
+            snapshot_count: number;
+            /** Source */
+            source: ("live_ibkr" | "manual" | "legacy") | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "not_pinned" | "stale" | "unsupported" | "ready";
+            /** Unsupported Currencies */
+            unsupported_currencies: string[];
+            /** Unsupported Security Types */
+            unsupported_security_types: string[];
+            /** Valuation Ts */
+            valuation_ts: string | null;
+        };
         /** BookSnapshotOut */
         BookSnapshotOut: {
+            /** Account Fingerprint */
+            account_fingerprint?: string | null;
             /** Base Currency */
             base_currency: string;
+            /** Broker Mode */
+            broker_mode?: ("paper" | "live" | "custom") | null;
             /** Positions */
             positions: components["schemas"]["BookPositionOut"][];
             /** Snapshot Id */
             snapshot_id: string;
+            /**
+             * Source
+             * @default legacy
+             * @enum {string}
+             */
+            source: "live_ibkr" | "manual" | "legacy";
             /** Valuation Ts */
             valuation_ts: string;
         };
@@ -618,6 +691,24 @@ export interface components {
             correlation: components["schemas"]["Correlation"] | null;
             /** Tiles */
             tiles: components["schemas"]["Tile"][];
+        };
+        /** BrokerReadiness */
+        BrokerReadiness: {
+            /** Error */
+            error: string | null;
+            /** Mode */
+            mode: ("paper" | "live" | "custom") | null;
+            /**
+             * Provider
+             * @default IBKR
+             * @constant
+             */
+            provider: "IBKR";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "connecting" | "connected" | "unavailable";
         };
         /** Candle */
         Candle: {
@@ -1027,6 +1118,28 @@ export interface components {
             /** Symbols */
             symbols: string[];
         };
+        /** MacroDataReadiness */
+        MacroDataReadiness: {
+            /** Age Days */
+            age_days: number | null;
+            /** As Of */
+            as_of: string | null;
+            /** Corrupt Series */
+            corrupt_series: string[];
+            /** Missing Series */
+            missing_series: string[];
+            /** Ready Series */
+            ready_series: number;
+            /** Required Series */
+            required_series: number;
+            /** Stale Series */
+            stale_series: string[];
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "empty" | "incomplete" | "stale" | "ready";
+        };
         /** MacroResponse */
         MacroResponse: {
             /** As Of */
@@ -1039,6 +1152,30 @@ export interface components {
             /** Sectors */
             sectors: components["schemas"]["RotationRow"][];
             yields: components["schemas"]["YieldsBlock"] | null;
+        };
+        /** MarketDataReadiness */
+        MarketDataReadiness: {
+            /** Age Days */
+            age_days: number | null;
+            /** As Of */
+            as_of: string | null;
+            /** Corrupt Symbols */
+            corrupt_symbols: string[];
+            /** Missing Symbols */
+            missing_symbols: string[];
+            /** Ready Symbols */
+            ready_symbols: number;
+            /** Series */
+            series: number;
+            /** Stale Symbols */
+            stale_symbols: string[];
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "empty" | "incomplete" | "stale" | "ready";
+            /** Symbols */
+            symbols: number;
         };
         /** MonteCarloOut */
         MonteCarloOut: {
@@ -1165,19 +1302,56 @@ export interface components {
             /** Strike */
             strike: number;
         };
+        /** OptionsDataReadiness */
+        OptionsDataReadiness: {
+            /** Chain Age Days */
+            chain_age_days: number | null;
+            /** Chain As Of */
+            chain_as_of: string | null;
+            /** Missing Contracts */
+            missing_contracts: string[];
+            /** Priced Positions */
+            priced_positions: number;
+            /** Stale Chains */
+            stale_chains: string[];
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "not_required" | "missing" | "partial" | "stale" | "ready";
+            /** Total Positions */
+            total_positions: number;
+        };
         /**
          * OptionsSleeveOut
          * @description Requirement 3: per-underlying net Gamma/vega/theta + the spot x vol
          *     stress grid — renders only when option positions AND priceable chain
-         *     data exist; the two honest-empty `reason`s are documented on the module
-         *     docstring above.
+         *     data exist. Completeness counts legs with an exact usable mark, IV, and
+         *     underlier spot — every input required by the sleeve analytics.
          */
         OptionsSleeveOut: {
             /** Available */
             available: boolean;
+            /** Chain Age Days */
+            chain_age_days: number | null;
+            /** Chain As Of */
+            chain_as_of: string | null;
+            /** Chain Stale */
+            chain_stale: boolean | null;
+            /** Missing Positions */
+            missing_positions: number;
+            /** Priced Positions */
+            priced_positions: number;
             /** Reason */
             reason: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "complete" | "partial" | "unavailable";
             stress_grid: components["schemas"]["StressGridOut"] | null;
+            /** Total Positions */
+            total_positions: number;
             /** Underlyings */
             underlyings: components["schemas"]["SleeveUnderlyingOut"][];
         };
@@ -1225,6 +1399,10 @@ export interface components {
          *     docstring for the option-leg fields' optionality/defaulting convention.
          */
         PositionIn: {
+            /** Currency */
+            currency?: string | null;
+            /** Exchange */
+            exchange?: string | null;
             /** Expiry */
             expiry?: string | null;
             /** Multiplier */
@@ -1434,6 +1612,25 @@ export interface components {
             /** Value */
             value: number | null;
         };
+        /** SetupStatus */
+        SetupStatus: {
+            api: components["schemas"]["ApiReadiness"];
+            book: components["schemas"]["BookReadiness"];
+            broker: components["schemas"]["BrokerReadiness"];
+            macro_data: components["schemas"]["MacroDataReadiness"];
+            market_data: components["schemas"]["MarketDataReadiness"];
+            /**
+             * Next Action
+             * @enum {string}
+             */
+            next_action: "configure_account" | "start_gateway" | "wait_for_gateway" | "sync_market_data" | "sync_option_data" | "pin_book" | "resolve_currency" | "resolve_instruments" | "ready";
+            options_data: components["schemas"]["OptionsDataReadiness"];
+            /**
+             * Overall
+             * @enum {string}
+             */
+            overall: "needs_attention" | "ready";
+        };
         /** ShareRow */
         ShareRow: {
             /** Name */
@@ -1535,8 +1732,24 @@ export interface components {
             market_value: number | null;
             /** N Positions */
             n_positions: number;
+            /**
+             * Pnl Status
+             * @enum {string}
+             */
+            pnl_status: "empty" | "partial" | "complete";
+            /** Priced Market Value */
+            priced_market_value: number | null;
+            /** Priced Positions */
+            priced_positions: number;
+            /** Reported Unrealized Pnl */
+            reported_unrealized_pnl?: number | null;
             /** Unrealized Pnl */
             unrealized_pnl?: number | null;
+            /**
+             * Valuation Status
+             * @enum {string}
+             */
+            valuation_status: "empty" | "partial" | "complete";
         };
         /**
          * UnderlyingExposureOut
@@ -2338,6 +2551,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_setup_status_api_setup_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SetupStatus"];
                 };
             };
         };

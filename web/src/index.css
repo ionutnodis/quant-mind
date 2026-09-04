@@ -29,3 +29,36 @@ html {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
+
+/* Phone layouts are a read-only companion. Mutating portfolio controls only
+   appear once both dimensions support the authoring workspace. */
+.authoring-only,
+.authoring-only-block {
+  display: none;
+}
+
+.companion-only {
+  display: block;
+}
+
+@media (min-width: 768px) and (min-height: 600px) {
+  .authoring-only {
+    display: flex;
+  }
+
+  .authoring-only-block {
+    display: block;
+  }
+
+  .companion-only {
+    display: none;
+  }
+}
+
+@media (pointer: coarse), (any-pointer: coarse) {
+  .qm-target,
+  :where(a[href], button, input:not([type="hidden"]), select, textarea, [role="button"]) {
+    min-block-size: 44px;
+    min-inline-size: 44px;
+  }
+}

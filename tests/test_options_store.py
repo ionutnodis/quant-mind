@@ -48,6 +48,18 @@ def test_read_missing_underlier_raises_file_not_found(tmp_path):
         store.read_chain("SPY")
 
 
+def test_read_rejects_chain_with_missing_required_columns(tmp_path):
+    store = OptionsStore(tmp_path)
+    store.write_chain(
+        "SPY",
+        _chain_df().drop(columns=["con_id"]),
+        OptionsSnapshotMeta(as_of="2026-07-25", spot=452.10),
+    )
+
+    with pytest.raises(ValueError, match="missing columns"):
+        store.read_chain("SPY")
+
+
 def test_has_chain_reflects_presence(tmp_path):
     store = OptionsStore(tmp_path)
     assert store.has_chain("SPY") is False

@@ -16,9 +16,32 @@ from ib_async import AccountValue, BarData, Contract, ContractDetails
 from quantmind.broker.ib_broker import IbBroker, positions_to_cost_basis, positions_to_portfolio
 
 
-def _ib_pos(con_id, symbol, qty, sec_type="STK", multiplier="", avg_cost=0.0):
-    contract = SimpleNamespace(conId=con_id, symbol=symbol, secType=sec_type, multiplier=multiplier)
-    return SimpleNamespace(contract=contract, position=qty, avgCost=avg_cost)
+def _ib_pos(
+    con_id,
+    symbol,
+    qty,
+    sec_type="STK",
+    multiplier="",
+    avg_cost=0.0,
+    strike=0.0,
+    expiry="",
+    right="",
+    account="",
+    currency="",
+    exchange="",
+):
+    contract = SimpleNamespace(
+        conId=con_id,
+        symbol=symbol,
+        secType=sec_type,
+        multiplier=multiplier,
+        strike=strike,
+        lastTradeDateOrContractMonth=expiry,
+        right=right,
+        currency=currency,
+        exchange=exchange,
+    )
+    return SimpleNamespace(contract=contract, position=qty, avgCost=avg_cost, account=account)
 
 
 def test_stock_position_maps_with_unit_multiplier():
@@ -40,6 +63,66 @@ def test_option_position_maps_string_multiplier_to_float():
     assert pos.sec_type == "OPT"
     assert pos.multiplier == 100.0
     assert pos.qty == -2.0
+
+
+def test_option_position_without_multiplier_fails_closed():
+    with pytest.raises(ValueError, match="option contract 777.*multiplier"):
+        positions_to_portfolio(
+            [_ib_pos(777, "AAPL", -2.0, sec_type="OPT", multiplier="")],
+            as_of="2026-07-25",
+        )
+
+
+def test_option_position_preserves_contract_terms_needed_to_reprice_the_live_book():
+    portfolio = positions_to_portfolio(
+        [
+            _ib_pos(
+                777,
+                "AAPL",
+                -2.0,
+                sec_type="OPT",
+                multiplier="100",
+                strike=250.0,
+                expiry="20261218",
+                right="C",
+            )
+        ],
+        as_of="2026-09-04",
+    )
+
+    position = portfolio.positions[0]
+    assert position.strike == 250.0
+    assert position.expiry == "20261218"
+    assert position.right == "C"
+
+
+def test_position_preserves_ibkr_currency_and_exchange_identity():
+    portfolio = positions_to_portfolio(
+        [
+            _ib_pos(
+                12345,
+                "ASML",
+                12,
+                currency="EUR",
+                exchange="AEB",
+            )
+        ],
+        as_of="2026-09-04",
+    )
+
+    position = portfolio.positions[0]
+    assert position.currency == "EUR"
+    assert position.exchange == "AEB"
+
+
+def test_position_leaves_missing_ibkr_identity_unset_for_legacy_fakes():
+    portfolio = positions_to_portfolio(
+        [_ib_pos(265598, "AAPL", 100)], as_of="2026-09-04"
+    )
+
+    position = portfolio.positions[0]
+    assert position.currency == "UNKNOWN"
+    assert position.exchange is None
 
 
 def test_empty_or_blank_multiplier_defaults_to_one():
@@ -65,6 +148,39 @@ def test_positions_to_cost_basis_maps_con_id_to_avg_cost():
     assert costs == {1: 450.25, 2: 190.0}
 
 
+def test_positions_to_cost_basis_normalizes_option_contract_cost_to_unit_premium():
+    costs = positions_to_cost_basis(
+        [
+            _ib_pos(
+                777,
+                "AAPL",
+                2.0,
+                sec_type="OPT",
+                multiplier="100",
+                avg_cost=4229.1637,
+            )
+        ]
+    )
+
+    assert costs == {777: pytest.approx(42.291637)}
+
+
+def test_option_cost_basis_without_multiplier_fails_closed():
+    with pytest.raises(ValueError, match="option contract 777.*multiplier"):
+        positions_to_cost_basis(
+            [
+                _ib_pos(
+                    777,
+                    "AAPL",
+                    2.0,
+                    sec_type="OPT",
+                    multiplier="",
+                    avg_cost=4229.1637,
+                )
+            ]
+        )
+
+
 def test_positions_to_cost_basis_drops_zero_quantity_positions():
     # Matches positions_to_portfolio's own zero-qty drop (closed-during-session rows).
     costs = positions_to_cost_basis([_ib_pos(1, "X", 0.0, avg_cost=100.0)])
@@ -77,11 +193,19 @@ def test_positions_to_cost_basis_drops_zero_quantity_positions():
 class FakeIB:
     """Async ib_async.IB stub returning canned ContractDetails/BarData."""
 
-    def __init__(self, contract_details=None, bars=None, positions=None, account_values=None):
+    def __init__(
+        self,
+        contract_details=None,
+        bars=None,
+        positions=None,
+        account_values=None,
+        managed_accounts=None,
+    ):
         self._contract_details = contract_details or []
         self._bars = bars if bars is not None else []
         self._positions = positions if positions is not None else []
         self._account_values = account_values if account_values is not None else []
+        self._managed_accounts = managed_accounts if managed_accounts is not None else []
         self.reqContractDetails_calls = []
         self.reqHistoricalData_calls = []
         self.reqAccountSummary_calls = 0
@@ -103,6 +227,9 @@ class FakeIB:
 
     def accountSummary(self, account=""):
         return self._account_values
+
+    def managedAccounts(self):
+        return self._managed_accounts
 
 
 def _vix_contract_details(con_id=13455763):
@@ -192,6 +319,80 @@ async def test_get_avg_costs_empty_book_returns_empty_dict():
     assert await broker.get_avg_costs() == {}
 
 
+async def test_configured_account_filters_positions_and_cost_basis():
+    positions = [
+        _ib_pos(1, "NVDA", 100, avg_cost=120.0, account="U111"),
+        _ib_pos(2, "MU", 50, avg_cost=90.0, account="U222"),
+    ]
+    broker = IbBroker(
+        FakeIB(positions=positions, managed_accounts=["U111", "U222"]),
+        account_id="U222",
+    )
+
+    portfolio = await broker.get_portfolio()
+
+    assert [position.symbol for position in portfolio.positions] == ["MU"]
+    assert await broker.get_avg_costs() == {2: 90.0}
+
+
+async def test_multiple_managed_accounts_without_selection_fail_closed():
+    broker = IbBroker(
+        FakeIB(
+            positions=[
+                _ib_pos(1, "NVDA", 100, account="U111"),
+                _ib_pos(2, "MU", 50, account="U222"),
+            ],
+            managed_accounts=["U111", "U222"],
+        )
+    )
+
+    with pytest.raises(ValueError, match="QM_ACCOUNT_ID"):
+        await broker.get_portfolio()
+
+
+async def test_configured_account_must_be_visible_to_the_ibkr_session():
+    broker = IbBroker(
+        FakeIB(
+            positions=[_ib_pos(1, "NVDA", 100, account="U111")],
+            managed_accounts=["U111"],
+        ),
+        account_id="U999",
+    )
+
+    with pytest.raises(ValueError, match="does not match"):
+        await broker.get_portfolio()
+
+
+async def test_selected_advisor_account_uses_account_scoped_portfolio_updates():
+    class AdvisorIB(FakeIB):
+        def __init__(self):
+            super().__init__(managed_accounts=[f"U{i:03d}" for i in range(60)])
+            self.requested_accounts = []
+
+        async def reqPositionsAsync(self):
+            raise AssertionError("global reqPositions is unsupported for 50+ accounts")
+
+        async def reqAccountUpdatesAsync(self, account):
+            self.requested_accounts.append(account)
+
+        def portfolio(self, account=""):
+            assert account == "U042"
+            return [_ib_pos(42, "NVDA", 100, account=account, currency="USD")]
+
+        def accountValues(self, account=""):
+            return []
+
+    ib = AdvisorIB()
+    broker = IbBroker(ib, account_id="U042")
+
+    portfolio = await broker.get_portfolio()
+    costs = await broker.get_avg_costs()
+
+    assert [position.symbol for position in portfolio.positions] == ["NVDA"]
+    assert costs == {42: 0.0}
+    assert ib.requested_accounts == ["U042"]
+
+
 def _account_value(tag, value, currency="USD"):
     return AccountValue(account="DU1234567", tag=tag, value=value, currency=currency, modelCode="")
 
@@ -213,6 +414,7 @@ async def test_get_account_summary_maps_wanted_tags_to_floats():
         "total_cash_value": 20000.00,
         "gross_position_value": 105000.50,
         "buying_power": 60000.00,
+        "currency": "USD",
     }
     assert ib.reqAccountSummary_calls == 1
 
@@ -232,3 +434,40 @@ async def test_get_account_summary_unparseable_value_is_honest_none():
     broker = IbBroker(ib)
     summary = await broker.get_account_summary()
     assert summary["net_liquidation"] is None
+
+
+async def test_account_summary_uses_only_the_configured_account():
+    ib = FakeIB(
+        account_values=[
+            AccountValue(account="U111", tag="NetLiquidation", value="100", currency="USD", modelCode=""),
+            AccountValue(account="U222", tag="NetLiquidation", value="250", currency="USD", modelCode=""),
+        ],
+        managed_accounts=["U111", "U222"],
+    )
+    broker = IbBroker(ib, account_id="U222")
+
+    summary = await broker.get_account_summary()
+
+    assert summary["net_liquidation"] == 250.0
+
+
+async def test_account_summary_prefers_base_totals_over_currency_ledgers():
+    """Account updates may publish a base total plus per-currency ledgers.
+
+    The dashboard must never replace the converted account total with
+    whichever currency-specific row happened to arrive last.
+    """
+    ib = FakeIB(
+        account_values=[
+            _account_value("NetLiquidation", "125000.50", currency="BASE"),
+            _account_value("TotalCashValue", "20000.00", currency="BASE"),
+            _account_value("TotalCashValue", "18000.00", currency="USD"),
+            _account_value("TotalCashValue", "15000.00", currency="HKD"),
+        ]
+    )
+
+    summary = await IbBroker(ib).get_account_summary()
+
+    assert summary["net_liquidation"] == 125000.50
+    assert summary["total_cash_value"] == 20000.00
+    assert summary["currency"] is None

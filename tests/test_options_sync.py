@@ -16,6 +16,7 @@ import pytest
 
 from quantmind.datastore.options_store import OptionsStore
 from quantmind.datastore.store import BarMeta, BarStore
+from quantmind.portfolio import Position
 from quantmind.sources.options_sync import sync_options_chains
 
 
@@ -142,3 +143,72 @@ async def test_sync_raises_lookup_error_for_underlier_missing_from_symbol_map(ba
             options_store, bar_store, FakeIb(), underliers=["MSFT"], as_of=date(2026, 7, 24),
             sleep=FakeSleeper(),
         )
+
+
+async def test_sync_includes_an_exact_held_contract_outside_the_surface_sample(
+    bar_store, options_store
+):
+    held = Position(
+        con_id=987654,
+        symbol="SPY",
+        qty=-2,
+        sec_type="OPT",
+        multiplier=100,
+        strike=800.0,
+        expiry="20271217",
+        right="C",
+    )
+
+    await sync_options_chains(
+        options_store,
+        bar_store,
+        FakeIb(),
+        underliers=["SPY"],
+        held_contracts=[held],
+        as_of=date(2026, 7, 24),
+        sleep=FakeSleeper(),
+        pace_seconds=0.1,
+    )
+
+    frame, _ = options_store.read_chain("SPY")
+    held_rows = frame[
+        (frame["expiry"] == "20271217")
+        & (frame["strike"] == 800.0)
+        & (frame["right"] == "C")
+    ]
+    assert len(held_rows) == 1
+
+
+async def test_sync_preserves_distinct_contract_ids_with_identical_terms(
+    bar_store, options_store
+):
+    held = Position(
+        con_id=987654,
+        symbol="SPY",
+        qty=1,
+        sec_type="OPT",
+        multiplier=100,
+        strike=452.0,
+        expiry="20260821",
+        right="C",
+    )
+
+    await sync_options_chains(
+        options_store,
+        bar_store,
+        FakeIb(),
+        underliers=["SPY"],
+        held_contracts=[held],
+        as_of=date(2026, 7, 24),
+        sleep=FakeSleeper(),
+        pace_seconds=0.1,
+    )
+
+    frame, _ = options_store.read_chain("SPY")
+    matching = frame[
+        (frame["expiry"] == "20260821")
+        & (frame["strike"] == 452.0)
+        & (frame["right"] == "C")
+    ]
+    assert len(matching) == 2
+    assert matching["con_id"].nunique() == 2
