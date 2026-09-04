@@ -2,6 +2,35 @@
 
 All notable changes to QuantMind are documented in this file.
 
+## [0.5.0.0] - 2026-09-04
+
+### Added
+
+- Dated ECB FX ingestion and base-currency normalization for European stock/ETF portfolio values, What-If, Hedge, Risk, Monte Carlo, and factor regression paths.
+- Opt-in, ISIN-addressed UCITS ETF profile enrichment with a typed 30-day cache, provenance links, freshness states, and responsive instrument-sheet display.
+- Public-repository data-source and security boundaries, stronger local-secret/data exclusions, and a plain-language operator guide with current-product screenshots and clearly labeled roadmap mockups.
+
+### Changed
+
+- Portfolio and account summaries now preserve local-currency values, add explicit reporting-currency fields, and withhold totals or P&L that cannot be supported by dated conversion evidence.
+- Risk, instrument, What-If, Hedge, leverage, and historical-return paths now use the same reporting-currency normalization and expose the FX evidence behind the result.
+- Data sync now isolates symbol and source failures, publishes independent successful phases, bounds external downloads, and treats research/context instruments as optional rather than blocking a held book.
+- yfinance fallback now requires a validated quote currency and preserves the original quote convention; London pence/GBX bars are normalized to GBP before storage.
+- Setup now diagnoses required FX, UCITS profile freshness, reporting-currency changes, missing contract identity, and cross-currency option limitations with one explicit next action.
+
+### Fixed
+
+- FX refreshes publish immutable generation-addressed series before atomically switching the manifest, so an interrupted or same-second refresh cannot expose a mixed generation.
+- Foreign account summaries without a usable conversion rate now remain readable in their broker currency with a named warning instead of failing the full Portfolio response.
+- Historical portfolio marks and underlier exposures now use FX evidence from each mark's own observation date, preventing newer reference rates from leaking into older prices.
+- Option-only holdings resolve the exact IBKR underlier contract, justETF redirects are allowlisted before response bodies are read, and default hedge discovery fills its eligibility budget before truncating results.
+- What-If and Hedge now derive displayed marks, weights, valuation, and `as_of` from the same aligned observation; long/short hedge sizing uses gross exposure and candidate protection is compared on one common ES window.
+- Stale underlier marks can no longer produce portfolio exposure, option Greeks, or stress P&L, and foreign benchmark FX is loaded independently from held-position currencies.
+- Failed live-book discovery now remains a blocking cache requirement, same-ticker multi-listing conflicts fail closed, malformed instrument masters produce named evidence errors, and all documented sync entry points share a datastore-wide process lock.
+- Missing, corrupt, stale, malformed, path-traversing, and legacy FX/UCITS evidence now follows tested fail-closed or explicit-degraded behavior.
+- Analytical responses retain FX provenance, requested hedge candidates can no longer disappear silently, and older pinned books can be rebased into a new reporting-currency snapshot without rewriting history.
+- Non-USD risk views no longer subtract the USD `US3M` series when calculating alpha.
+
 ## [0.4.0.0] - 2026-09-04
 
 ### Added

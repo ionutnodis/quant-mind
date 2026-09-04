@@ -110,7 +110,7 @@ def create_app(
     allowed_origins: tuple[str, ...] | None = None,
     base_currency: str = "USD",
 ) -> FastAPI:
-    app = FastAPI(title="QuantMind API", version="0.4.0.0")
+    app = FastAPI(title="QuantMind API", version="0.5.0.0")
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_error(_request: Request, error: RequestValidationError):
