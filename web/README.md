@@ -1,7 +1,7 @@
 # QuantMind web client
 
 The React 19 client is the local-first interface for QuantMind's book, factor-risk,
-scenario, options, news, and research workflows. It talks only to the local FastAPI
+scenario, options, World monitoring, news, and research workflows. It talks only to the local FastAPI
 service through `/api`; Vite proxies that path in development.
 
 ## Run locally

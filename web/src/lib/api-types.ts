@@ -493,6 +493,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/world": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** World */
+        get: operations["world_api_world_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/world/profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save Profile
+         * @description One local investor lens; complete replacement, last write wins.
+         */
+        put: operations["save_profile_api_world_profile_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/world/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Refresh
+         * @description Single-flight, cadence-limited refresh. No user URLs or portfolio payload.
+         */
+        post: operations["refresh_api_world_refresh_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1648,6 +1705,42 @@ export interface components {
             /** R Squared */
             r_squared: number | null;
         };
+        /** RankedEvent */
+        RankedEvent: {
+            /** Id */
+            id: string;
+            /** Matched Symbols */
+            matched_symbols?: string[];
+            /** Published At */
+            published_at: string;
+            /** Reasons */
+            reasons?: string[];
+            /** Regions */
+            regions: string[];
+            /**
+             * Relevance
+             * @default 0
+             */
+            relevance: number;
+            /** Source Id */
+            source_id: string;
+            /** Source Name */
+            source_name: string;
+            /** Summary */
+            summary: string;
+            /**
+             * Time Kind
+             * @default published
+             * @enum {string}
+             */
+            time_kind: "published" | "observed";
+            /** Title */
+            title: string;
+            /** Topics */
+            topics: string[];
+            /** Url */
+            url: string;
+        };
         /** RegressionResponse */
         RegressionResponse: {
             /** Alpha Annualized */
@@ -2099,6 +2192,80 @@ export interface components {
             n_obs: number;
             /** Weights */
             weights: components["schemas"]["WeightOut"][];
+        };
+        /** WorldContext */
+        WorldContext: {
+            /** Book Ref */
+            book_ref: string | null;
+            /** Label */
+            label: string;
+            /** Symbols */
+            symbols: string[];
+        };
+        /** WorldProfile */
+        WorldProfile: {
+            /** Interests */
+            interests?: string[];
+            /** Regions */
+            regions?: string[];
+            /** Watch Symbols */
+            watch_symbols?: string[];
+        };
+        /** WorldRefreshResult */
+        WorldRefreshResult: {
+            /** Failed */
+            failed: number;
+            /** Skipped */
+            skipped: number;
+            /** Updated */
+            updated: number;
+        };
+        /** WorldResponse */
+        WorldResponse: {
+            /** As Of */
+            as_of: string | null;
+            context: components["schemas"]["WorldContext"];
+            /** Items */
+            items: components["schemas"]["RankedEvent"][];
+            profile: components["schemas"]["WorldProfile"];
+            /** Refreshing */
+            refreshing: boolean;
+            /** Sources */
+            sources: components["schemas"]["WorldSourceStatus"][];
+        };
+        /** WorldSourceStatus */
+        WorldSourceStatus: {
+            /** Access */
+            access: string;
+            /** Category */
+            category: string;
+            /** Description */
+            description: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Error */
+            error: string | null;
+            /** Homepage */
+            homepage: string;
+            /** Id */
+            id: string;
+            /** Item Count */
+            item_count: number;
+            /** Last Attempt */
+            last_attempt: string | null;
+            /** Last Success */
+            last_success: string | null;
+            /** Name */
+            name: string;
+            /** Next Refresh */
+            next_refresh: string | null;
+            /** Stale */
+            stale: boolean;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "never" | "ok" | "error" | "disabled";
         };
         /** YieldsBlock */
         YieldsBlock: {
@@ -2946,6 +3113,90 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    world_api_world_get: {
+        parameters: {
+            query?: {
+                book_ref?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    save_profile_api_world_profile_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorldProfile"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldProfile"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    refresh_api_world_refresh_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldRefreshResult"];
                 };
             };
         };

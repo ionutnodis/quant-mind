@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,6 +33,25 @@ class Settings(BaseSettings):
     # Public-repository safety: terms-sensitive profile retrieval is opt-in.
     # Cached profile data stays local and is never part of the source tree.
     ucits_metadata_enabled: bool = False
+    # World feeds run only on an explicit refresh. Social integrations are
+    # server-side opt-ins; enabling X acknowledges its metered API charges.
+    world_x_enabled: bool = False
+    world_x_bearer_token: SecretStr = SecretStr("")
+    world_x_query: str = ""
+    world_reddit_enabled: bool = False
+    world_reddit_client_id: str = ""
+    world_reddit_client_secret: SecretStr = SecretStr("")
+    world_reddit_refresh_token: SecretStr = SecretStr("")
+    world_reddit_user_agent: str = ""
+    world_reddit_subreddits: str = "investing,stocks,Economics"
+    world_sec_user_agent: str = ""
+
+    def world_config(self):
+        from quantmind.world.models import WorldConfig
+        return WorldConfig(**{
+            name: getattr(self, f"world_{name}")
+            for name in WorldConfig.model_fields
+        })
 
     @field_validator("base_currency")
     @classmethod
