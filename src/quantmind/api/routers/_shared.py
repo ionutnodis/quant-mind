@@ -158,11 +158,7 @@ def resolve_symbol_currencies(
         master_fields = metadata.get(symbol) or {}
         master_con_id = master_fields.get("con_id")
         mapped_con_id = symbol_map.get(symbol)
-        if (
-            master_con_id is not None
-            and mapped_con_id is not None
-            and master_con_id != mapped_con_id
-        ):
+        if master_fields and master_con_id != mapped_con_id:
             raise HTTPException(
                 422,
                 detail=(

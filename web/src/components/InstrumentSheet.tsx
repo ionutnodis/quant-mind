@@ -7,6 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { type RefObject, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { request } from "../lib/api";
+import { ariaIdToken } from "../lib/aria";
 import { CandleChart, type Candle } from "./CandleChart";
 import { Panel, Skeleton } from "./Panel";
 import { getInstrument } from "./InstrumentHover";
@@ -49,6 +50,12 @@ function fact(value: string | null): string {
   return value?.trim() || "—";
 }
 
+function sourcedPercentage(value: string | null): string {
+  if (value === null) return "—";
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? `${parsed.toFixed(2)}%` : "—";
+}
+
 export function InstrumentSheet({
   symbol,
   onClose,
@@ -71,6 +78,7 @@ export function InstrumentSheet({
     staleTime: 5 * 60 * 1000,
   });
   const profile = instrument.data?.ucits_profile ?? null;
+  const dialogTitleId = `instrument-sheet-title-${ariaIdToken(symbol)}`;
 
   useEffect(() => {
     const previouslyFocused = document.activeElement as HTMLElement | null;
@@ -124,7 +132,7 @@ export function InstrumentSheet({
       data-testid={`instrument-sheet-${symbol}`}
       role="dialog"
       aria-modal="true"
-      aria-labelledby={`instrument-sheet-title-${symbol}`}
+      aria-labelledby={dialogTitleId}
       tabIndex={-1}
       className="fixed inset-0 z-30 flex items-start justify-center overflow-y-auto bg-ground/70 px-2 py-4 sm:pt-16"
       onClick={(e) => {
@@ -132,7 +140,7 @@ export function InstrumentSheet({
       }}
     >
       <div className="w-full max-w-[640px]">
-        <h2 id={`instrument-sheet-title-${symbol}`} className="sr-only">
+        <h2 id={dialogTitleId} className="sr-only">
           {symbol} instrument detail
         </h2>
         <Panel
@@ -251,31 +259,40 @@ export function InstrumentSheet({
                 </div>
               </div>
 
-              {instrument.data.risk && instrument.data.risk.status !== "ready" ? (
+              {instrument.data.risk ? (
                 <section
                   className="mt-3 border-t border-hairline pt-3"
-                  aria-label="Risk readiness"
+                  aria-label="Risk evidence"
                 >
-                  <div className="text-[10px] uppercase tracking-widest text-warning">
+                  <div
+                    className={`text-[10px] uppercase tracking-widest ${
+                      instrument.data.risk.status === "ready" ? "text-up" : "text-warning"
+                    }`}
+                  >
                     Risk {instrument.data.risk.status}
                   </div>
                   <p className="mt-1 text-[12px] text-muted">
                     {instrument.data.risk.note}
                   </p>
+                  <p className="num mt-1 text-[11px] text-muted">
+                    Reporting {instrument.data.risk.base_currency} · FX{" "}
+                    {instrument.data.risk.fx.source ?? "identity"} · as of{" "}
+                    {instrument.data.risk.fx.as_of ?? "not required"}
+                  </p>
                 </section>
               ) : null}
 
               {profile ? (
-                <section className="mt-3 border-t border-hairline pt-3" aria-label="UCITS profile">
+                <section className="mt-3 border-t border-hairline pt-3" aria-label="European ETF sourced profile">
                   <div className="flex flex-wrap items-baseline justify-between gap-2">
-                    <h3 className="text-base uppercase tracking-widest text-muted md:text-[12px]">UCITS profile</h3>
-                    <span className="num text-base text-up md:text-[12px]">● Verified cache</span>
+                    <h3 className="text-base uppercase tracking-widest text-muted md:text-[12px]">European ETF sourced profile</h3>
+                    <span className="num text-base text-up md:text-[12px]">● Source cache fresh</span>
                   </div>
                   <p className="mt-1 text-base text-ink md:text-[12px]">{fact(profile.fund_name)}</p>
                   <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-4">
                     {[
                       ["Issuer", fact(profile.issuer)],
-                      ["TER", profile.ter_pct == null ? "—" : `${Number(profile.ter_pct).toFixed(2)}%`],
+                      ["TER", sourcedPercentage(profile.ter_pct)],
                       ["Distribution", profile.distribution_policy.toLowerCase()],
                       ["Domicile", fact(profile.domicile)],
                       ["Replication", fact(profile.replication_method)],
@@ -301,11 +318,11 @@ export function InstrumentSheet({
                   </div>
                 </section>
               ) : instrument.data?.ucits_profile_status ? (
-                <section className="mt-3 border-t border-hairline pt-3" aria-label="UCITS profile status">
+                <section className="mt-3 border-t border-hairline pt-3" aria-label="European ETF sourced-profile status">
                   <div
                     className={`text-base uppercase tracking-widest md:text-[12px] ${instrument.data.ucits_profile_status === "STALE" ? "text-warning" : "text-down"}`}
                   >
-                    {instrument.data.ucits_profile_status === "STALE" ? "▲ Stale" : "× Missing"} UCITS profile
+                    {instrument.data.ucits_profile_status === "STALE" ? "▲ Stale" : "× Missing"} European ETF sourced profile
                   </div>
                   <p className="mt-1 text-base text-muted md:text-[13px]">
                     {instrument.data.ucits_profile_reason ?? "Run metadata sync to refresh this profile."}

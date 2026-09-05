@@ -290,6 +290,12 @@ uv run python -m quantmind.options_sync_cli SPY QQQ
 
 If a broker is unavailable, the application starts in a degraded but honest state: unavailable live data is surfaced as unavailable rather than invented.
 
+### Resolve identity and stale-cache blocks
+
+The `symbol_map`, stored as `$QM_DATA_DIR/symbols.json`, deliberately maps each display symbol to one canonical IBKR contract ID (`conId`). This alpha cannot represent two listings that IBKR reports under the same ticker. Before sync, normalize a dual-listed same-ticker holding to one canonical listing/symbol; QuantMind blocks analysis rather than collapse two contracts into one position.
+
+Do not hand-edit the cache to clear an identity warning. Run **Sync market data** in Setup or `uv run python -m quantmind.sync_cli` to rebuild stale or mismatched instrument metadata. Re-run `uv run python -m quantmind.options_sync_cli UNDERLIER` for a stale or mismatched option chain. If an existing `book_ref` then reports that instrument identity changed, pin a new book before analysis.
+
 ## Configuration
 
 Runtime configuration is loaded from `.env` with the `QM_` prefix. Common settings:
@@ -349,6 +355,7 @@ bun run gen:types
 
 - **Read-only by design:** no order submission or broker execution surface.
 - **Exactly one account:** `QM_ACCOUNT_ID` selects the portfolio. A multi-account IBKR session without an explicit selection fails closed rather than blending client books.
+- **One contract per display symbol:** the current `symbol_map` stores one canonical `conId` for each symbol. Dual-listed positions that share a ticker must be normalized to one canonical listing/symbol before sync; the alpha has no in-app listing-reconciliation layer.
 - **Advisor-safe reads:** selected-account portfolio updates avoid IBKR's global positions request, which is not available to advisor/master sessions with more than 50 subaccounts.
 - **Local-first:** binds to loopback by default and keeps the evidence cache on the local machine.
 - **Single provenance:** yfinance fallback is opt-in and never silently replaces IBKR data for the same symbol. A configured fallback symbol with an existing positive IBKR conId remains IBKR-owned and is skipped with a warning.

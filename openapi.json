@@ -2108,6 +2108,17 @@
             ],
             "title": "Comparison As Of"
           },
+          "comparison_book_beta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comparison Book Beta"
+          },
           "comparison_n_obs": {
             "default": 0,
             "title": "Comparison N Obs",
@@ -3859,6 +3870,17 @@
           "fx": {
             "$ref": "#/components/schemas/FxEvidenceOut"
           },
+          "market_data_as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Market Data As Of"
+          },
           "options_sleeve": {
             "$ref": "#/components/schemas/OptionsSleeveOut"
           },
@@ -3884,6 +3906,7 @@
         "required": [
           "snapshot_id",
           "valuation_ts",
+          "market_data_as_of",
           "base_currency",
           "fx",
           "positions",
@@ -4071,6 +4094,17 @@
             ],
             "title": "Local Market Value"
           },
+          "mark_as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mark As Of"
+          },
           "market_value": {
             "anyOf": [
               {
@@ -4170,6 +4204,7 @@
           "right",
           "currency",
           "last_close",
+          "mark_as_of",
           "fx_rate_to_base",
           "local_market_value",
           "market_value",

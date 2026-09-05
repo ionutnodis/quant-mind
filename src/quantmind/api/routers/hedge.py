@@ -194,6 +194,7 @@ class HedgeResponse(BaseModel):
     # Additive evidence for the one common sample used by every candidate's
     # es_before/es_after/protection fields. The top-level es_before remains the
     # full available book baseline for backwards compatibility.
+    comparison_book_beta: float | None = None
     comparison_as_of: str | None = None
     comparison_n_obs: int = 0
     n_candidates_evaluated: int
@@ -658,6 +659,19 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         np.array([book_weights[symbol] for symbol in unique_book]),
     )
     comparison_bench_returns = comparison_returns[benchmark_column]
+    comparison_book_beta: float | None = None
+    if has_comparable_candidate:
+        try:
+            common_book_beta = rolling_beta(
+                comparison_book_returns,
+                comparison_bench_returns,
+                window=_BETA_WINDOW,
+                rf=0.0,
+            ).dropna()
+            if len(common_book_beta):
+                comparison_book_beta = clean(float(common_book_beta.iloc[-1]))
+        except InsufficientDataError:
+            comparison_book_beta = None
     if has_comparable_candidate:
         try:
             comparison_es_before = clean(
@@ -674,7 +688,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         beta_cand = candidate.beta
         corr_stability = candidate.corr_stability
 
-        if not candidate.unusable and book_beta is not None:
+        if not candidate.unusable and comparison_book_beta is not None:
             candidate_returns = (
                 candidate.prices.loc[comparison_level_index]
                 .pct_change()
@@ -708,11 +722,15 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
             or abs(beta_cand) < _MIN_BETA_ABS
         )
 
-        if not unusable and book_beta is not None and beta_cand is not None:
+        if (
+            not unusable
+            and comparison_book_beta is not None
+            and beta_cand is not None
+        ):
             price_cand_last = float(candidate.prices.iloc[-1])
             if math.isfinite(price_cand_last) and price_cand_last != 0:
                 raw_size = (
-                    (book_beta - req.objective.value)
+                    (comparison_book_beta - req.objective.value)
                     * book_gross
                     / (beta_cand * price_cand_last)
                 )
@@ -838,6 +856,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         book_value=clean(book_value),
         book_beta=book_beta,
         es_before=es_before,
+        comparison_book_beta=comparison_book_beta,
         comparison_as_of=(
             iso(comparison_book_returns.index[-1])
             if has_comparable_candidate and len(comparison_book_returns)

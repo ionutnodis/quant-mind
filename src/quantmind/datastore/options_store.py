@@ -12,8 +12,10 @@ travel in the parquet schema metadata (same technique as BarStore's BarMeta).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -28,6 +30,26 @@ _CHAIN_COLUMNS = frozenset(
 class OptionsSnapshotMeta:
     as_of: str  # ISO date/timestamp the snapshot was taken
     spot: float  # underlying spot used for strike selection at snapshot time
+    underlier_con_id: int  # authoritative contract used to discover the chain
+
+
+def option_chain_freshness(
+    as_of: str,
+    today: date,
+    *,
+    stale_after_business_days: int = 3,
+) -> tuple[int | None, bool]:
+    """Return weekday-aware snapshot age and whether it exceeds the limit."""
+    try:
+        snapshot_date = datetime.fromisoformat(as_of.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None, True
+    age_days = (
+        0
+        if snapshot_date >= today
+        else int(np.busday_count(snapshot_date.isoformat(), today.isoformat()))
+    )
+    return age_days, age_days > stale_after_business_days
 
 
 class OptionsStore:
@@ -46,6 +68,7 @@ class OptionsStore:
                 **(table.schema.metadata or {}),
                 _META_PREFIX + b"as_of": meta.as_of.encode(),
                 _META_PREFIX + b"spot": repr(meta.spot).encode(),
+                _META_PREFIX + b"underlier_con_id": str(meta.underlier_con_id).encode(),
             }
         )
         tmp = path.with_suffix(".parquet.tmp")
@@ -66,7 +89,11 @@ class OptionsStore:
         md = table.schema.metadata or {}
         missing_metadata = {
             key
-            for key in (_META_PREFIX + b"as_of", _META_PREFIX + b"spot")
+            for key in (
+                _META_PREFIX + b"as_of",
+                _META_PREFIX + b"spot",
+                _META_PREFIX + b"underlier_con_id",
+            )
             if key not in md
         }
         if missing_metadata:
@@ -76,6 +103,7 @@ class OptionsStore:
         meta = OptionsSnapshotMeta(
             as_of=md[_META_PREFIX + b"as_of"].decode(),
             spot=float(md[_META_PREFIX + b"spot"].decode()),
+            underlier_con_id=int(md[_META_PREFIX + b"underlier_con_id"].decode()),
         )
         return table.to_pandas(), meta
 

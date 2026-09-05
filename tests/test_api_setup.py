@@ -54,20 +54,27 @@ def _bars(end: datetime) -> pd.DataFrame:
 
 
 def _client(
-    store: BarStore, broker=None, *, base_currency: str = "USD"
+    store: BarStore,
+    broker=None,
+    *,
+    base_currency: str = "USD",
+    ucits_metadata_enabled: bool = False,
 ) -> TestClient:
     app = create_app(
         store=store,
         benchmark="SPY",
         broker=broker,
         base_currency=base_currency,
+        ucits_metadata_enabled=ucits_metadata_enabled,
     )
     return TestClient(app, base_url="http://127.0.0.1")
 
 
 def _seed_market(store: BarStore, end: datetime) -> None:
     store.write_symbol_map({"SPY": 1})
-    store.write_instrument_metadata("SPY", {"currency": "USD", "exchange": "ARCA"})
+    store.write_instrument_metadata(
+        "SPY", {"con_id": 1, "currency": "USD", "exchange": "ARCA"}
+    )
     store.write_bars(
         con_id=1,
         bar_size="1d",
@@ -79,6 +86,34 @@ def _seed_market(store: BarStore, end: datetime) -> None:
             name,
             pd.Series([1.0, 1.1], index=pd.date_range(end=end.date(), periods=2)),
         )
+
+
+def _seed_mapped_instrument(
+    store: BarStore,
+    *,
+    symbol: str,
+    con_id: int,
+    currency: str,
+    exchange: str,
+    end: datetime,
+) -> None:
+    store.write_symbol_map({**store.read_symbol_map(), symbol: con_id})
+    store.write_instrument_metadata(
+        symbol,
+        {
+            "con_id": con_id,
+            "currency": currency,
+            "exchange": exchange,
+        },
+    )
+    store.write_bars(
+        con_id=con_id,
+        bar_size="1d",
+        bars=_bars(end),
+        meta=BarMeta(
+            bar_type="ADJUSTED_LAST", adjusted_asof=end.date().isoformat()
+        ),
+    )
 
 
 def _write_valid_book(
@@ -316,6 +351,24 @@ def test_setup_requires_repin_after_a_symbol_changes_contract_identity(tmp_path)
     assert body["next_action"] == "pin_book"
 
 
+def test_setup_requires_repin_when_a_pinned_symbol_mapping_is_removed(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    assert _client(store).post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 10}]}
+    ).status_code == 200
+    store.write_symbol_map({})
+
+    body = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+
+    assert body["book"]["status"] == "stale"
+    assert body["book"]["reason"] == "instrument_identity_mismatch"
+    assert body["next_action"] == "sync_market_data"
+
+
 def test_setup_status_requests_a_sync_when_connected_cache_is_stale(tmp_path):
     store = BarStore(tmp_path)
     _seed_market(store, datetime.now(timezone.utc) - timedelta(days=10))
@@ -361,7 +414,7 @@ def test_setup_reports_corrupt_instrument_metadata_without_500(tmp_path):
     _seed_market(store, datetime.now(timezone.utc))
     (tmp_path / "instruments.json").write_text("not json")
 
-    response = _client(store).get("/api/setup/status")
+    response = _client(store, ucits_metadata_enabled=True).get("/api/setup/status")
 
     assert response.status_code == 200
     body = response.json()
@@ -767,7 +820,9 @@ def test_setup_status_requires_the_exact_held_option_contract(tmp_path):
                 }
             ]
         ),
-        OptionsSnapshotMeta(as_of=now.date().isoformat(), spot=104.0),
+        OptionsSnapshotMeta(
+            as_of=now.date().isoformat(), spot=104.0, underlier_con_id=1
+        ),
     )
 
     ready = client.get("/api/setup/status").json()
@@ -775,10 +830,45 @@ def test_setup_status_requires_the_exact_held_option_contract(tmp_path):
     assert ready["options_data"]["priced_positions"] == 1
     assert ready["overall"] == "ready"
 
+    OptionsStore(tmp_path).write_chain(
+        "SPY",
+        pd.DataFrame(
+            [
+                {
+                    "expiry": "20261218",
+                    "strike": 700.0,
+                    "right": "C",
+                    "con_id": 999,
+                    "bid": 2.0,
+                    "ask": 2.2,
+                    "iv": 0.35,
+                    "delta": 0.4,
+                    "multiplier": 100.0,
+                }
+            ]
+        ),
+        OptionsSnapshotMeta(
+            as_of=now.date().isoformat(), spot=104.0, underlier_con_id=99
+        ),
+    )
+
+    remapped = client.get("/api/setup/status").json()
+    assert remapped["options_data"]["status"] == "missing"
+    assert remapped["next_action"] == "sync_option_data"
+
 
 def test_setup_requires_dated_fx_for_a_mixed_currency_book(tmp_path):
     store = BarStore(tmp_path)
-    _seed_market(store, datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    _seed_mapped_instrument(
+        store,
+        symbol="ASML",
+        con_id=2,
+        currency="EUR",
+        exchange="AEB",
+        end=now,
+    )
     valuation_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     _write_valid_book(
         store,
@@ -787,7 +877,7 @@ def test_setup_requires_dated_fx_for_a_mixed_currency_book(tmp_path):
             {
                 "symbol": "ASML",
                 "qty": 10,
-                "con_id": 1,
+                "con_id": 2,
                 "sec_type": "STK",
                 "multiplier": 1,
                 "currency": "EUR",
@@ -831,6 +921,14 @@ def test_setup_requires_fx_for_a_non_base_benchmark(tmp_path):
     store = BarStore(tmp_path)
     now = datetime.now(timezone.utc)
     _seed_market(store, now)
+    _seed_mapped_instrument(
+        store,
+        symbol="VWRL",
+        con_id=2,
+        currency="GBP",
+        exchange="LSE",
+        end=now,
+    )
     _write_valid_book(
         store,
         valuation_ts=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -865,6 +963,14 @@ def test_setup_resyncs_when_benchmark_currency_metadata_is_missing(tmp_path):
     store = BarStore(tmp_path)
     now = datetime.now(timezone.utc)
     _seed_market(store, now)
+    _seed_mapped_instrument(
+        store,
+        symbol="VWRL",
+        con_id=2,
+        currency="GBP",
+        exchange="LSE",
+        end=now,
+    )
     store.replace_instrument_metadata({})
     _write_valid_book(
         store,
@@ -898,6 +1004,14 @@ def test_setup_routes_to_fx_sync_when_cached_ecb_evidence_is_stale(tmp_path):
     store = BarStore(tmp_path)
     now = datetime.now(timezone.utc)
     _seed_market(store, now)
+    _seed_mapped_instrument(
+        store,
+        symbol="ASML",
+        con_id=2,
+        currency="EUR",
+        exchange="AEB",
+        end=now,
+    )
     _write_valid_book(
         store,
         valuation_ts=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -905,7 +1019,7 @@ def test_setup_routes_to_fx_sync_when_cached_ecb_evidence_is_stale(tmp_path):
             {
                 "symbol": "ASML",
                 "qty": 10,
-                "con_id": 1,
+                "con_id": 2,
                 "sec_type": "STK",
                 "multiplier": 1,
                 "currency": "EUR",
@@ -994,7 +1108,11 @@ def test_setup_reports_ucits_profile_readiness_without_blocking_core_cockpit(tmp
             "ucits_profile_reason": "not synced",
         },
     )
-    client = _client(store, broker=BrokerThatMustNotBeCalled())
+    client = _client(
+        store,
+        broker=BrokerThatMustNotBeCalled(),
+        ucits_metadata_enabled=True,
+    )
     assert client.post(
         "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 1}]}
     ).status_code == 200
@@ -1003,6 +1121,30 @@ def test_setup_reports_ucits_profile_readiness_without_blocking_core_cockpit(tmp
     assert missing["ucits_data"]["status"] == "incomplete"
     assert missing["ucits_data"]["missing_symbols"] == ["IWDA"]
     assert missing["overall"] == "ready"
+
+
+def test_setup_does_not_require_ucits_profiles_when_enrichment_is_disabled(tmp_path):
+    store = BarStore(tmp_path)
+    store.write_instrument_metadata(
+        "IWDA",
+        {
+            "provider": "ibkr",
+            "currency": "EUR",
+            "stock_type": "ETF",
+            "isin": "IE00B4L5Y983",
+            "ucits_profile_status": "MISSING",
+        },
+    )
+
+    ucits = _client(store).get("/api/setup/status").json()["ucits_data"]
+
+    assert ucits == {
+        "status": "not_required",
+        "total_etfs": 0,
+        "ready_profiles": 0,
+        "missing_symbols": [],
+        "stale_symbols": [],
+    }
 
 
 @pytest.mark.parametrize("corrupt_profile", [False, True])
@@ -1024,7 +1166,9 @@ def test_setup_treats_a_fresh_ucits_marker_without_a_valid_profile_as_missing(
         profile.parent.mkdir(parents=True)
         profile.write_text("not-json")
 
-    ucits = _client(store).get("/api/setup/status").json()["ucits_data"]
+    ucits = _client(store, ucits_metadata_enabled=True).get(
+        "/api/setup/status"
+    ).json()["ucits_data"]
 
     assert ucits["status"] == "incomplete"
     assert ucits["ready_profiles"] == 0
@@ -1061,7 +1205,9 @@ def test_setup_reclassifies_an_expired_ucits_profile_as_stale(tmp_path):
         )
     )
 
-    ucits = _client(store).get("/api/setup/status").json()["ucits_data"]
+    ucits = _client(store, ucits_metadata_enabled=True).get(
+        "/api/setup/status"
+    ).json()["ucits_data"]
 
     assert ucits["status"] == "stale"
     assert ucits["ready_profiles"] == 0
@@ -1082,7 +1228,11 @@ def test_setup_does_not_classify_a_us_etf_as_a_ucits_profile_gap(tmp_path):
         },
     )
 
-    status = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+    status = _client(
+        store,
+        broker=BrokerThatMustNotBeCalled(),
+        ucits_metadata_enabled=True,
+    ).get(
         "/api/setup/status"
     ).json()
 

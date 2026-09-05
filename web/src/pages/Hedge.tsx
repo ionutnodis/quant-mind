@@ -271,7 +271,8 @@ export function Hedge() {
           <div className="mb-3 space-y-1">
             <FxEvidenceLine fx={run.data.fx} testId="hedge-fx-evidence" />
             <p data-testid="hedge-comparison-evidence" className="num text-muted text-[10px]">
-              Common comparison · as of {run.data.comparison_as_of?.slice(0, 10) ?? "—"} ·{" "}
+              Common comparison · sizing book β {num(run.data.comparison_book_beta, 2)} · as of{" "}
+              {run.data.comparison_as_of?.slice(0, 10) ?? "—"} ·{" "}
               {run.data.comparison_n_obs.toLocaleString()} obs
             </p>
           </div>

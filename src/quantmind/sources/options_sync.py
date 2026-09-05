@@ -118,7 +118,15 @@ async def sync_options_chains(
         }
         quotes = list(by_contract.values())
         df = _quotes_to_frame(quotes)
-        options_store.write_chain(underlier, df, OptionsSnapshotMeta(as_of=str(as_of), spot=spot))
+        options_store.write_chain(
+            underlier,
+            df,
+            OptionsSnapshotMeta(
+                as_of=str(as_of),
+                spot=spot,
+                underlier_con_id=con_id,
+            ),
+        )
         counts[underlier] = len(df)
         await sleep(pace_seconds)  # pace between underliers, same discipline as sync_daily_bars
 

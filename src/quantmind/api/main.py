@@ -60,6 +60,7 @@ def build():
         base_currency=getattr(settings, "base_currency", "USD"),
         api_token=settings.api_token,
         allowed_origins=settings.api_allowed_origin_list(),
+        ucits_metadata_enabled=getattr(settings, "ucits_metadata_enabled", False),
     )
     app.state.broker_connection_status = "connecting"
     app.state.broker_mode = broker_mode_for_port(settings.port)

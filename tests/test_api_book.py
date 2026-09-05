@@ -47,8 +47,12 @@ def store(tmp_path) -> BarStore:
     s.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)  # SPY
     s.write_bars(con_id=2, bar_size="1d", bars=_bars(seed=2), meta=meta)  # QQQ
     s.write_symbol_map({"SPY": 1, "QQQ": 2})
-    s.write_instrument_metadata("SPY", {"currency": "USD", "exchange": "ARCA"})
-    s.write_instrument_metadata("QQQ", {"currency": "USD", "exchange": "NASDAQ"})
+    s.write_instrument_metadata(
+        "SPY", {"con_id": 1, "currency": "USD", "exchange": "ARCA"}
+    )
+    s.write_instrument_metadata(
+        "QQQ", {"con_id": 2, "currency": "USD", "exchange": "NASDAQ"}
+    )
     return s
 
 
@@ -276,6 +280,28 @@ def test_manual_pin_reports_corrupt_instrument_metadata_as_a_named_422(store):
     assert not (store.root / "books").exists()
 
 
+def test_manual_pin_rejects_metadata_bound_to_a_different_contract(store):
+    store.write_symbol_map({"SPY": 99, "QQQ": 2})
+    store.write_instrument_metadata(
+        "SPY",
+        {
+            "con_id": 1,
+            "currency": "USD",
+            "exchange": "ARCA",
+            "long_name": "Old listing",
+        },
+    )
+
+    response = _client(store).post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 1}]}
+    )
+
+    assert response.status_code == 422
+    assert "metadata contract identity" in response.json()["detail"]
+    assert "SPY" in response.json()["detail"]
+    assert not (store.root / "books").exists()
+
+
 def test_manual_pin_without_authoritative_currency_cannot_enter_analysis(tmp_path):
     store = BarStore(tmp_path)
     store.write_symbol_map({"MYSTERY": 9})
@@ -412,6 +438,7 @@ def test_pin_current_book_with_broker_persists_a_resolvable_snapshot(store):
 
 
 def test_broker_instrument_identity_survives_preview_pin_and_read(store):
+    store.write_symbol_map({**store.read_symbol_map(), "ASML": 987654})
     portfolio = Portfolio(
         positions=(
             Position(

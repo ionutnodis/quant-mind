@@ -19,8 +19,8 @@ FETCHED_AT = datetime(2026, 9, 1, 8, 30, tzinfo=UTC)
 PROFILE_HTML = """
 <html>
   <h1>iShares Core MSCI World UCITS ETF USD (Acc)</h1>
-  <div>ISIN IE00B4L5Y983</div>
   <table>
+    <tr><td data-testid="tl_etf-basics_value_isin">IE00B4L5Y983</td></tr>
     <tr><td data-testid="tl_etf-basics_value_fund-provider">BlackRock</td></tr>
     <tr><td data-testid="tl_etf-basics_value_fund-domicile">Ireland</td></tr>
     <tr><td data-testid="tl_etf-basics_value_total-expense-ratio">0.20% p.a.</td></tr>
@@ -556,7 +556,10 @@ def test_justetf_provenance_rejects_a_different_host():
         )
 
 
-@pytest.mark.parametrize("ter", [Decimal("-0.01"), Decimal("NaN"), Decimal("Infinity")])
+@pytest.mark.parametrize(
+    "ter",
+    [Decimal("-0.01"), Decimal("5.01"), Decimal("NaN"), Decimal("Infinity")],
+)
 def test_profile_rejects_invalid_expense_ratios(ter):
     invalid = _profile().model_dump()
     invalid["ter_pct"] = ter
@@ -595,7 +598,8 @@ def test_justetf_distinguishes_distributing_share_classes(tmp_path):
 def test_justetf_parser_supports_the_live_profile_field_identifiers(tmp_path):
     live_shape = """
     <html><h1>iShares Core MSCI World UCITS ETF USD (Acc)</h1>
-    <div>ISIN IE00B4L5Y983</div><table>
+    <table>
+      <tr><td data-testid="tl_etf-basics_value_isin">IE00B4L5Y983</td></tr>
       <tr><td data-testid="tl_etf-basics_value_index-name">MSCI World</td></tr>
       <tr><td data-testid="tl_etf-basics_value_ter">0.20% p.a.</td></tr>
       <tr><td data-testid="tl_etf-basics_value_replication">Physical</td></tr>
@@ -615,6 +619,70 @@ def test_justetf_parser_supports_the_live_profile_field_identifiers(tmp_path):
     assert result.profile.domicile == "Ireland"
     assert result.profile.replication_method == "Physical · Optimized sampling"
     assert result.profile.benchmark_name == "MSCI World"
+
+
+def test_justetf_parser_handles_nested_cells_attributes_and_comma_ter(tmp_path):
+    live_shape = """
+    <html><h1><span>iShares Core MSCI World</span> UCITS ETF</h1><table>
+      <tr><td data-testid="tl_etf-basics_value_isin">IE00B4L5Y983</td></tr>
+      <tr><td data-testid="tl_etf-basics_value_fund-domicile"><img class="flag">Ireland</td></tr>
+      <tr><td data-testid="tl_etf-basics_value_ter" data-tooltip="charges > 0">0,20% p.a.</td></tr>
+    </table></html>
+    """
+
+    result = JustEtfProvider(
+        BarStore(tmp_path), fetcher=lambda _url: live_shape
+    ).resolve("IE00B4L5Y983", now=FETCHED_AT)
+
+    assert result.freshness is ProfileFreshness.FRESH
+    assert result.profile.fund_name == "iShares Core MSCI World UCITS ETF"
+    assert result.profile.domicile == "Ireland"
+    assert result.profile.ter_pct == Decimal("0.20")
+
+
+def test_justetf_parser_rejects_context_date_as_an_expense_ratio(tmp_path):
+    html = PROFILE_HTML.replace("0.20% p.a.", "as of 31.12.2025: 0.20%")
+
+    result = JustEtfProvider(BarStore(tmp_path), fetcher=lambda _url: html).resolve(
+        "IE00B4L5Y983", now=FETCHED_AT
+    )
+
+    assert result.freshness is ProfileFreshness.MISSING
+    assert result.profile is None
+    assert "parse failed" in result.reason
+
+
+def test_justetf_parser_requires_a_structured_matching_isin(tmp_path):
+    soft_not_found = """
+    <html><h1>IE00B4L5Y983 was not found</h1><table>
+      <tr><td data-testid="tl_etf-basics_value_ter">0.20%</td></tr>
+    </table></html>
+    """
+
+    result = JustEtfProvider(
+        BarStore(tmp_path), fetcher=lambda _url: soft_not_found
+    ).resolve("IE00B4L5Y983", now=FETCHED_AT)
+
+    assert result.freshness is ProfileFreshness.MISSING
+    assert result.profile is None
+    assert "parse failed" in result.reason
+
+
+def test_justetf_parser_rejects_profiles_with_only_empty_fact_cells(tmp_path):
+    empty_profile = """
+    <html><h1>Placeholder fund</h1><table>
+      <tr><td data-testid="tl_etf-basics_value_isin">IE00B4L5Y983</td></tr>
+      <tr><td data-testid="tl_etf-basics_value_fund-provider"><span></span></td></tr>
+    </table></html>
+    """
+
+    result = JustEtfProvider(
+        BarStore(tmp_path), fetcher=lambda _url: empty_profile
+    ).resolve("IE00B4L5Y983", now=FETCHED_AT)
+
+    assert result.freshness is ProfileFreshness.MISSING
+    assert result.profile is None
+    assert "parse failed" in result.reason
 
 
 def test_justetf_provider_has_a_default_fetch_path(monkeypatch, tmp_path):

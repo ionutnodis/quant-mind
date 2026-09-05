@@ -100,7 +100,8 @@ test("shows the exact first action and the state of every setup dependency", asy
   const macro = within(screen.getByLabelText("Macro evidence status"));
   const options = within(screen.getByLabelText("Held option evidence status"));
   const fx = within(screen.getByLabelText("FX evidence status"));
-  const ucits = within(screen.getByLabelText("UCITS metadata status"));
+  const ucits = within(screen.getByLabelText("European ETF sourced-profile status"));
+  expect(ucits.getByText("European ETF profiles")).toBeInTheDocument();
   const book = within(screen.getByLabelText("Current book status"));
   expect(broker.getByText("Unavailable")).toBeInTheDocument();
   expect(broker.getByTestId("status-glyph")).toHaveTextContent("×");

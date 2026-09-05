@@ -275,6 +275,23 @@ test("horizon risk panel shows the historical sqrt-t ES immediately, then MC-boo
   expect(screen.getByText(/9\.50%/)).toBeInTheDocument(); // MC bootstrap ES
 });
 
+test("Monte Carlo reports excluded non-finite paths and the effective sample", async () => {
+  mockHappyPath();
+  server.use(
+    http.post("/api/risk/montecarlo", () =>
+      HttpResponse.json({ ...MC_SPY, n_nonfinite: 7 })
+    )
+  );
+  renderRisk();
+  await screen.findByTestId("regression-scatter");
+
+  fireEvent.click(screen.getByRole("button", { name: /run monte carlo/i }));
+
+  const warning = await screen.findByRole("status", { name: /monte carlo sample warning/i });
+  expect(warning).toHaveTextContent("7 non-finite paths were excluded");
+  expect(warning).toHaveTextContent("9,993 of 10,000 requested paths");
+});
+
 test("Monte Carlo 422 surfaces the server's detail message near the controls, not a bare status", async () => {
   mockHappyPath();
   server.use(

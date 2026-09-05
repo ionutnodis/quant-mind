@@ -1072,6 +1072,8 @@ export interface components {
             candidates: components["schemas"]["HedgeCandidateOut"][];
             /** Comparison As Of */
             comparison_as_of?: string | null;
+            /** Comparison Book Beta */
+            comparison_book_beta?: number | null;
             /**
              * Comparison N Obs
              * @default 0
@@ -1541,6 +1543,8 @@ export interface components {
             /** Exposure */
             exposure: components["schemas"]["UnderlyingExposureOut"][];
             fx: components["schemas"]["FxEvidenceOut"];
+            /** Market Data As Of */
+            market_data_as_of: string | null;
             options_sleeve: components["schemas"]["OptionsSleeveOut"];
             /** Positions */
             positions: components["schemas"]["PositionOut"][];
@@ -1591,6 +1595,8 @@ export interface components {
             last_close: number | null;
             /** Local Market Value */
             local_market_value: number | null;
+            /** Mark As Of */
+            mark_as_of: string | null;
             /** Market Value */
             market_value: number | null;
             /** Multiplier */

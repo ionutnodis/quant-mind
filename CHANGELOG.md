@@ -30,6 +30,11 @@ All notable changes to QuantMind are documented in this file.
 - Missing, corrupt, stale, malformed, path-traversing, and legacy FX/UCITS evidence now follows tested fail-closed or explicit-degraded behavior.
 - Analytical responses retain FX provenance, requested hedge candidates can no longer disappear silently, and older pinned books can be rebased into a new reporting-currency snapshot without rewriting history.
 - Non-USD risk views no longer subtract the USD `US3M` series when calculating alpha.
+- Hedge sizing now uses the same common observation calendar for book beta, candidate beta, notional, and residual-beta evidence.
+- Option-chain snapshots are bound to the exact IBKR underlier contract, and stale metadata, remapped listings, or legacy unbound chains fail closed with a resync action.
+- Partial FX availability preserves supported-currency valuations and provenance while withholding unsupported legs and incomplete attribution.
+- Portfolio valuation timestamps now distinguish the immutable book pin from the oldest current market mark; Monte Carlo output also names excluded non-finite paths.
+- UCITS enrichment now honors its feature flag, validates structured ISIN/profile fields and TER bounds, and safely parses nested or void HTML elements.
 
 ## [0.4.0.0] - 2026-09-04
 

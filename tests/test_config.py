@@ -84,6 +84,7 @@ def test_main_build_wires_security_settings(monkeypatch, tmp_path):
         host = "127.0.0.1"
         port = 4002
         client_id = 17
+        ucits_metadata_enabled = False
 
         @staticmethod
         def api_allowed_origin_list():
@@ -114,3 +115,4 @@ def test_main_build_wires_security_settings(monkeypatch, tmp_path):
     assert captured["api_token"] == "runtime-secret"
     assert captured["allowed_origins"] == ("http://127.0.0.1:8000",)
     assert captured["base_currency"] == "GBP"
+    assert captured["ucits_metadata_enabled"] is False

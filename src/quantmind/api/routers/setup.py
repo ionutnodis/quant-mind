@@ -16,7 +16,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from quantmind.api.routers.book import _account_fingerprint, list_books
-from quantmind.datastore.options_store import OptionsStore
+from quantmind.datastore.options_store import OptionsStore, option_chain_freshness
 from quantmind.datastore.store import PORTFOLIO_DISCOVERY_FAILURE_SYMBOL
 from quantmind.fx import FxConversionUnavailable, FxConverter, FxObservationStale
 from quantmind.instruments.metadata import (
@@ -373,7 +373,7 @@ def _book_status(store, state, *, snapshots=None) -> BookReadiness:
     )
     try:
         symbol_map = store.read_symbol_map()
-    except Exception:
+    except (OSError, TypeError, ValueError):
         symbol_map = {}
     changed_instrument_identities = sorted(
         {
@@ -382,7 +382,6 @@ def _book_status(store, state, *, snapshots=None) -> BookReadiness:
             if (
                 position.sec_type == "STK" or latest.source != "live_ibkr"
             )
-            and symbol_map.get(position.symbol) is not None
             and symbol_map.get(position.symbol) != position.con_id
         }
     )
@@ -480,6 +479,10 @@ def _options_data_status(store) -> OptionsDataReadiness:
     chain_dates = []
     priced_positions = 0
     today = datetime.now(timezone.utc).date()
+    try:
+        symbol_map = store.read_symbol_map()
+    except Exception:
+        symbol_map = {}
 
     for position in positions:
         contract_label = (
@@ -504,7 +507,10 @@ def _options_data_status(store) -> OptionsDataReadiness:
         try:
             chain_date = datetime.fromisoformat(meta.as_of.replace("Z", "+00:00")).date()
             chain_dates.append(chain_date)
-            if _business_age_days(chain_date, today) > 3:
+            if meta.underlier_con_id != symbol_map.get(position.symbol):
+                missing_contracts.append(contract_label)
+                continue
+            if option_chain_freshness(meta.as_of, today)[1]:
                 stale_chains.add(position.symbol)
             matches = frame[
                 (frame["expiry"].astype(str).str.replace("-", "") == position.expiry.replace("-", ""))
@@ -668,7 +674,15 @@ def _fx_data_status(
     )
 
 
-def _ucits_data_status(store) -> UcitsDataReadiness:
+def _ucits_data_status(store, *, enabled: bool) -> UcitsDataReadiness:
+    if not enabled:
+        return UcitsDataReadiness(
+            status="not_required",
+            total_etfs=0,
+            ready_profiles=0,
+            missing_symbols=[],
+            stale_symbols=[],
+        )
     try:
         metadata = store.read_all_instrument_metadata()
     except (OSError, TypeError, ValueError):
@@ -745,7 +759,10 @@ def get_setup_status(request: Request) -> SetupStatus:
         state.benchmark,
         snapshots=snapshots,
     )
-    ucits_data = _ucits_data_status(state.store)
+    ucits_data = _ucits_data_status(
+        state.store,
+        enabled=bool(getattr(state, "ucits_metadata_enabled", False)),
+    )
 
     if state.broker_connection_error == "account_selection_required":
         next_action = "configure_account"

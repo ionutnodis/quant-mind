@@ -16,6 +16,15 @@ from quantmind.fx import EcbFxProvider, sync_ecb_fx
 from quantmind.risk.returns import historical_es, rolling_beta
 
 
+def _write_metadata(store: BarStore, symbol: str, fields: dict) -> None:
+    payload = dict(fields)
+    if "con_id" not in payload:
+        con_id = store.read_symbol_map().get(symbol)
+        if con_id is not None:
+            payload["con_id"] = con_id
+    store.write_instrument_metadata(symbol, payload)
+
+
 def _bars(n=300, seed=1):
     rng = np.random.default_rng(seed)
     idx = pd.bdate_range(end="2026-07-24", periods=n)
@@ -66,7 +75,7 @@ def client(tmp_path):
     store.write_bars(con_id=4, bar_size="1d", bars=_flat_bars(), meta=meta)  # FLAT (~zero beta)
     store.write_symbol_map({"SPY": 1, "QQQ": 2, "IWM": 3, "FLAT": 4})
     for symbol in ("SPY", "QQQ", "IWM", "FLAT"):
-        store.write_instrument_metadata(symbol, {"currency": "USD", "exchange": "SMART"})
+        _write_metadata(store, symbol, {"currency": "USD", "exchange": "SMART"})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
@@ -164,7 +173,7 @@ def test_hedge_aligns_book_marks_before_valuation_sizing_and_as_of(tmp_path):
     store.write_bars(3, "1d", iwm, meta)
     store.write_symbol_map({"SPY": 1, "QQQ": 2, "IWM": 3})
     for symbol in ("SPY", "QQQ", "IWM"):
-        store.write_instrument_metadata(symbol, {"currency": "USD"})
+        _write_metadata(store, symbol, {"currency": "USD"})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     client = TestClient(
         app,
@@ -212,9 +221,9 @@ def test_hedge_sizes_european_book_and_candidate_in_one_base_currency(tmp_path):
     store.write_bars(2, "1d", spy.copy(), meta)
     store.write_bars(3, "1d", candidate, meta)
     store.write_symbol_map({"SPY": 1, "IWDA": 2, "QQQ": 3})
-    store.write_instrument_metadata("SPY", {"currency": "USD"})
-    store.write_instrument_metadata("IWDA", {"currency": "EUR"})
-    store.write_instrument_metadata("QQQ", {"currency": "USD"})
+    _write_metadata(store, "SPY", {"currency": "USD"})
+    _write_metadata(store, "IWDA", {"currency": "EUR"})
+    _write_metadata(store, "QQQ", {"currency": "USD"})
     rows = ["CURRENCY,TIME_PERIOD,OBS_VALUE"]
     for timestamp in spy.index:
         day = timestamp.date().isoformat()
@@ -265,8 +274,8 @@ def test_hedge_reports_fx_provenance_when_only_the_candidate_needs_conversion(tm
     store.write_bars(1, "1d", spy, meta)
     store.write_bars(2, "1d", eur_candidate, meta)
     store.write_symbol_map({"SPY": 1, "EXSA": 2})
-    store.write_instrument_metadata("SPY", {"currency": "USD"})
-    store.write_instrument_metadata("EXSA", {"currency": "EUR"})
+    _write_metadata(store, "SPY", {"currency": "USD"})
+    _write_metadata(store, "EXSA", {"currency": "EUR"})
     rows = ["CURRENCY,TIME_PERIOD,OBS_VALUE"]
     for timestamp in spy.index:
         rows.append(f"USD,{timestamp.date().isoformat()},1.1000")
@@ -389,7 +398,7 @@ def test_hedge_requested_candidate_already_in_book_is_named_422(client):
 
 
 def test_hedge_requested_candidate_without_currency_is_named_422(client):
-    client.app.state.store.write_instrument_metadata("QQQ", {"currency": None})
+    _write_metadata(client.app.state.store, "QQQ", {"currency": None})
 
     response = client.post(
         "/api/hedge",
@@ -405,7 +414,8 @@ def test_hedge_requested_candidate_without_currency_is_named_422(client):
 
 
 def test_hedge_rejects_candidate_metadata_for_a_different_contract(client):
-    client.app.state.store.write_instrument_metadata(
+    _write_metadata(
+        client.app.state.store,
         "QQQ", {"con_id": 999, "currency": "USD"}
     )
 
@@ -424,7 +434,7 @@ def test_hedge_rejects_candidate_metadata_for_a_different_contract(client):
 
 
 def test_hedge_default_universe_reports_skipped_candidates(client):
-    client.app.state.store.write_instrument_metadata("QQQ", {"currency": None})
+    _write_metadata(client.app.state.store, "QQQ", {"currency": None})
 
     body = client.post(
         "/api/hedge",
@@ -460,9 +470,9 @@ def test_hedge_default_discovery_fills_budget_past_unusable_early_entries(
             **{symbol: 2 for symbol in eligible},
         }
     )
-    store.write_instrument_metadata("SPY", {"currency": "USD"})
+    _write_metadata(store, "SPY", {"currency": "USD"})
     for symbol in eligible:
-        store.write_instrument_metadata(symbol, {"currency": "USD"})
+        _write_metadata(store, symbol, {"currency": "USD"})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     c = TestClient(
         app,
@@ -511,8 +521,8 @@ def test_hedge_default_discovery_names_candidates_omitted_by_scan_cap(tmp_path):
         "ZZZ_LATE_ELIGIBLE": 2,
         }
     )
-    store.write_instrument_metadata("SPY", {"currency": "USD"})
-    store.write_instrument_metadata("ZZZ_LATE_ELIGIBLE", {"currency": "USD"})
+    _write_metadata(store, "SPY", {"currency": "USD"})
+    _write_metadata(store, "ZZZ_LATE_ELIGIBLE", {"currency": "USD"})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     c = TestClient(
         app,
@@ -545,9 +555,9 @@ def test_hedge_default_evaluation_is_independent_of_symbol_map_order(tmp_path):
     store.write_bars(1, "1d", spy, meta)
     store.write_bars(2, "1d", candidate, meta)
     candidates = [f"CANDIDATE_{index:02d}" for index in range(51)]
-    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
+    _write_metadata(store, "SPY", {"con_id": 1, "currency": "USD"})
     for symbol in candidates:
-        store.write_instrument_metadata(symbol, {"con_id": 2, "currency": "USD"})
+        _write_metadata(store, symbol, {"con_id": 2, "currency": "USD"})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     client = TestClient(
         app,
@@ -693,7 +703,7 @@ def test_hedge_protection_not_inflated_by_large_hedge_notional(tmp_path):
     )  # WEAK
     store.write_symbol_map({"SPY": 1, "GOOD": 2, "WEAK": 3})
     for symbol in ("SPY", "GOOD", "WEAK"):
-        store.write_instrument_metadata(symbol, {"currency": "USD"})
+        _write_metadata(store, symbol, {"currency": "USD"})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     client = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
@@ -768,7 +778,7 @@ def test_hedge_candidates_share_one_es_window_when_one_has_recent_history(tmp_pa
     store.write_bars(3, "1d", recent_candidate, meta)
     store.write_symbol_map({"SPY": 1, "FULL": 2, "RECENT": 3})
     for symbol in ("SPY", "FULL", "RECENT"):
-        store.write_instrument_metadata(symbol, {"currency": "USD"})
+        _write_metadata(store, symbol, {"currency": "USD"})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     client = TestClient(
         app,
@@ -833,7 +843,7 @@ def test_hedge_builds_every_candidate_return_on_one_cross_calendar_grid(tmp_path
     store.write_bars(4, "1d", bars(close.iloc[::2]), meta)
     store.write_symbol_map({"BENCH": 1, "BOOK": 2, "FULL": 3, "GAPS": 4})
     for symbol in ("BENCH", "BOOK", "FULL", "GAPS"):
-        store.write_instrument_metadata(symbol, {"currency": "USD"})
+        _write_metadata(store, symbol, {"currency": "USD"})
     client = TestClient(
         create_app(store=store, benchmark="BENCH", api_token="testtoken"),
         base_url="http://127.0.0.1",
@@ -854,6 +864,7 @@ def test_hedge_builds_every_candidate_return_on_one_cross_calendar_grid(tmp_path
     body = response.json()
     by_symbol = {row["symbol"]: row for row in body["candidates"]}
     assert body["book_beta"] == pytest.approx(1.0, abs=1e-9)
+    assert body["comparison_book_beta"] == pytest.approx(1.0, abs=1e-9)
     assert body["comparison_n_obs"] == len(close.iloc[::2]) - 1
     assert by_symbol["FULL"]["beta"] == pytest.approx(1.0, abs=1e-9)
     assert by_symbol["GAPS"]["beta"] == pytest.approx(1.0, abs=1e-9)
@@ -863,6 +874,75 @@ def test_hedge_builds_every_candidate_return_on_one_cross_calendar_grid(tmp_path
     assert by_symbol["FULL"]["protection"] == pytest.approx(
         by_symbol["GAPS"]["protection"], abs=1e-12
     )
+    assert by_symbol["FULL"]["hedge_qty"] == pytest.approx(-10.0, abs=1e-9)
+    assert by_symbol["FULL"]["residual_beta"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_hedge_sizes_with_the_book_beta_from_the_common_candidate_calendar(tmp_path):
+    index = pd.bdate_range(end="2026-09-04", periods=521)
+    rng = np.random.default_rng(42)
+    benchmark_returns = rng.normal(0.0, 0.01, len(index) - 1)
+    book_beta_regime = np.r_[np.full(460, 0.2), np.full(60, 2.0)]
+    benchmark_close = pd.Series(
+        np.r_[100.0, 100.0 * np.cumprod(1 + benchmark_returns)], index=index
+    )
+    book_close = pd.Series(
+        np.r_[
+            100.0,
+            100.0 * np.cumprod(1 + book_beta_regime * benchmark_returns),
+        ],
+        index=index,
+    )
+
+    def bars(series):
+        return pd.DataFrame(
+            {
+                "open": series,
+                "high": series,
+                "low": series,
+                "close": series,
+                "volume": 1000.0,
+            },
+            index=series.index,
+        )
+
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-09-04")
+    series_by_symbol = {
+        "BENCH": benchmark_close,
+        "BOOK": book_close,
+        "FULL": book_close.copy(),
+        "GAPS": benchmark_close.iloc[::2],
+    }
+    store.write_symbol_map(
+        {symbol: con_id for con_id, symbol in enumerate(series_by_symbol, 1)}
+    )
+    for con_id, (symbol, series) in enumerate(series_by_symbol.items(), 1):
+        store.write_bars(con_id, "1d", bars(series), meta)
+        _write_metadata(store, symbol, {"con_id": con_id, "currency": "USD"})
+    client = TestClient(
+        create_app(store=store, benchmark="BENCH", api_token="testtoken"),
+        base_url="http://127.0.0.1",
+        headers={"Authorization": "Bearer testtoken"},
+    )
+
+    response = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "BOOK", "qty": 10}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["FULL", "GAPS"],
+            "years": 5,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    full = next(row for row in body["candidates"] if row["symbol"] == "FULL")
+    assert body["book_beta"] == pytest.approx(2.0, abs=1e-9)
+    assert body["comparison_book_beta"] == pytest.approx(full["beta"], abs=1e-9)
+    assert full["hedge_qty"] == pytest.approx(-10.0, abs=1e-9)
+    assert full["residual_beta"] == pytest.approx(0.0, abs=1e-9)
 
 
 def test_incompatible_candidate_cohort_error_is_independent_of_request_order(tmp_path):
@@ -883,7 +963,7 @@ def test_incompatible_candidate_cohort_error_is_independent_of_request_order(tmp
     store.write_bars(3, "1d", late, meta)
     store.write_symbol_map({"SPY": 1, "EARLY": 2, "LATE": 3})
     for symbol in ("SPY", "EARLY", "LATE"):
-        store.write_instrument_metadata(symbol, {"currency": "USD"})
+        _write_metadata(store, symbol, {"currency": "USD"})
     client = TestClient(
         create_app(store=store, benchmark="SPY", api_token="testtoken"),
         base_url="http://127.0.0.1",
@@ -937,7 +1017,7 @@ def test_hedge_rejects_a_stale_requested_candidate_relative_to_book_as_of(
     store.write_bars(2, "1d", stale, meta)
     store.write_symbol_map({"SPY": 1, "STALE": 2})
     for symbol in ("SPY", "STALE"):
-        store.write_instrument_metadata(symbol, {"currency": "USD"})
+        _write_metadata(store, symbol, {"currency": "USD"})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     client = TestClient(
         app,
@@ -975,7 +1055,7 @@ def test_hedge_rejects_requested_candidate_without_minimum_comparison_history(
     store.write_bars(2, "1d", short, meta)
     store.write_symbol_map({"SPY": 1, "SHORT": 2})
     for symbol in ("SPY", "SHORT"):
-        store.write_instrument_metadata(symbol, {"currency": "USD"})
+        _write_metadata(store, symbol, {"currency": "USD"})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     client = TestClient(
         app,
@@ -1238,8 +1318,8 @@ def test_leverage_normalizes_a_mixed_currency_book_and_reports_fx(tmp_path):
     store.write_bars(1, "1d", eur, meta)
     store.write_bars(2, "1d", gbp, meta)
     store.write_symbol_map({"IWDA": 1, "VWRL": 2})
-    store.write_instrument_metadata("IWDA", {"currency": "EUR"})
-    store.write_instrument_metadata("VWRL", {"currency": "GBP"})
+    _write_metadata(store, "IWDA", {"currency": "EUR"})
+    _write_metadata(store, "VWRL", {"currency": "GBP"})
     rows = ["CURRENCY,TIME_PERIOD,OBS_VALUE"]
     for timestamp in eur.index:
         day = timestamp.date().isoformat()
@@ -1297,7 +1377,7 @@ def test_leverage_refuses_a_non_base_book_without_dated_fx(tmp_path):
         BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24"),
     )
     store.write_symbol_map({"IWDA": 1})
-    store.write_instrument_metadata("IWDA", {"currency": "EUR"})
+    _write_metadata(store, "IWDA", {"currency": "EUR"})
     app = create_app(
         store=store,
         benchmark="SPY",

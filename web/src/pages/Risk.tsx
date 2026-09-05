@@ -670,6 +670,19 @@ export function Risk() {
           {mc.data && (
             <>
               <FxEvidenceLine fx={mc.data.fx} testId="monte-carlo-fx-evidence" />
+              {mc.data.n_nonfinite > 0 && (
+                <p
+                  role="status"
+                  aria-label="Monte Carlo sample warning"
+                  className="mb-3 border border-warning/40 bg-warning/5 px-3 py-2 text-[11px] text-warning"
+                >
+                  {mc.data.n_nonfinite.toLocaleString()} non-finite path
+                  {mc.data.n_nonfinite === 1 ? " was" : "s were"} excluded; results use{" "}
+                  {Math.max(0, mc.data.n_paths - mc.data.n_nonfinite).toLocaleString()} of{" "}
+                  {mc.data.n_paths.toLocaleString()} requested paths. Check cached prices for zero or
+                  degenerate observations.
+                </p>
+              )}
               <FanChart histogram={mc.data.histogram} p5={mc.data.p5} p50={mc.data.p50} p95={mc.data.p95} horizon={mc.data.horizon} />
               <div className="grid grid-cols-3 gap-x-4 gap-y-3 mt-3">
                 <div>

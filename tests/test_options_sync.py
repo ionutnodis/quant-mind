@@ -113,6 +113,7 @@ async def test_sync_writes_a_chain_per_underlier(bar_store, options_store):
     df, meta = options_store.read_chain("SPY")
     assert meta.spot == pytest.approx(452.0)
     assert meta.as_of == "2026-07-24"
+    assert meta.underlier_con_id == 756733
     # strikes within +/-15% of 452 (=[384.2, 519.8]) x 1 monthly expiry x {C,P}
     assert set(df["strike"]) <= {400.0, 420.0, 440.0, 452.0, 460.0, 480.0, 500.0}
     assert set(df["right"]) == {"C", "P"}

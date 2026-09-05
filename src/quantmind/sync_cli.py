@@ -310,7 +310,7 @@ async def _run_main(symbols: list[str], ib_connections: list) -> None:
                         store, provider, {base_currency, currency}
                     )
                     synced.append(currency)
-                except FxConversionUnavailable:
+                except Exception:
                     unresolved.append(currency)
             if synced and last_result is not None:
                 print(

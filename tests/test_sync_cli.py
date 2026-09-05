@@ -463,6 +463,51 @@ async def test_missing_one_fx_currency_still_publishes_supported_evidence(
     )
 
 
+async def test_partial_fx_retries_isolate_transient_provider_errors(
+    monkeypatch, tmp_path, capsys
+):
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=7, symbol="IWDA", qty=20, currency="EUR"),
+            Position(con_id=8, symbol="ISF", qty=10, currency="GBP"),
+        ),
+        as_of="2026-09-04",
+    )
+    _wire_sync_main(
+        monkeypatch,
+        tmp_path,
+        portfolio,
+        account_currency="HKD",
+    )
+    fx_calls: list[list[str]] = []
+
+    def sync_fx(_store, _provider, currencies, **_kwargs):
+        requested = sorted(currencies)
+        fx_calls.append(requested)
+        if len(requested) > 2 or requested == ["HKD", "USD"]:
+            raise FxConversionUnavailable("ECB returned no usable HKD rates")
+        if requested == ["EUR", "USD"]:
+            raise RuntimeError("temporary ECB transport failure")
+        return type("Result", (), {"as_of": "2026-09-04"})()
+
+    monkeypatch.setattr(sync_cli, "sync_ecb_fx", sync_fx)
+
+    await sync_cli.main(["SPY"])
+
+    assert fx_calls == [
+        ["EUR", "GBP", "HKD", "USD"],
+        ["EUR", "USD"],
+        ["GBP", "USD"],
+        ["HKD", "USD"],
+    ]
+    output = capsys.readouterr().out
+    assert "GBP through 2026-09-04" in output
+    assert "remain unavailable for EUR, HKD" in output
+    assert output.strip().endswith(
+        "SYNC_RESULT: partial · FX reference rates incomplete"
+    )
+
+
 async def test_main_runs_opt_in_ucits_enrichment_after_ibkr_metadata(monkeypatch, tmp_path):
     metadata = {
         "IWDA": {

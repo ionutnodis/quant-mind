@@ -50,6 +50,7 @@ const BASE_ATTRIBUTION = {
 const TWO_POSITIONS = {
   snapshot_id: "abc123def456",
   valuation_ts: "2026-07-25T00:00:00Z",
+  market_data_as_of: "2026-07-24",
   base_currency: "USD",
   fx: {
     status: "converted",
@@ -72,6 +73,7 @@ const TWO_POSITIONS = {
       right: null,
       currency: "EUR",
       last_close: 100.0,
+      mark_as_of: "2026-07-24",
       fx_rate_to_base: 1.08,
       local_market_value: 1000.0,
       market_value: 1000.0,
@@ -91,6 +93,7 @@ const TWO_POSITIONS = {
       right: "C",
       currency: "USD",
       last_close: 5.0,
+      mark_as_of: "2026-07-23",
       fx_rate_to_base: 1.0,
       local_market_value: 2500.0,
       market_value: 2500.0,
@@ -143,6 +146,7 @@ const TWO_POSITIONS = {
 const EMPTY = {
   snapshot_id: "empty000000",
   valuation_ts: "2026-07-25T00:00:00Z",
+  market_data_as_of: null,
   base_currency: "USD",
   fx: {
     status: "identity",
@@ -196,6 +200,9 @@ test("renders positions table with cost basis, unrealized P&L, and totals from t
   expect(table.getByText("3500.00")).toBeInTheDocument();
   // snapshot/valuation-ts note (Panel-level, outside the table)
   expect(screen.getByText(/abc123def456/)).toBeInTheDocument();
+  expect(screen.getByText(/book calculated 2026-07-25 · oldest mark 2026-07-24/)).toBeInTheDocument();
+  expect(table.getByText("mark 2026-07-24")).toBeInTheDocument();
+  expect(table.getByText("mark 2026-07-23")).toBeInTheDocument();
   expect(screen.getByTestId("fx-evidence")).toHaveTextContent("ECB");
   expect(table.getByText("EUR")).toBeInTheDocument();
   expect(table.getByRole("columnheader", { name: "Unrealized P&L (USD)" })).toBeInTheDocument();

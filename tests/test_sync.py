@@ -556,6 +556,52 @@ async def test_corrupt_metadata_rebuild_salvages_valid_records_during_partial_fa
     assert rebuilt["SPY"]["con_id"] == 756733
 
 
+@pytest.mark.parametrize(
+    ("cached_records", "expected_records"),
+    [
+        (
+            {
+                "UNTOUCHED": {
+                    "con_id": 42,
+                    "currency": "EUR",
+                    "provider": "yfinance",
+                },
+                "POISON": 7,
+            },
+            {
+                "UNTOUCHED": {
+                    "con_id": 42,
+                    "currency": "EUR",
+                    "provider": "yfinance",
+                }
+            },
+        ),
+        ({"POISON": 7}, {}),
+    ],
+)
+async def test_corrupt_metadata_rebuild_publishes_salvage_when_every_refresh_fails(
+    tmp_path, cached_records, expected_records
+):
+    import json
+
+    store, broker, sleeper = BarStore(tmp_path), FakeMetadataBroker(), FakeSleeper()
+    (tmp_path / "instruments.json").write_text(json.dumps(cached_records))
+    failures: dict[str, str] = {}
+
+    written = await sync_instrument_metadata(
+        store,
+        broker,
+        {"FAILED": 999},
+        sleep=sleeper,
+        pace_seconds=0,
+        failures=failures,
+    )
+
+    assert written == {}
+    assert "KeyError" in failures["FAILED"]
+    assert store.read_all_instrument_metadata() == expected_records
+
+
 async def test_corrupt_metadata_rebuild_preserves_enrichment_for_a_refreshed_identity(
     tmp_path,
 ):
@@ -600,6 +646,85 @@ async def test_corrupt_metadata_rebuild_preserves_enrichment_for_a_refreshed_ide
     assert rebuilt["ucits_profile_isin"] == "IE00B4L5Y983"
     assert rebuilt["ucits_profile_status"] == "FRESH"
     assert rebuilt["ucits_profile_reason"] == "verified cache"
+
+
+async def test_sparse_metadata_refresh_preserves_enrichment_for_the_same_contract(
+    tmp_path,
+):
+    store, broker, sleeper = BarStore(tmp_path), FakeMetadataBroker(), FakeSleeper()
+    broker.details[12345] = {
+        "long_name": "iShares Core MSCI World UCITS ETF",
+        "currency": "GBP",
+        "sec_type": "STK",
+    }
+    store.write_instrument_metadata(
+        "IWDA",
+        {
+            "con_id": 12345,
+            "currency": "GBP",
+            "provider": "ibkr",
+            "stock_type": "ETF",
+            "isin": "IE00B4L5Y983",
+            "ucits_profile_isin": "IE00B4L5Y983",
+            "ucits_profile_status": "FRESH",
+            "ucits_profile_reason": "verified cache",
+        },
+    )
+
+    await sync_instrument_metadata(
+        store,
+        broker,
+        {"IWDA": 12345},
+        sleep=sleeper,
+        pace_seconds=0,
+    )
+
+    refreshed = store.read_instrument_metadata("IWDA")
+    assert refreshed["isin"] == "IE00B4L5Y983"
+    assert refreshed["stock_type"] == "ETF"
+    assert refreshed["ucits_profile_isin"] == "IE00B4L5Y983"
+    assert refreshed["ucits_profile_status"] == "FRESH"
+    assert refreshed["ucits_profile_reason"] == "verified cache"
+
+
+async def test_explicit_isin_change_invalidates_enrichment_for_the_same_contract(
+    tmp_path,
+):
+    store, broker, sleeper = BarStore(tmp_path), FakeMetadataBroker(), FakeSleeper()
+    broker.details[12345] = {
+        "long_name": "Replacement listing",
+        "currency": "GBP",
+        "sec_type": "STK",
+        "stock_type": "ETF",
+        "isin": "IE00BK5BQT80",
+    }
+    store.write_instrument_metadata(
+        "IWDA",
+        {
+            "con_id": 12345,
+            "currency": "GBP",
+            "provider": "ibkr",
+            "stock_type": "ETF",
+            "isin": "IE00B4L5Y983",
+            "ucits_profile_isin": "IE00B4L5Y983",
+            "ucits_profile_status": "FRESH",
+            "ucits_profile_reason": "verified cache",
+        },
+    )
+
+    await sync_instrument_metadata(
+        store,
+        broker,
+        {"IWDA": 12345},
+        sleep=sleeper,
+        pace_seconds=0,
+    )
+
+    refreshed = store.read_instrument_metadata("IWDA")
+    assert refreshed["isin"] == "IE00BK5BQT80"
+    assert refreshed["ucits_profile_isin"] is None
+    assert refreshed["ucits_profile_status"] is None
+    assert refreshed["ucits_profile_reason"] is None
 
 
 async def test_sync_instrument_metadata_merges_extra_tags(tmp_path):

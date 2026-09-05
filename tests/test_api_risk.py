@@ -12,6 +12,15 @@ from quantmind.datastore.store import BarMeta, BarStore
 from quantmind.fx import EcbFxProvider, sync_ecb_fx
 
 
+def _write_metadata(store: BarStore, symbol: str, fields: dict) -> None:
+    payload = dict(fields)
+    if "con_id" not in payload:
+        con_id = store.read_symbol_map().get(symbol)
+        if con_id is not None:
+            payload["con_id"] = con_id
+    store.write_instrument_metadata(symbol, payload)
+
+
 def _bars(n=300, seed=1):
     rng = np.random.default_rng(seed)
     idx = pd.bdate_range(end="2026-07-24", periods=n)
@@ -23,7 +32,7 @@ def _bars(n=300, seed=1):
 
 def _write_usd_metadata(store, *symbols):
     for symbol in symbols:
-        store.write_instrument_metadata(symbol, {"currency": "USD", "exchange": "SMART"})
+        _write_metadata(store, symbol, {"currency": "USD", "exchange": "SMART"})
 
 
 def _european_risk_client(tmp_path):
@@ -39,8 +48,8 @@ def _european_risk_client(tmp_path):
     store.write_bars(1, "1d", benchmark, meta)
     store.write_bars(2, "1d", european, meta)
     store.write_symbol_map({"SPY": 1, "IWDA": 2})
-    store.write_instrument_metadata("SPY", {"currency": "USD", "exchange": "ARCA"})
-    store.write_instrument_metadata("IWDA", {"currency": "EUR", "exchange": "AEB"})
+    _write_metadata(store, "SPY", {"currency": "USD", "exchange": "ARCA"})
+    _write_metadata(store, "IWDA", {"currency": "EUR", "exchange": "AEB"})
     rows = ["CURRENCY,TIME_PERIOD,OBS_VALUE"]
     for timestamp, usd_per_eur in zip(benchmark.index, rates, strict=True):
         rows.append(f"USD,{timestamp.date().isoformat()},{usd_per_eur:.12f}")

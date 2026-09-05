@@ -9,7 +9,8 @@ from quantmind.sources.ucits_sync import sync_ucits_profiles
 
 PROFILE_HTML = """
 <html><h1>iShares Core MSCI World UCITS ETF USD (Acc)</h1>
-<div>ISIN IE00B4L5Y983</div><table>
+<table>
+  <tr><td data-testid="tl_etf-basics_value_isin">IE00B4L5Y983</td></tr>
   <tr><td data-testid="tl_etf-basics_value_index-name">MSCI World</td></tr>
   <tr><td data-testid="tl_etf-basics_value_ter">0.20% p.a.</td></tr>
   <tr><td data-testid="tl_etf-basics_value_replication">Physical</td></tr>

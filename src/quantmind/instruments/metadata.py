@@ -158,9 +158,11 @@ class UcitsEtfProfileV1(FrozenContractBase):
             Decimal(value) if info.mode == "json" and isinstance(value, str) else value
         )
         if isinstance(candidate, Decimal) and (
-            not candidate.is_finite() or candidate < 0
+            not candidate.is_finite() or candidate < 0 or candidate > Decimal("5")
         ):
-            raise ValueError("expense ratio must be finite and non-negative")
+            raise ValueError(
+                "expense ratio must be finite and between 0 and 5 percent"
+            )
         return candidate
 
     @field_validator(

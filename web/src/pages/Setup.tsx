@@ -288,8 +288,8 @@ export function Setup() {
           detail={fxDetail}
         />
         <StatusCard
-          ariaLabel="UCITS metadata status"
-          label="UCITS metadata"
+          ariaLabel="European ETF sourced-profile status"
+          label="European ETF profiles"
           status={data.ucits_data.status}
           detail={ucitsDetail}
         />

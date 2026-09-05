@@ -89,7 +89,7 @@ export function Portfolio() {
   if (!data) return null;
 
   const account = data.account;
-  const note = `snapshot ${data.snapshot_id} · as of ${data.valuation_ts.slice(0, 10)}${bookRef ? ` · book_ref ${bookRef}` : ""}`;
+  const note = `snapshot ${data.snapshot_id} · book ${bookRef ? "pinned" : "calculated"} ${data.valuation_ts.slice(0, 10)} · oldest mark ${data.market_data_as_of ?? "unavailable"}`;
   const hasNoOptionPositions = (data.options_sleeve.total_positions ?? 0) === 0;
   const valuationComplete = data.totals.valuation_status === "complete";
   const pnlComplete = data.totals.pnl_status === "complete";
@@ -249,7 +249,11 @@ export function Portfolio() {
                       <MobileLabel>Quantity</MobileLabel>{fmtNum(p.qty, 0)}
                     </td>
                     <td className="num lg:table-cell lg:border-b lg:border-hairline/60 lg:py-2 lg:text-right">
-                      <MobileLabel>Last (local)</MobileLabel>{fmtNum(p.last_close)}
+                      <MobileLabel>Last (local)</MobileLabel>
+                      <div>{fmtNum(p.last_close)}</div>
+                      {p.mark_as_of && (
+                        <div className="mt-1 text-[11px] text-muted">mark {p.mark_as_of}</div>
+                      )}
                     </td>
                     <td className="num text-right lg:table-cell lg:border-b lg:border-hairline/60 lg:py-2">
                       <MobileLabel>Avg cost (local)</MobileLabel>{fmtNum(p.avg_cost)}

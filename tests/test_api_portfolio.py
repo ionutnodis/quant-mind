@@ -65,8 +65,11 @@ def store(tmp_path) -> BarStore:
     s.write_bars(con_id=2, bar_size="1d", bars=_flat_bars(5.0), meta=meta)
     s.write_bars(con_id=3, bar_size="1d", bars=_flat_bars(380.0), meta=meta)
     s.write_symbol_map({"SPY": 1, "OPT_XYZ": 2, "QQQ": 3})
-    for symbol in ("SPY", "OPT_XYZ", "QQQ"):
-        s.write_instrument_metadata(symbol, {"currency": "USD", "exchange": "SMART"})
+    for symbol, con_id in (("SPY", 1), ("OPT_XYZ", 2), ("QQQ", 3)):
+        s.write_instrument_metadata(
+            symbol,
+            {"con_id": con_id, "currency": "USD", "exchange": "SMART"},
+        )
     return s
 
 
@@ -81,8 +84,11 @@ def rich_store(tmp_path) -> BarStore:
     s.write_bars(con_id=1, bar_size="1d", bars=_random_bars(seed=1, start=450.0), meta=meta)
     s.write_bars(con_id=2, bar_size="1d", bars=_random_bars(seed=2, start=380.0), meta=meta)
     s.write_symbol_map({"SPY": 1, "QQQ": 2})
-    for symbol in ("SPY", "QQQ"):
-        s.write_instrument_metadata(symbol, {"currency": "USD", "exchange": "SMART"})
+    for symbol, con_id in (("SPY", 1), ("QQQ", 2)):
+        s.write_instrument_metadata(
+            symbol,
+            {"con_id": con_id, "currency": "USD", "exchange": "SMART"},
+        )
     return s
 
 
@@ -120,7 +126,13 @@ def _chain_df(rows: list[dict]) -> pd.DataFrame:
 
 def _write_chain(store: BarStore, underlier: str, rows: list[dict], spot: float, as_of: str | None = None) -> None:
     OptionsStore(store.root).write_chain(
-        underlier, _chain_df(rows), OptionsSnapshotMeta(as_of=as_of or str(date.today()), spot=spot)
+        underlier,
+        _chain_df(rows),
+        OptionsSnapshotMeta(
+            as_of=as_of or str(date.today()),
+            spot=spot,
+            underlier_con_id=store.read_symbol_map()[underlier],
+        ),
     )
 
 
@@ -146,6 +158,7 @@ def test_portfolio_no_broker_is_structured_empty(store):
     }
     assert body["base_currency"] == "USD"
     assert body["valuation_ts"].endswith("Z")
+    assert body["market_data_as_of"] is None
     assert body["snapshot_id"]
 
 
@@ -244,7 +257,66 @@ def test_portfolio_positions_expose_exact_broker_reconciliation_identity(store):
     assert option["right"] == "P"
 
 
+@pytest.mark.parametrize("held_contract_has_bars", [False, True])
+def test_live_portfolio_rejects_a_symbol_map_bound_to_another_stock_contract(
+    tmp_path, held_contract_has_bars
+):
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today()))
+    store.write_symbol_map({"ASML": 1})
+    store.write_bars(1, "1d", _flat_bars(399.0), meta)
+    if held_contract_has_bars:
+        store.write_bars(2, "1d", _flat_bars(800.0), meta)
+    store.write_instrument_metadata(
+        "ASML", {"con_id": 1, "currency": "USD", "exchange": "NASDAQ"}
+    )
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=2,
+                symbol="ASML",
+                qty=10,
+                currency="EUR",
+                exchange="AEB",
+            ),
+        ),
+        as_of="2026-09-04",
+    )
+
+    response = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+
+    assert response.status_code == 409
+    assert "ASML" in response.json()["detail"]
+    assert "run sync" in response.json()["detail"]
+
+
+def test_live_portfolio_rejects_dual_listings_that_share_one_ticker(store):
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=1, symbol="ASML", qty=5, currency="EUR", exchange="AEB"),
+            Position(
+                con_id=99,
+                symbol="ASML",
+                qty=3,
+                currency="USD",
+                exchange="NASDAQ",
+            ),
+        ),
+        as_of="2026-09-04",
+    )
+
+    response = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+
+    assert response.status_code == 422
+    assert "multiple listings" in response.json()["detail"]
+    assert "ASML" in response.json()["detail"]
+
+
 def test_portfolio_position_without_cached_bars_returns_null_price_fields(store):
+    store.write_symbol_map({**store.read_symbol_map(), "UNKNOWN": 999})
+    store.write_instrument_metadata(
+        "UNKNOWN", {"con_id": 999, "currency": "USD", "exchange": "SMART"}
+    )
     portfolio = Portfolio(
         positions=(
             Position(con_id=1, symbol="SPY", qty=10, sec_type="STK", multiplier=1.0),
@@ -429,11 +501,22 @@ def test_avg_cost_missing_from_broker_is_honest_null(store):
 
 
 def test_foreign_avg_cost_exposes_local_pnl_but_withholds_base_pnl(store):
-    store.write_instrument_metadata("ASML", {"currency": "EUR", "exchange": "AEB"})
+    store.write_symbol_map({**store.read_symbol_map(), "ASML": 4})
+    store.write_bars(
+        con_id=4,
+        bar_size="1d",
+        bars=_flat_bars(100.0),
+        meta=BarMeta(
+            bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today())
+        ),
+    )
+    store.write_instrument_metadata(
+        "ASML", {"con_id": 4, "currency": "EUR", "exchange": "AEB"}
+    )
     portfolio = Portfolio(
         positions=(
             Position(
-                con_id=1,
+                con_id=4,
                 symbol="ASML",
                 qty=10,
                 sec_type="STK",
@@ -457,7 +540,7 @@ def test_foreign_avg_cost_exposes_local_pnl_but_withholds_base_pnl(store):
     )
 
     body = _client(
-        store, broker=FakeBroker(portfolio, avg_costs={1: 90.0})
+        store, broker=FakeBroker(portfolio, avg_costs={4: 90.0})
     ).get("/api/portfolio").json()
 
     position = body["positions"][0]
@@ -689,13 +772,28 @@ def test_pinned_portfolio_response_preserves_snapshot_identity_and_valuation_tim
 
     assert body["snapshot_id"] == pinned.snapshot_id
     assert body["valuation_ts"] == valuation_ts
+    expected_mark_date = pd.bdate_range(end=date.today(), periods=1)[-1].date().isoformat()
+    assert body["market_data_as_of"] == expected_mark_date
+    assert body["positions"][0]["mark_as_of"] == expected_mark_date
 
 
 def test_non_base_live_position_without_fx_is_local_only_and_honestly_partial(store):
+    store.write_symbol_map({**store.read_symbol_map(), "ASML": 4})
+    store.write_bars(
+        con_id=4,
+        bar_size="1d",
+        bars=_flat_bars(100.0),
+        meta=BarMeta(
+            bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today())
+        ),
+    )
+    store.write_instrument_metadata(
+        "ASML", {"con_id": 4, "currency": "EUR", "exchange": "AEB"}
+    )
     portfolio = Portfolio(
         positions=(
             Position(
-                con_id=1,
+                con_id=4,
                 symbol="ASML",
                 qty=10,
                 currency="EUR",
@@ -720,6 +818,74 @@ def test_non_base_live_position_without_fx_is_local_only_and_honestly_partial(st
     assert body["totals"]["valuation_status"] == "partial"
     assert body["fx"]["status"] == "incomplete"
     assert body["fx"]["missing_currencies"] == ["EUR"]
+
+
+def test_portfolio_preserves_supported_currency_when_another_has_no_fx_route(
+    tmp_path,
+):
+    store = BarStore(tmp_path)
+    bars = _flat_bars(100.0, n=300)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today()))
+    for con_id in (1, 2, 3):
+        store.write_bars(con_id, "1d", bars, meta)
+    store.write_symbol_map({"SPY": 1, "EURLEG": 2, "CHFLEG": 3})
+    store.write_instrument_metadata(
+        "SPY", {"con_id": 1, "currency": "USD", "exchange": "ARCA"}
+    )
+    store.write_instrument_metadata(
+        "EURLEG", {"con_id": 2, "currency": "EUR", "exchange": "AEB"}
+    )
+    store.write_instrument_metadata(
+        "CHFLEG", {"con_id": 3, "currency": "CHF", "exchange": "EBS"}
+    )
+    fx_rows = ["CURRENCY,TIME_PERIOD,OBS_VALUE"]
+    fx_rows.extend(
+        f"USD,{timestamp.date().isoformat()},1.1000" for timestamp in bars.index
+    )
+    latest_market_date = bars.index[-1].date()
+    fetched_at = f"{latest_market_date.isoformat()}T17:00:00Z"
+    sync_ecb_fx(
+        store,
+        EcbFxProvider(fetcher=lambda _url: "\n".join(fx_rows)),
+        {"USD", "EUR"},
+        today=date.today(),
+        years=5,
+        fetched_at=fetched_at,
+    )
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=2, symbol="EURLEG", qty=10, currency="EUR"),
+            Position(con_id=3, symbol="CHFLEG", qty=10, currency="CHF"),
+        ),
+        as_of=date.today().isoformat(),
+    )
+
+    response = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    positions = {position["symbol"]: position for position in body["positions"]}
+    assert positions["EURLEG"]["fx_rate_to_base"] == pytest.approx(1.1)
+    assert positions["EURLEG"]["market_value"] == pytest.approx(1_100.0)
+    assert positions["CHFLEG"]["local_market_value"] == pytest.approx(1_000.0)
+    assert positions["CHFLEG"]["fx_rate_to_base"] is None
+    assert positions["CHFLEG"]["market_value"] is None
+    assert body["totals"]["market_value"] is None
+    assert body["totals"]["priced_market_value"] == pytest.approx(1_100.0)
+    assert body["totals"]["priced_positions"] == 1
+    assert body["totals"]["valuation_status"] == "partial"
+    assert body["fx"]["status"] == "incomplete"
+    assert body["fx"]["base_currency"] == "USD"
+    assert body["fx"]["source"] == "ECB"
+    assert body["fx"]["as_of"] == latest_market_date.isoformat()
+    assert body["fx"]["fetched_at"] == fetched_at
+    assert body["fx"]["missing_currencies"] == ["CHF"]
+    exposure = next(row for row in body["exposure"] if row["underlier"] == "EURLEG")
+    assert exposure["fx_rate_to_base"] == pytest.approx(1.1)
+    assert exposure["dollar_delta"] == pytest.approx(1_100.0)
+    assert body["attribution"]["available"] is False
+    assert "CHFLEG" in body["attribution"]["reason"]
+    assert "base-currency history" in body["attribution"]["reason"]
 
 
 def test_european_position_and_account_are_converted_to_selected_base(store):
@@ -1213,6 +1379,10 @@ def test_exposure_beta_computed_with_sufficient_history(rich_store):
 
 
 def test_exposure_skips_underlier_with_no_cached_bars(store):
+    store.write_symbol_map({**store.read_symbol_map(), "UNKNOWN": 999})
+    store.write_instrument_metadata(
+        "UNKNOWN", {"con_id": 999, "currency": "USD", "exchange": "SMART"}
+    )
     portfolio = Portfolio(
         positions=(Position(con_id=999, symbol="UNKNOWN", qty=3, sec_type="STK", multiplier=1.0),),
         as_of="2026-07-24",
@@ -1486,6 +1656,64 @@ def test_manual_option_rejects_ambiguous_terms_without_matching_contract_id(stor
     ).json()
 
     assert body["positions"][0]["last_close"] is None
+    assert body["options_sleeve"]["status"] == "unavailable"
+
+
+def test_manual_option_rejects_chain_bound_to_an_old_underlier_contract(store):
+    expiry = _expiry_str(45)
+    _write_chain(
+        store,
+        "SPY",
+        [
+            {
+                "expiry": expiry,
+                "strike": 105.0,
+                "right": "C",
+                "con_id": 4001,
+                "bid": 1.0,
+                "ask": 1.2,
+                "iv": 0.25,
+                "delta": 0.5,
+                "multiplier": 100.0,
+            }
+        ],
+        spot=100.0,
+    )
+    store.write_bars(
+        con_id=99,
+        bar_size="1d",
+        bars=_flat_bars(120.0),
+        meta=BarMeta(
+            bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today())
+        ),
+    )
+    store.write_symbol_map({**store.read_symbol_map(), "SPY": 99})
+    store.write_instrument_metadata(
+        "SPY", {"con_id": 99, "currency": "USD", "exchange": "ARCA"}
+    )
+    client = _client(store, broker=None)
+    pinned = client.post(
+        "/api/book/pin",
+        json={
+            "positions": [
+                {
+                    "symbol": "SPY",
+                    "qty": 1,
+                    "strike": 105.0,
+                    "expiry": expiry,
+                    "right": "C",
+                }
+            ]
+        },
+    )
+    assert pinned.status_code == 200
+
+    body = client.get(
+        "/api/portfolio", params={"book_ref": pinned.json()["snapshot_id"]}
+    ).json()
+
+    assert body["positions"][0]["last_close"] is None
+    assert body["positions"][0]["market_value"] is None
     assert body["options_sleeve"]["status"] == "unavailable"
 
 

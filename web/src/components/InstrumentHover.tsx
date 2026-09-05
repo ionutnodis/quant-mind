@@ -9,6 +9,7 @@ import { type ReactNode, useCallback, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { request } from "../lib/api";
 import type { components } from "../lib/api-types";
+import { ariaIdToken } from "../lib/aria";
 import { InstrumentSheet } from "./InstrumentSheet";
 
 export type InstrumentSummary = components["schemas"]["InstrumentResponse"];
@@ -40,7 +41,7 @@ export function InstrumentHover({
   const [sheetOpen, setSheetOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const closeSheet = useCallback(() => setSheetOpen(false), []);
-  const tooltipId = `instrument-tooltip-${symbol}`;
+  const tooltipId = `instrument-tooltip-${ariaIdToken(symbol)}`;
   const tooltipOpen = hovered && !sheetOpen;
   const { data, isLoading } = useQuery({
     queryKey: ["instrument", symbol],

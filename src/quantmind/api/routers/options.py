@@ -42,7 +42,7 @@ from quantmind.api.routers.book import (
     validate_pinned_book_scope,
     validate_pinned_instrument_identities,
 )
-from quantmind.datastore.options_store import OptionsStore
+from quantmind.datastore.options_store import OptionsStore, option_chain_freshness
 from quantmind.exposure.book_greeks import (
     BookLeg,
     aggregate_book_stress_grid,
@@ -133,13 +133,23 @@ def get_chain(underlier: str, request: Request) -> ChainResponse:
 
     try:
         df, meta = store.read_chain(underlier)
-    except FileNotFoundError:
+    except (FileNotFoundError, KeyError, OSError, ValueError):
         # TOCTOU-safe fallback: has_chain() and read_chain() are two
         # filesystem calls, never a crash if the file vanished between them.
         return _empty_chain_response(underlier)
 
-    as_of_date = datetime.strptime(meta.as_of, "%Y-%m-%d").date() if _looks_like_date(meta.as_of) else None
-    stale = True if as_of_date is None else (date.today() - as_of_date).days > _STALE_AFTER_DAYS
+    try:
+        mapped_con_id = request.app.state.store.read_symbol_map().get(underlier)
+    except (OSError, TypeError, ValueError):
+        return _empty_chain_response(underlier)
+    if mapped_con_id is None or meta.underlier_con_id != mapped_con_id:
+        return _empty_chain_response(underlier)
+
+    _, stale = option_chain_freshness(
+        meta.as_of,
+        date.today(),
+        stale_after_business_days=_STALE_AFTER_DAYS,
+    )
 
     quotes = [
         OptionQuoteOut(
@@ -164,14 +174,6 @@ def get_chain(underlier: str, request: Request) -> ChainResponse:
         smile=_build_smile(df),
         missing=False,
     )
-
-
-def _looks_like_date(s: str) -> bool:
-    try:
-        datetime.strptime(s, "%Y-%m-%d")
-        return True
-    except ValueError:
-        return False
 
 
 # --- POST /api/options/book-greeks ---
@@ -265,6 +267,7 @@ def _leg_to_book_leg(
     options_store: OptionsStore,
     spot: float,
     as_of: date,
+    underlier_con_id: int,
     contract_con_id: int | None = None,
 ) -> BookLeg:
     if p.right is None:
@@ -279,7 +282,21 @@ def _leg_to_book_leg(
         raise HTTPException(
             422, detail=f"no cached option chain for underlier {p.symbol!r} — run options_sync_cli first"
         )
-    chain_df, _ = options_store.read_chain(p.symbol)
+    try:
+        chain_df, chain_meta = options_store.read_chain(p.symbol)
+    except (FileNotFoundError, KeyError, OSError, ValueError):
+        raise HTTPException(
+            422,
+            detail=f"cached option chain for {p.symbol!r} is invalid — run options_sync_cli first",
+        )
+    if chain_meta.underlier_con_id != underlier_con_id:
+        raise HTTPException(
+            422,
+            detail=(
+                f"cached option chain underlier identity for {p.symbol!r} no longer "
+                "matches the instrument map — run options_sync_cli first"
+            ),
+        )
     row = _find_quote_row(
         chain_df,
         expiry=p.expiry,
@@ -395,6 +412,7 @@ def book_greeks(request: Request, req: BookGreeksRequest) -> BookGreeksResponse:
             options_store,
             spots[p.symbol],
             as_of,
+            underlier_con_id=symbol_map[p.symbol],
             contract_con_id=(
                 getattr(p, "con_id", None) if use_persisted_contract_ids else None
             ),

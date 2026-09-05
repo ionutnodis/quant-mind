@@ -109,6 +109,7 @@ def create_app(
     broker=None,
     allowed_origins: tuple[str, ...] | None = None,
     base_currency: str = "USD",
+    ucits_metadata_enabled: bool = False,
 ) -> FastAPI:
     app = FastAPI(title="QuantMind API", version="0.5.0.0")
 
@@ -125,6 +126,7 @@ def create_app(
     app.state.store = store
     app.state.benchmark = benchmark
     app.state.base_currency = base_currency
+    app.state.ucits_metadata_enabled = ucits_metadata_enabled
     app.state.broker = broker
     app.state.broker_connection_status = "connected" if broker is not None else "unavailable"
     app.state.broker_connection_error = None

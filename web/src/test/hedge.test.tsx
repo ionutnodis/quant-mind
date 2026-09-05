@@ -68,6 +68,7 @@ const HEDGE_RESPONSE = {
   objective: { kind: "beta_target", value: 0.0 },
   book_value: 10000.0,
   book_beta: 1.0,
+  comparison_book_beta: 0.97,
   es_before: 0.0231,
   n_candidates_evaluated: 3,
   as_of: "2026-07-24T00:00:00Z",
@@ -190,7 +191,7 @@ test("shows hedge FX, common comparison evidence, and skipped-candidate warnings
     "FX base GBP · source ECB · as of 2026-07-22",
   );
   expect(screen.getByTestId("hedge-comparison-evidence")).toHaveTextContent(
-    "Common comparison · as of 2026-07-22 · 248 obs",
+    "Common comparison · sizing book β 0.97 · as of 2026-07-22 · 248 obs",
   );
   const warning = screen.getByRole("status", { name: /skipped hedge candidates/i });
   expect(within(warning).getByText(/EFA/)).toBeInTheDocument();

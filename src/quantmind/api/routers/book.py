@@ -205,6 +205,46 @@ def validate_pinned_instrument_identities(
         )
 
 
+def validate_live_stock_identities(store, portfolio: Portfolio) -> None:
+    """Refuse to collapse broker-held stock listings onto one ticker key."""
+    identities: dict[str, set[int]] = {}
+    for position in portfolio.positions:
+        if position.sec_type == "STK":
+            identities.setdefault(position.symbol, set()).add(position.con_id)
+    duplicate_listings = sorted(
+        symbol for symbol, con_ids in identities.items() if len(con_ids) > 1
+    )
+    if duplicate_listings:
+        raise HTTPException(
+            422,
+            detail=(
+                "live portfolio contains multiple listings for the same ticker "
+                f"{duplicate_listings}; this release cannot safely collapse them. "
+                "Use one canonical listing per ticker before analysis."
+            ),
+        )
+    try:
+        symbol_map = store.read_symbol_map()
+    except (OSError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            422,
+            detail="symbol map is corrupt; run sync to rebuild it",
+        ) from exc
+    changed = sorted(
+        symbol
+        for symbol, con_ids in identities.items()
+        if symbol_map.get(symbol) != next(iter(con_ids))
+    )
+    if changed:
+        raise HTTPException(
+            409,
+            detail=(
+                "live portfolio contract identity does not match cached market data "
+                f"for {changed}; run sync before analysis"
+            ),
+        )
+
+
 def write_book(
     store,
     snapshot: BookSnapshot,
@@ -446,6 +486,14 @@ def _portfolio_from_positions(store, positions: list[PositionIn], valuation_ts: 
     resolved_positions: list[Position] = []
     for p in positions:
         metadata = metadata_by_symbol.get(p.symbol) or {}
+        if metadata and metadata.get("con_id") != symbol_map[p.symbol]:
+            raise HTTPException(
+                422,
+                detail=(
+                    f"instrument metadata contract identity for {p.symbol!r} "
+                    "does not match the current symbol map; run sync"
+                ),
+            )
         authoritative_currency = str(metadata.get("currency") or "UNKNOWN")
         authoritative_exchange = str(metadata.get("exchange") or "").strip() or None
         if p.currency is not None and p.currency != authoritative_currency:
@@ -653,6 +701,7 @@ async def pin_book(request: Request, req: BookPinRequest) -> BookSnapshotOut:
         )
 
     portfolio = await _live_portfolio(request)
+    validate_live_stock_identities(store, portfolio)
     return _pin_and_respond(
         store,
         portfolio,
@@ -670,6 +719,7 @@ async def pin_book(request: Request, req: BookPinRequest) -> BookSnapshotOut:
 async def get_current_book(request: Request) -> CurrentBookOut:
     valuation_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     portfolio = await _live_portfolio(request)
+    validate_live_stock_identities(request.app.state.store, portfolio)
     return _current_out(
         portfolio, valuation_ts, base_currency=request.app.state.base_currency
     )

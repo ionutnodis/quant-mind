@@ -20,6 +20,15 @@ from quantmind.datastore.store import BarMeta, BarStore
 from quantmind.fx import EcbFxProvider, sync_ecb_fx
 
 
+def _write_metadata(store: BarStore, symbol: str, fields: dict) -> None:
+    payload = dict(fields)
+    if "con_id" not in payload:
+        con_id = store.read_symbol_map().get(symbol)
+        if con_id is not None:
+            payload["con_id"] = con_id
+    store.write_instrument_metadata(symbol, payload)
+
+
 def _bars(n=300, seed=1):
     rng = np.random.default_rng(seed)
     idx = pd.bdate_range(end="2026-07-24", periods=n)
@@ -41,7 +50,7 @@ def client(tmp_path):
     store.write_bars(con_id=2, bar_size="1d", bars=spy_bars.copy(), meta=meta)
     store.write_symbol_map({"SPY": 1, "QQQ": 2})
     for symbol in ("SPY", "QQQ"):
-        store.write_instrument_metadata(symbol, {"currency": "USD", "exchange": "SMART"})
+        _write_metadata(store, symbol, {"currency": "USD", "exchange": "SMART"})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
@@ -88,7 +97,7 @@ def test_whatif_weights_use_the_reported_common_as_of_mark(tmp_path):
     store.write_bars(2, "1d", qqq_bars, meta)
     store.write_symbol_map({"SPY": 1, "QQQ": 2})
     for symbol in ("SPY", "QQQ"):
-        store.write_instrument_metadata(symbol, {"currency": "USD"})
+        _write_metadata(store, symbol, {"currency": "USD"})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     c = TestClient(
         app,
@@ -128,8 +137,8 @@ def test_whatif_uses_dated_base_currency_prices_for_european_book(tmp_path):
     store.write_bars(1, "1d", bars, meta)
     store.write_bars(2, "1d", bars.copy(), meta)
     store.write_symbol_map({"SPY": 1, "IWDA": 2})
-    store.write_instrument_metadata("SPY", {"currency": "USD", "exchange": "ARCA"})
-    store.write_instrument_metadata("IWDA", {"currency": "EUR", "exchange": "AEB"})
+    _write_metadata(store, "SPY", {"currency": "USD", "exchange": "ARCA"})
+    _write_metadata(store, "IWDA", {"currency": "EUR", "exchange": "AEB"})
     rows = ["CURRENCY,TIME_PERIOD,OBS_VALUE"]
     for timestamp in bars.index:
         day = timestamp.date().isoformat()
@@ -271,8 +280,8 @@ def test_whatif_nonfinite_last_close_is_422_naming_the_symbol(tmp_path):
     bad_bars.loc[bad_bars.index[-1], "close"] = np.nan
     store.write_bars(con_id=2, bar_size="1d", bars=bad_bars, meta=meta)
     store.write_symbol_map({"SPY": 1, "QQQ": 2})
-    store.write_instrument_metadata("SPY", {"currency": "USD"})
-    store.write_instrument_metadata("QQQ", {"currency": "USD"})
+    _write_metadata(store, "SPY", {"currency": "USD"})
+    _write_metadata(store, "QQQ", {"currency": "USD"})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     c = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 

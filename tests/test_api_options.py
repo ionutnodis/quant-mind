@@ -34,8 +34,12 @@ def store(tmp_path):
     s.write_bars(con_id=1, bar_size="1d", bars=_bars(price=452.0), meta=meta)
     s.write_bars(con_id=2, bar_size="1d", bars=_bars(price=380.0), meta=meta)
     s.write_symbol_map({"SPY": 1, "QQQ": 2})
-    s.write_instrument_metadata("SPY", {"currency": "USD", "exchange": "ARCA"})
-    s.write_instrument_metadata("QQQ", {"currency": "USD", "exchange": "NASDAQ"})
+    s.write_instrument_metadata(
+        "SPY", {"con_id": 1, "currency": "USD", "exchange": "ARCA"}
+    )
+    s.write_instrument_metadata(
+        "QQQ", {"con_id": 2, "currency": "USD", "exchange": "NASDAQ"}
+    )
     return s
 
 
@@ -62,7 +66,11 @@ def _chain_df():
 
 
 def _write_spy_chain(store, as_of="2026-07-24"):
-    OptionsStore(store.root).write_chain("SPY", _chain_df(), OptionsSnapshotMeta(as_of=as_of, spot=452.0))
+    OptionsStore(store.root).write_chain(
+        "SPY",
+        _chain_df(),
+        OptionsSnapshotMeta(as_of=as_of, spot=452.0, underlier_con_id=1),
+    )
 
 
 # --- GET /api/options/{underlier}/chain ---
@@ -95,6 +103,61 @@ def test_chain_present_returns_quotes_and_smile(client, store):
     # smile IV at 440 averages call (0.18) and put (0.20)
     point_440 = next(p for p in body["smile"][0]["points"] if p["strike"] == 440.0)
     assert point_440["iv"] == pytest.approx((0.18 + 0.20) / 2)
+
+
+def test_chain_is_unavailable_after_underlier_contract_remap(client, store):
+    _write_spy_chain(store, as_of=str(date.today()))
+    store.write_symbol_map({"SPY": 99, "QQQ": 2})
+    store.write_instrument_metadata(
+        "SPY", {"con_id": 99, "currency": "USD", "exchange": "ARCA"}
+    )
+
+    response = client.get("/api/options/SPY/chain")
+
+    assert response.status_code == 200
+    assert response.json()["missing"] is True
+
+
+def test_chain_with_a_corrupt_symbol_map_is_structured_unavailable(client, store):
+    _write_spy_chain(store, as_of=str(date.today()))
+    (store.root / "symbols.json").write_text("not json")
+
+    response = client.get("/api/options/SPY/chain")
+
+    assert response.status_code == 200
+    assert response.json()["missing"] is True
+
+
+def test_book_greeks_rejects_chain_from_a_different_underlier_contract(client, store):
+    _write_spy_chain(store, as_of=str(date.today()))
+    store.write_symbol_map({"SPY": 99, "QQQ": 2})
+    store.write_instrument_metadata(
+        "SPY", {"con_id": 99, "currency": "USD", "exchange": "ARCA"}
+    )
+    store.write_bars(
+        con_id=99,
+        bar_size="1d",
+        bars=_bars(price=500.0),
+        meta=BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today())),
+    )
+
+    response = client.post(
+        "/api/options/book-greeks",
+        json={
+            "positions": [
+                {
+                    "symbol": "SPY",
+                    "qty": 1,
+                    "strike": 440.0,
+                    "expiry": "20260918",
+                    "right": "C",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 422
+    assert "underlier identity" in response.json()["detail"]
 
 
 def test_chain_stale_when_as_of_older_than_threshold(client, store):
@@ -213,7 +276,9 @@ def test_book_greeks_inline_leg_rejects_ambiguous_same_terms(client, store):
         }
     )
     OptionsStore(store.root).write_chain(
-        "SPY", chain, OptionsSnapshotMeta(as_of=str(date.today()), spot=452.0)
+        "SPY",
+        chain,
+        OptionsSnapshotMeta(as_of=str(date.today()), spot=452.0, underlier_con_id=1),
     )
 
     response = client.post(
@@ -363,7 +428,9 @@ def test_book_greeks_uses_persisted_live_contract_id_for_same_terms(client, stor
         }
     )
     OptionsStore(store.root).write_chain(
-        "SPY", chain, OptionsSnapshotMeta(as_of=str(date.today()), spot=452.0)
+        "SPY",
+        chain,
+        OptionsSnapshotMeta(as_of=str(date.today()), spot=452.0, underlier_con_id=1),
     )
     portfolio = Portfolio(
         positions=(
@@ -425,7 +492,9 @@ def test_book_greeks_rejects_persisted_live_contract_without_exact_chain_id(clie
         }
     )
     OptionsStore(store.root).write_chain(
-        "SPY", chain, OptionsSnapshotMeta(as_of=str(date.today()), spot=452.0)
+        "SPY",
+        chain,
+        OptionsSnapshotMeta(as_of=str(date.today()), spot=452.0, underlier_con_id=1),
     )
     portfolio = Portfolio(
         positions=(

@@ -328,6 +328,15 @@ def instrument(request: Request, symbol: str) -> InstrumentResponse:
     store = request.app.state.store
     benchmark = request.app.state.benchmark
     bars, con_id = _bars_for(request, symbol)
+    meta = read_instrument_metadata_map(store).get(symbol) or {}
+    if meta and meta.get("con_id") != con_id:
+        raise HTTPException(
+            422,
+            detail=(
+                f"instrument metadata contract identity for {symbol!r} "
+                "does not match the current symbol map; run sync"
+            ),
+        )
     close = bars["close"]
 
     last = _clean(close.iloc[-1]) if len(close) else None
@@ -343,7 +352,6 @@ def instrument(request: Request, symbol: str) -> InstrumentResponse:
 
     vol, beta, risk = _base_currency_risk_stats(request, symbol, benchmark)
 
-    meta = read_instrument_metadata_map(store).get(symbol) or {}
     profile = None
     profile_status = meta.get("ucits_profile_status")
     profile_reason = meta.get("ucits_profile_reason")

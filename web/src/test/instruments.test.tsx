@@ -134,6 +134,33 @@ test("keyboard focus describes the tooltip and Escape or blur dismisses it", asy
   expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
 });
 
+test("symbol punctuation never enters ARIA reference IDs", async () => {
+  const symbol = "BRK.B";
+  server.use(
+    http.get("/api/instruments/BRK.B", () =>
+      HttpResponse.json({ ...INSTRUMENT, symbol })
+    ),
+    http.get("/api/instruments/BRK.B/candles", () =>
+      HttpResponse.json({ ...CANDLES, symbol })
+    ),
+  );
+  renderHover({ symbol, children: symbol });
+  const trigger = screen.getByTestId(`instrument-trigger-${symbol}`);
+
+  fireEvent.focus(trigger);
+  const tooltip = await screen.findByRole("tooltip");
+  expect(tooltip.id).toMatch(/^instrument-tooltip-[a-z0-9-]+$/i);
+  expect(tooltip.id).not.toContain(".");
+  expect(trigger).toHaveAttribute("aria-describedby", tooltip.id);
+
+  fireEvent.click(trigger);
+  const sheet = await screen.findByRole("dialog");
+  const titleId = sheet.getAttribute("aria-labelledby");
+  expect(titleId).toMatch(/^instrument-sheet-title-[a-z0-9-]+$/i);
+  expect(titleId).not.toContain(".");
+  expect(document.getElementById(titleId!)).toHaveTextContent("BRK.B instrument detail");
+});
+
 test("hover loading is announced to assistive technology", async () => {
   server.use(
     http.get("/api/instruments/EEM", async () => {
@@ -191,6 +218,9 @@ test("clicking the trigger opens InstrumentSheet with chart, stats, and link-out
   expect(within(sheetHeader!).getByText("as of 2026-07-24")).toBeInTheDocument();
 
   expect(screen.getAllByText(/iShares MSCI Emerging Markets ETF/).length).toBeGreaterThan(0);
+  expect(screen.getByRole("region", { name: /risk evidence/i })).toHaveTextContent(
+    "Reporting USD · FX identity · as of not required",
+  );
   const tvLink = screen.getByRole("link", { name: /TradingView/i });
   expect(tvLink).toHaveAttribute("href", "https://www.tradingview.com/chart/?symbol=EEM");
   expect(tvLink).toHaveAttribute("target", "_blank");
@@ -355,7 +385,7 @@ test("sheet retries a failed candle request and renders the recovered chart", as
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
-test("sheet separates fresh UCITS facts from price provenance", async () => {
+test("sheet describes fresh European ETF facts as sourced, not regulatory verification", async () => {
   const ucits = {
     ...INSTRUMENT,
     symbol: "SWDA",
@@ -390,7 +420,9 @@ test("sheet separates fresh UCITS facts from price provenance", async () => {
   renderHover({ symbol: "SWDA", children: "SWDA" });
   fireEvent.click(screen.getByTestId("instrument-trigger-SWDA"));
 
-  expect(await screen.findByText("UCITS profile")).toBeInTheDocument();
+  expect(await screen.findByRole("region", { name: "European ETF sourced profile" })).toBeInTheDocument();
+  expect(screen.getByText("● Source cache fresh")).toBeInTheDocument();
+  expect(screen.queryByText(/verified cache/i)).not.toBeInTheDocument();
   expect(screen.getByText("0.20%")).toBeInTheDocument();
   expect(screen.getByText("MSCI World")).toBeInTheDocument();
   expect(screen.getAllByText(/IE00B4L5Y983/).length).toBeGreaterThan(0);
@@ -422,7 +454,47 @@ test("sheet explains a stale UCITS profile without rendering stale facts", async
   renderHover({ symbol: "SWDA", children: "SWDA" });
   fireEvent.click(screen.getByTestId("instrument-trigger-SWDA"));
 
-  expect(await screen.findByText("▲ Stale UCITS profile")).toBeInTheDocument();
+  expect(await screen.findByText("▲ Stale European ETF sourced profile")).toBeInTheDocument();
   expect(screen.getByText(/30-day freshness window/i)).toBeInTheDocument();
-  expect(screen.queryByText("● Verified cache")).not.toBeInTheDocument();
+  expect(screen.queryByText("● Source cache fresh")).not.toBeInTheDocument();
+});
+
+test("sheet withholds a non-finite TER instead of rendering NaN", async () => {
+  server.use(
+    http.get("/api/instruments/SWDA", () =>
+      HttpResponse.json({
+        ...INSTRUMENT,
+        symbol: "SWDA",
+        isin: "IE00B4L5Y983",
+        ucits_profile_status: "FRESH",
+        ucits_profile: {
+          schema_version: "ucits_etf_profile_v1",
+          isin: "IE00B4L5Y983",
+          fund_name: "Example European ETF",
+          issuer: "Example issuer",
+          domicile: "Ireland",
+          ter_pct: "NaN",
+          distribution_policy: "ACCUMULATING",
+          replication_method: "Physical",
+          benchmark_name: "Example index",
+          provenance: {
+            source: "justetf",
+            source_url: "https://www.justetf.com/en/etf-profile.html?isin=IE00B4L5Y983",
+            fetched_at_utc: "2026-09-04T09:30:00Z",
+          },
+        },
+      })
+    ),
+    http.get("/api/instruments/SWDA/candles", () =>
+      HttpResponse.json({ ...CANDLES, symbol: "SWDA" })
+    ),
+  );
+
+  renderHover({ symbol: "SWDA", children: "SWDA" });
+  fireEvent.click(screen.getByTestId("instrument-trigger-SWDA"));
+
+  const profile = await screen.findByRole("region", { name: "European ETF sourced profile" });
+  const terLabel = within(profile).getByText("TER");
+  expect(terLabel.parentElement).toHaveTextContent("TER—");
+  expect(profile).not.toHaveTextContent("NaN%");
 });

@@ -56,6 +56,8 @@ uv run python -m quantmind.api.main
 
 Run only one QuantMind sync against a given `QM_DATA_DIR` at a time. The web action, the full CLI, and the option-chain CLI share a cross-process writer lock and reject an overlapping run instead of risking a mixed cache generation.
 
+Before syncing, resolve any dual-listed holdings that IBKR reports under the same ticker to one canonical listing/symbol. The current `symbol_map` (`$QM_DATA_DIR/symbols.json`) can store only one canonical `conId` per display symbol, so QuantMind blocks an ambiguous book instead of merging two contracts.
+
 Open `http://127.0.0.1:8000/book/setup` (`/setup` is retained as a first-use alias) and follow the single next action shown:
 
 1. Confirm the local API is ready and IBKR is connected to the intended paper/live mode.
@@ -72,6 +74,7 @@ Do not rely on the installation until all applicable checks pass:
 - Setup reports `READY`, with the expected paper/live mode.
 - Portfolio position count, symbols, quantities, multipliers, and signs match IBKR.
 - IBKR contract IDs, exchanges, currencies, and option terms match the intended listings. Held stocks are synced by their authoritative contract ID, and option-only holdings resolve their underlier through IBKR's `underConId`; neither path falls back to an ambiguous ticker re-resolution after authoritative lookup fails.
+- Every display symbol resolves to one canonical listing and `conId`; no two listings share the same ticker in the acceptance book.
 - No second account is present in the book.
 - Market data has a recent as-of date and the expected benchmark.
 - All required symbols and macro series are present; readiness is based on the oldest required observation, not the freshest file.
@@ -89,10 +92,12 @@ Do not rely on the installation until all applicable checks pass:
 - **Cache empty/stale:** rerun Sync from Setup or `uv run python -m quantmind.sync_cli` and inspect the final warning/error.
 - **Another sync is already writing:** let the active web or CLI sync finish, then retry. Do not delete `.quantmind-sync.lock`; the operating-system lease, not the file's presence, determines ownership and is released automatically if a process exits.
 - **Pinned book stale or scoped to another account/mode:** use **Refresh current book**. QuantMind does not reuse yesterday's or another account's snapshot as the current book.
+- **Multiple listings for the same ticker:** normalize the upstream holding to one canonical listing/symbol before sync. This alpha has no in-app alias or reconciliation layer for two `conId` values under one display symbol.
+- **Instrument identity or metadata stale/mismatched:** do not edit `symbols.json` or `instruments.json`. Run Sync from Setup or `uv run python -m quantmind.sync_cli`; after a successful rebuild, pin a new book if QuantMind reports that the previous `book_ref` has changed identity.
 - **Reporting currency changed:** sync the newly required FX evidence, then `POST /api/book/{old_book_ref}/rebase`. QuantMind creates a new immutable snapshot with the original positions and valuation time plus `rebased_from` lineage; it never rewrites the old book.
 - **Missing FX/instrument identity:** set `QM_BASE_CURRENCY` to the reporting currency, refresh IBKR metadata, and run sync again. QuantMind uses dated ECB reference rates for stocks and ETFs, but blocks unknown currencies, missing/stale FX, cross-currency aggregate option Greeks, and unsupported security types.
 - **Alpha unavailable in a non-USD book:** this is intentional in v0.5. `US3M` is a USD risk-free series, so QuantMind withholds Jensen alpha when `QM_BASE_CURRENCY` is not USD rather than mixing cash-rate regimes.
-- **Option chain missing:** run `uv run python -m quantmind.options_sync_cli NVDA MU` with the required market-data permissions. Replace symbols with held underliers.
+- **Option chain missing, stale, or bound to an old underlier identity:** run the market sync first if the underlier identity changed, then `uv run python -m quantmind.options_sync_cli NVDA MU` with the required market-data permissions. Replace symbols with held underliers.
 - **Frontend unavailable at port 8000:** rebuild with `cd web && bun run build`; for a non-standard deployment set `QM_WEB_DIST` to the absolute build directory. For development, run `bun run dev` and use port 5173.
 
 ## Current pre-1.0 boundary

@@ -75,7 +75,7 @@ def client(tmp_path):
     store.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)
     store.write_bars(con_id=2, bar_size="1d", bars=_bars(seed=2, price0=50.0), meta=meta)
     store.write_symbol_map({"SPY": 1, "EEM": 2})
-    store.write_instrument_metadata("SPY", {"currency": "USD"})
+    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
     store.write_instrument_metadata(
         "EEM",
         {
@@ -151,8 +151,8 @@ def test_instrument_beta_matches_risk_after_dated_fx_normalization(tmp_path):
     store.write_bars(1, "1d", frame(benchmark_close), meta)
     store.write_bars(2, "1d", frame(local_eur_close), meta)
     store.write_symbol_map({"SPY": 1, "IWDA": 2})
-    store.write_instrument_metadata("SPY", {"currency": "USD"})
-    store.write_instrument_metadata("IWDA", {"currency": "EUR"})
+    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
+    store.write_instrument_metadata("IWDA", {"con_id": 2, "currency": "EUR"})
     rows = ["CURRENCY,TIME_PERIOD,OBS_VALUE"]
     rows.extend(
         f"USD,{timestamp.date().isoformat()},{rate:.10f}"
@@ -203,10 +203,14 @@ def test_instrument_risk_contract_names_fx_failure_without_hiding_metadata(tmp_p
     store.write_bars(1, "1d", _bars(seed=1), meta)
     store.write_bars(2, "1d", _bars(seed=2), meta)
     store.write_symbol_map({"SPY": 1, "IWDA": 2})
-    store.write_instrument_metadata("SPY", {"currency": "USD"})
+    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
     store.write_instrument_metadata(
         "IWDA",
-        {"currency": "EUR", "long_name": "iShares Core MSCI World"},
+        {
+            "con_id": 2,
+            "currency": "EUR",
+            "long_name": "iShares Core MSCI World",
+        },
     )
 
     body = TestClient(_make_app(store), base_url="http://127.0.0.1").get(
@@ -232,7 +236,7 @@ def test_instrument_risk_contract_keeps_vol_when_benchmark_is_missing(tmp_path):
         BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24"),
     )
     store.write_symbol_map({"EEM": 2})
-    store.write_instrument_metadata("EEM", {"currency": "USD"})
+    store.write_instrument_metadata("EEM", {"con_id": 2, "currency": "USD"})
 
     body = TestClient(
         _make_app(store, benchmark="SPY"), base_url="http://127.0.0.1"
@@ -251,8 +255,10 @@ def test_instrument_keeps_vol_when_foreign_benchmark_fx_is_missing(tmp_path):
     store.write_bars(1, "1d", _bars(seed=1), meta)
     store.write_bars(2, "1d", _bars(seed=2), meta)
     store.write_symbol_map({"LOCAL": 1, "EU_BENCH": 2})
-    store.write_instrument_metadata("LOCAL", {"currency": "USD"})
-    store.write_instrument_metadata("EU_BENCH", {"currency": "EUR"})
+    store.write_instrument_metadata("LOCAL", {"con_id": 1, "currency": "USD"})
+    store.write_instrument_metadata(
+        "EU_BENCH", {"con_id": 2, "currency": "EUR"}
+    )
 
     body = TestClient(
         _make_app(store, benchmark="EU_BENCH"), base_url="http://127.0.0.1"
@@ -273,8 +279,8 @@ def test_instrument_risk_contract_names_insufficient_history(tmp_path):
     store.write_bars(1, "1d", short_history, meta)
     store.write_bars(2, "1d", short_history.copy(), meta)
     store.write_symbol_map({"SPY": 1, "CLONE": 2})
-    store.write_instrument_metadata("SPY", {"currency": "USD"})
-    store.write_instrument_metadata("CLONE", {"currency": "USD"})
+    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
+    store.write_instrument_metadata("CLONE", {"con_id": 2, "currency": "USD"})
 
     body = TestClient(_make_app(store), base_url="http://127.0.0.1").get(
         "/api/instruments/CLONE"
@@ -360,6 +366,7 @@ def test_instrument_withholds_a_profile_after_its_freshness_window(tmp_path):
     store.write_instrument_metadata(
         "IWDA",
         {
+            "con_id": 7,
             "currency": "EUR",
             "stock_type": "ETF",
             "isin": "IE00B4L5Y983",
@@ -407,6 +414,7 @@ def test_instrument_reclassifies_a_missing_fresh_profile_file(tmp_path):
     store.write_instrument_metadata(
         "IWDA",
         {
+            "con_id": 7,
             "currency": "EUR",
             "ucits_profile_isin": "IE00B4L5Y983",
             "ucits_profile_status": "FRESH",
@@ -435,6 +443,7 @@ def test_instrument_downgrades_corrupt_fresh_ucits_cache_without_a_500(tmp_path)
     store.write_instrument_metadata(
         "IWDA",
         {
+            "con_id": 7,
             "currency": "EUR",
             "stock_type": "ETF",
             "isin": "IE00B4L5Y983",
@@ -454,6 +463,34 @@ def test_instrument_downgrades_corrupt_fresh_ucits_cache_without_a_500(tmp_path)
     assert response.json()["ucits_profile"] is None
     assert response.json()["ucits_profile_status"] == "MISSING"
     assert "corrupt" in response.json()["ucits_profile_reason"]
+
+
+def test_instrument_rejects_metadata_bound_to_a_different_contract(tmp_path):
+    store = BarStore(tmp_path)
+    bars = _bars(seed=5)
+    store.write_bars(
+        2,
+        "1d",
+        bars,
+        BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24"),
+    )
+    store.write_symbol_map({"ASML": 2})
+    store.write_instrument_metadata(
+        "ASML",
+        {
+            "con_id": 1,
+            "currency": "USD",
+            "exchange": "NASDAQ",
+            "long_name": "OLD LISTING",
+        },
+    )
+    client = TestClient(_make_app(store, benchmark="ASML"))
+
+    response = client.get("/api/instruments/ASML")
+
+    assert response.status_code == 422
+    assert "metadata contract identity" in response.json()["detail"]
+    assert "ASML" in response.json()["detail"]
 
 
 def test_instrument_unknown_symbol_is_422_not_500(client):
@@ -553,8 +590,8 @@ def test_instrument_beta_of_benchmark_series_correlates_when_identical(tmp_path)
     store.write_bars(con_id=1, bar_size="1d", bars=bars, meta=meta)
     store.write_bars(con_id=2, bar_size="1d", bars=bars.copy(), meta=meta)  # identical series
     store.write_symbol_map({"SPY": 1, "CLONE": 2})
-    store.write_instrument_metadata("SPY", {"currency": "USD"})
-    store.write_instrument_metadata("CLONE", {"currency": "USD"})
+    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
+    store.write_instrument_metadata("CLONE", {"con_id": 2, "currency": "USD"})
     app = _make_app(store, benchmark="SPY")
     client = TestClient(app, base_url="http://127.0.0.1")
     r = client.get("/api/instruments/CLONE")

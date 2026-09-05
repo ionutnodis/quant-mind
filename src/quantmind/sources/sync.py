@@ -262,14 +262,19 @@ async def sync_instrument_metadata(
         try:
             details = await broker.fetch_contract_details(con_id)
             previous = existing_metadata.get(symbol) or {}
+            tags = extra_tags.get(symbol, {})
             fields = {
                 **previous,
                 "con_id": con_id,
                 "provider": "ibkr",
                 **provider_identity_defaults,
                 **details,
-                **extra_tags.get(symbol, {}),
+                **tags,
             }
+            if previous.get("con_id") == con_id:
+                for identity_field in ("isin", "stock_type"):
+                    if identity_field not in details and identity_field not in tags:
+                        fields[identity_field] = previous.get(identity_field)
             identity_changed = (
                 previous.get("con_id") not in {None, con_id}
                 or previous.get("isin") != fields.get("isin")
@@ -291,7 +296,7 @@ async def sync_instrument_metadata(
                 raise
             failures[symbol] = f"{type(exc).__name__}: {exc}"
         await sleep(pace_seconds)
-    if rebuild_corrupt_cache and written:
+    if rebuild_corrupt_cache:
         store.replace_instrument_metadata({**existing_metadata, **written})
     return written
 
