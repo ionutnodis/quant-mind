@@ -16,13 +16,13 @@ refresh and is not guaranteed. The table records read-only smoke checks on
 | `fed` | [Federal Reserve releases](https://www.federalreserve.gov/feeds/press_all.xml) | 15 min | Public RSS; 20 parsed |
 | `ecb` | [ECB releases and speeches](https://www.ecb.europa.eu/rss/press.html) | 15 min | Public RSS; 15 parsed |
 | `boe` | [Bank of England news](https://www.bankofengland.co.uk/rss/news) | 15 min | Public RSS; 50 parsed |
-| `bls` | [US labour and inflation indicators](https://www.bls.gov/feed/bls_latest.rss) | 30 min | Public RSS; 1 aggregate item parsed |
+| `bls` | [US labour and inflation indicators](https://www.bls.gov/feed/bls_latest.rss) | 30 min | Public RSS; initially 1 aggregate item parsed, repeat probe returned HTTP 403 |
 | `bea` | [US growth and trade releases](https://apps.bea.gov/rss/rss.xml) | 30 min | Public RSS; 47 parsed |
-| `bis` | [BIS press releases](https://www.bis.org/doclist/all_pressrels.rss) | 30 min | Public RSS; 10 parsed |
+| `bis` | [BIS press releases](https://www.bis.org/doclist/all_pressrels.rss) | 30 min | Public RSS; initially 10 parsed, repeat probe returned a non-feed XML response |
 | `eia` | [Today in Energy](https://www.eia.gov/rss/todayinenergy.xml) | 30 min | Public RSS; 13 parsed |
 | `un` | [UN global news](https://news.un.org/feed/subscribe/en/news/all/rss.xml) | 15 min | Public RSS; 30 parsed |
 | `gdacs` | [Global disaster alerts](https://www.gdacs.org/xml/rss.xml) | 5 min | Public RSS; 200-item parser cap reached |
-| `usgs` | [Magnitude 4.5+ earthquakes, past day](https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_day.geojson) | 5 min | Public GeoJSON; 14 parsed |
+| `usgs` | [Magnitude 4.5+ earthquakes, past day](https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_day.geojson) | 5 min | Public GeoJSON; 14 initially and 13 on repeat, as the rolling feed changed |
 | `gdelt` | [GDELT DOC API](https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/) | 15 min | Public JSON news index; live probe timed out, failure isolated |
 | `imf` | [IMF SDMX update feed](https://sdmxcentral.imf.org/rss.xml) | 60 min | Public RSS; 22 parsed; statistical metadata updates, not an IMF forecast database |
 | `ukgov` | [UK government communications](https://www.gov.uk/search/news-and-communications.atom) | 15 min | Public Atom; 20 parsed |

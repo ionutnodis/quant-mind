@@ -111,9 +111,11 @@ fixed fixtures and mocked network access; CI does not depend on feed uptime.
 The [README screenshots](../README.md#build-your-personal-world-desk) were captured
 from the running UI using the explicitly illustrative demo, not real portfolios.
 
-Read-only live probes parsed 13 public feeds. GDELT timed out and demonstrated
-isolated failure. SEC, X and Reddit were fixture-tested, not live-tested without
-the required identity or credentials. No subscriptions were purchased.
+The initial read-only live probe parsed 13 public feeds. A final repeat parsed
+11: BLS returned HTTP 403, BIS returned a non-feed XML response, and GDELT timed
+out. Each demonstrated isolated failure without a bypass or hidden retry. SEC,
+X and Reddit were fixture-tested, not live-tested without the required identity
+or credentials. No subscriptions were purchased.
 
 ## What remains toward the terminal vision
 

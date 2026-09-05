@@ -8,7 +8,7 @@ Local-first quant workbench: Python core (`src/quantmind/`), FastAPI backend, an
 - TDD is the law here: no production code without a failing test first. Risk-math modules test against hand-computed/golden values.
 
 ## Engineering constraints
-- Pure core: `risk/`, `analytics/`, and `hedge/` remain calculation-focused and picklable; I/O belongs in `broker/`, `sources/`, `datastore/`, and the provider boundary in `fx.py`.
+- Pure core: `risk/`, `analytics/`, and `hedge/` remain calculation-focused and picklable; I/O belongs in `broker/`, `sources/`, `datastore/`, `world/providers.py`, `world/store.py`, and the provider boundary in `fx.py`.
 - Risk math uses ADJUSTED_LAST bars keyed by conId; adjusted history is refreshable, never append-only.
 - Parquet is the source of truth; exactly one writer process; DuckDB readers open read-only.
 - Alpha is Jensen's alpha (CAPM excess-return regression); raw-return alpha is never shown.
