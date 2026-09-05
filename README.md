@@ -4,6 +4,8 @@
 
 QuantMind brings positions, factor exposure, scenario analysis, expected shortfall, options Greeks, and hedge exploration into one auditable workspace. It is designed for a concentrated, discretionary investor with a long-beta core and an options overlay, not for generic charting or trade execution.
 
+The **World monitor** adds a personal news-and-events desk: open macro, central-bank, energy, geopolitical and disaster feeds, filtered locally through your pinned book, watchlist and interests. It works without an IBKR connection or market-news subscription.
+
 > [!WARNING]
 > QuantMind is pre-1.0 research software. It is read-only, does not submit orders, and is not investment advice. Verify all inputs, model assumptions, and outputs independently before making an investment decision.
 
@@ -71,7 +73,39 @@ Setup is the control plane for that sequence. Read the **Next action** first, th
 | **What-If** | “How would a proposed equity-weight change alter risk?” | Clone the pinned book, edit weights, recompute, compare book-vs-benchmark risk, and save a named local scenario |
 | **Hedge Lab** | “Which allowed instrument best moves beta toward my target?” | Set a target, constrain candidates, run the ranking, and inspect notional, residual beta, carry, and resilience |
 | **Macro** | “What regime variables surround the portfolio?” | Review yields, curve, liquidity, sectors, and factor context using dated source evidence |
+| **World** | “Which world events deserve my attention, and why?” | Refresh public feeds, set a local personal lens, filter headlines, and inspect source freshness and direct holding mentions |
 | **Lab** | “Does a research model fit this series well enough to inspect?” | Select data, fit a registered model, examine parameter uncertainty, simulate, then compare its output with the book |
+
+### Build your personal World desk
+
+1. Open **World** in the sidebar (or press `⌘K` / `Ctrl+K` and select World).
+2. Click **Refresh sources**. No keys are needed for the 14 public routes. Each source shows its own outcome; a failed feed does not erase cached events or stop portfolio analysis.
+3. In **Personal lens**, enter comma-separated watch symbols (`NVDA, ASML`), interests (`semiconductors, energy, rates`) and regions (`Europe, US, UK`). Click **Save lens**, then **My lens** to see matching events. Preferences stay in your local data directory.
+4. For actual holding matches, open a pinned Portfolio and choose **World**. Navigation carries `book_ref` with you. You can also paste a 12-character pinned reference and click **Apply**. Without a selected book, watchlist matches are not represented as holdings.
+5. Read **Why it matches** beside each event, then follow the headline to its original source. Amber identifies a direct book mention; steel identifies a watchlist, topic or regional interest. These are attention rules, not causal risk estimates or trading signals.
+
+![World monitor showing a synthetic technology-investor lens, event explanations and independent source health](docs/screenshots/world-desktop.png)
+
+*World screenshots use explicitly illustrative news and a synthetic watchlist, not live investment information.* The same semantic layout reflows on phones, iPads and ultrawide monitors. Phones can browse and filter; editing and refreshing require the full workspace. [See the ultrawide layout](docs/screenshots/world-wide.png). The isolated demo can be reproduced with [scripts/world_demo.py](scripts/world_demo.py).
+
+![World monitor on a phone, with events and match explanations stacked for reading](docs/screenshots/world-mobile.png)
+
+**Keep it running:** optionally refresh from a second terminal while using the dashboard:
+
+```bash
+# One refresh; the normal source cooldowns still apply
+uv run python -m quantmind.world_cli
+
+# Continue every five minutes; Ctrl+C stops the monitor
+uv run python -m quantmind.world_cli --watch --interval 300
+
+# Monitor only selected public sources
+uv run python -m quantmind.world_cli --watch --source fed --source ecb --source eia
+```
+
+The API and CLI share the cache and refresh lock. The visible page checks the local cache every 30 seconds (every two seconds during an active refresh), so CLI updates appear automatically. No provider is polled merely by opening the page. **World “Latest successful refresh” is an ingestion timestamp**, not the time every story happened. Every event has a separate **Published** or **Observed** timestamp and every source has its own last-success/stale status.
+
+X and Reddit are separate, disabled-by-default connectors. X requires explicit acceptance of its paid API plus a bearer token and query. Reddit requires approved OAuth access. Configure either only in server-side `.env`, never in frontend `VITE_` variables. See the [source catalog and setup guide](docs/data-sources.md) for every endpoint, access requirement, supported coverage and limitations.
 
 ### What to read on Today
 
@@ -415,6 +449,8 @@ The following images are **design-review mockups, not v0.5 product screenshots**
 - [Contributor and engineering notes](CLAUDE.md)
 - [Agent workflow routing](AGENTS.md)
 - [Data-source boundaries and provenance](DATA_SOURCES.md)
+- [World source catalog, credentials and operating guide](docs/data-sources.md)
+- [World release engineering brief](docs/WORLD_ENGINEERING_BRIEF.md)
 - [Security policy](SECURITY.md)
 - [Web-client setup and API type generation](web/README.md)
 - [API contract](openapi.json)
