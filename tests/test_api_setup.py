@@ -10,6 +10,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+import numpy as np
 import pandas as pd
 from fastapi.testclient import TestClient
 
@@ -194,6 +195,10 @@ def test_setup_status_reports_ready_after_market_sync_and_book_pin(tmp_path):
     store = BarStore(tmp_path)
     now = datetime.now(timezone.utc)
     _seed_market(store, now)
+    market_as_of = _bars(now).index[-1].date()
+    market_age_days = int(
+        np.busday_count(market_as_of.isoformat(), now.date().isoformat())
+    )
     client = _client(store, broker=BrokerThatMustNotBeCalled())
     pinned = client.post(
         "/api/book/pin",
@@ -215,8 +220,8 @@ def test_setup_status_reports_ready_after_market_sync_and_book_pin(tmp_path):
         "stale_symbols": [],
         "corrupt_symbols": [],
         "series": 4,
-        "as_of": now.date().isoformat(),
-        "age_days": 0,
+        "as_of": market_as_of.isoformat(),
+        "age_days": market_age_days,
     }
     assert body["macro_data"]["status"] == "ready"
     assert body["macro_data"]["ready_series"] == 4

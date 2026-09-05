@@ -723,7 +723,8 @@ def test_non_base_live_position_without_fx_is_local_only_and_honestly_partial(st
 
 
 def test_european_position_and_account_are_converted_to_selected_base(store):
-    _seed_european_fx(store)
+    latest_market_date = pd.bdate_range(end=date.today(), periods=1)[0].date()
+    _seed_european_fx(store, end=latest_market_date)
     store.write_symbol_map({**store.read_symbol_map(), "ASML": 1})
     portfolio = Portfolio(
         positions=(
