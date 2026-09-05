@@ -8,9 +8,14 @@ import { type RefObject, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { request } from "../lib/api";
 import { ariaIdToken } from "../lib/aria";
-import { CandleChart, type Candle } from "./CandleChart";
+import type { Candle } from "./CandleChart";
+import { deferredComponent } from "./DeferredContent";
 import { Panel, Skeleton } from "./Panel";
 import { getInstrument } from "./InstrumentHover";
+
+// InstrumentHover is used across the home page: metadata and closed sheets
+// must not pull Plotly into every page's initial dependency graph.
+const CandleChart = deferredComponent(async () => ({ default: (await import("./CandleChart")).CandleChart }), "Chart", 240);
 
 interface CandlesResponse {
   symbol: string;

@@ -16,8 +16,14 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { request } from "../lib/api";
-import { CorrelationHeatmap } from "./CorrelationHeatmap";
+import { deferredComponent } from "./DeferredContent";
 import { InstrumentHover } from "./InstrumentHover";
+
+const CorrelationHeatmap = deferredComponent(
+  async () => ({ default: (await import("./CorrelationHeatmap")).CorrelationHeatmap }),
+  "Chart",
+  260,
+);
 
 type Universe = "sectors" | "factors" | "world" | "custom";
 type CorrWindow = 20 | 60 | 120;

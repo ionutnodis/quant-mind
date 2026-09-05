@@ -8,9 +8,15 @@
 // "no data" cell instead of a broken chart, never a crash.
 import { useQuery } from "@tanstack/react-query";
 import { request } from "../lib/api";
-import { CandleChart, type Candle } from "./CandleChart";
-import { SeriesChart, type SeriesPoint } from "./SeriesChart";
+import type { Candle } from "./CandleChart";
+import type { SeriesPoint } from "./SeriesChart";
+import { deferredComponent } from "./DeferredContent";
 import { InstrumentHover } from "./InstrumentHover";
+
+// Empty caches need no chart runtime; request it only when there is a chart
+// to draw. Each cell owns its loading/failure state, not the whole page.
+const CandleChart = deferredComponent(async () => ({ default: (await import("./CandleChart")).CandleChart }), "Chart");
+const SeriesChart = deferredComponent(async () => ({ default: (await import("./SeriesChart")).SeriesChart }), "Chart");
 
 interface CandlesResponse {
   symbol: string;
