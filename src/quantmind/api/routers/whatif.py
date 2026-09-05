@@ -35,6 +35,7 @@ from quantmind.api.routers.book import (
     read_book,
     read_book_positions,
     validate_pinned_book_scope,
+    validate_pinned_instrument_identities,
 )
 from quantmind.risk.montecarlo import simulate_terminal_returns
 from quantmind.risk.returns import (
@@ -144,6 +145,7 @@ def whatif(request: Request, req: WhatIfRequest) -> WhatIfResponse:
         pinned = read_book(store, req.book_ref)
         validate_pinned_book_scope(request.app.state, pinned)
         positions = read_book_positions(store, req.book_ref)
+        validate_pinned_instrument_identities(store, pinned, positions)
     if not positions:
         raise HTTPException(422, detail="book_ref resolved to an empty book")
     if len(positions) > _MAX_POSITIONS:

@@ -12,6 +12,7 @@ from decimal import Decimal
 
 import numpy as np
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from quantmind.api.app import create_app
@@ -285,6 +286,33 @@ def test_setup_requires_repin_after_configured_base_currency_changes(tmp_path):
     assert body["book"]["status"] == "stale"
     assert body["book"]["reason"] == "base_currency_mismatch"
     assert body["fx_data"]["base_currency"] == "GBP"
+    assert body["next_action"] == "pin_book"
+
+
+def test_setup_requires_repin_after_a_symbol_changes_contract_identity(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    assert _client(store).post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 10}]}
+    ).status_code == 200
+    store.write_bars(
+        con_id=99,
+        bar_size="1d",
+        bars=_bars(now),
+        meta=BarMeta(
+            bar_type="ADJUSTED_LAST", adjusted_asof=now.date().isoformat()
+        ),
+    )
+    store.write_symbol_map({"SPY": 99})
+
+    body = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+
+    assert body["market_data"]["status"] == "ready"
+    assert body["book"]["status"] == "stale"
+    assert body["book"]["reason"] == "instrument_identity_mismatch"
     assert body["next_action"] == "pin_book"
 
 
@@ -975,6 +1003,32 @@ def test_setup_reports_ucits_profile_readiness_without_blocking_core_cockpit(tmp
     assert missing["ucits_data"]["status"] == "incomplete"
     assert missing["ucits_data"]["missing_symbols"] == ["IWDA"]
     assert missing["overall"] == "ready"
+
+
+@pytest.mark.parametrize("corrupt_profile", [False, True])
+def test_setup_treats_a_fresh_ucits_marker_without_a_valid_profile_as_missing(
+    tmp_path, corrupt_profile
+):
+    store = BarStore(tmp_path)
+    store.write_instrument_metadata(
+        "IWDA",
+        {
+            "stock_type": "ETF",
+            "isin": "IE00B4L5Y983",
+            "ucits_profile_isin": "IE00B4L5Y983",
+            "ucits_profile_status": "FRESH",
+        },
+    )
+    if corrupt_profile:
+        profile = tmp_path / "ucits_profiles" / "IE00B4L5Y983.json"
+        profile.parent.mkdir(parents=True)
+        profile.write_text("not-json")
+
+    ucits = _client(store).get("/api/setup/status").json()["ucits_data"]
+
+    assert ucits["status"] == "incomplete"
+    assert ucits["ready_profiles"] == 0
+    assert ucits["missing_symbols"] == ["IWDA"]
 
 
 def test_setup_reclassifies_an_expired_ucits_profile_as_stale(tmp_path):

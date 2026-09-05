@@ -29,6 +29,15 @@ const LEVERAGE_RESPONSE = {
   gross: 10000.0,
   note: "leverage headroom is assumption-bound scenario leverage — not a safe-leverage guarantee.",
   as_of: "2026-07-24T00:00:00Z",
+  fx: {
+    status: "converted",
+    base_currency: "GBP",
+    source: "ECB",
+    as_of: "2026-07-23",
+    fetched_at: "2026-07-23T17:00:00Z",
+    missing_currencies: [],
+    note: "Prices are normalized to GBP with dated ECB evidence.",
+  },
 };
 
 const server = setupServer(http.post("/api/leverage", () => HttpResponse.json(LEVERAGE_RESPONSE)));
@@ -62,6 +71,20 @@ const HEDGE_RESPONSE = {
   es_before: 0.0231,
   n_candidates_evaluated: 3,
   as_of: "2026-07-24T00:00:00Z",
+  comparison_as_of: "2026-07-22T00:00:00Z",
+  comparison_n_obs: 248,
+  fx: {
+    status: "converted",
+    base_currency: "GBP",
+    source: "ECB",
+    as_of: "2026-07-22",
+    fetched_at: "2026-07-22T17:00:00Z",
+    missing_currencies: [],
+    note: "Prices are normalized to GBP with dated ECB evidence.",
+  },
+  skipped_candidates: [
+    { symbol: "EFA", reason: "incompatible with the common comparison cohort: 15 observations; need at least 30" },
+  ],
   candidates: [
     {
       symbol: "QQQ",
@@ -153,6 +176,38 @@ test("build a book, run, and render the ranked candidates table in amber", async
   // there is no cointegration column (removed, pre-wave-3 consolidation).
   expect(screen.getByText(/diagnostic/i)).toBeInTheDocument();
   expect(screen.queryByText(/coint/i)).not.toBeInTheDocument();
+});
+
+test("shows hedge FX, common comparison evidence, and skipped-candidate warnings", async () => {
+  server.use(http.post("/api/hedge", () => HttpResponse.json(HEDGE_RESPONSE)));
+  renderHedge();
+  fireEvent.change(screen.getAllByLabelText(/symbol/i)[0], { target: { value: "SPY" } });
+  fireEvent.change(screen.getAllByLabelText(/qty/i)[0], { target: { value: "10" } });
+
+  fireEvent.click(screen.getByRole("button", { name: /^run$/i }));
+
+  expect(await screen.findByTestId("hedge-fx-evidence")).toHaveTextContent(
+    "FX base GBP · source ECB · as of 2026-07-22",
+  );
+  expect(screen.getByTestId("hedge-comparison-evidence")).toHaveTextContent(
+    "Common comparison · as of 2026-07-22 · 248 obs",
+  );
+  const warning = screen.getByRole("status", { name: /skipped hedge candidates/i });
+  expect(within(warning).getByText(/EFA/)).toBeInTheDocument();
+  expect(within(warning).getByText(/15 observations; need at least 30/)).toBeInTheDocument();
+});
+
+test("shows leverage FX evidence with the resilience result", async () => {
+  server.use(http.post("/api/hedge", () => HttpResponse.json(HEDGE_RESPONSE)));
+  renderHedge();
+  fireEvent.change(screen.getAllByLabelText(/symbol/i)[0], { target: { value: "SPY" } });
+  fireEvent.change(screen.getAllByLabelText(/qty/i)[0], { target: { value: "10" } });
+
+  fireEvent.click(screen.getByRole("button", { name: /^run$/i }));
+
+  expect(await screen.findByTestId("leverage-fx-evidence")).toHaveTextContent(
+    "FX base GBP · source ECB · as of 2026-07-23",
+  );
 });
 
 test("symbol input uppercases and add/remove row controls manage the book", async () => {

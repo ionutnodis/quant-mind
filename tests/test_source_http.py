@@ -36,3 +36,19 @@ def test_bounded_http_reader_rejects_streamed_bytes_beyond_the_limit():
 
     with pytest.raises(ExternalPayloadTooLarge, match="exceeded"):
         read_bounded_text(response, max_bytes=100)
+
+
+def test_bounded_http_reader_rejects_a_nonpositive_limit_before_reading():
+    response = _Response(b"market data")
+
+    with pytest.raises(ValueError, match="max_bytes must be positive"):
+        read_bounded_text(response, max_bytes=0)
+
+
+@pytest.mark.parametrize("content_length", ["unknown", "1.5"])
+def test_bounded_http_reader_ignores_a_malformed_declared_length(
+    content_length,
+):
+    response = _Response(b"market data", content_length=content_length)
+
+    assert read_bounded_text(response, max_bytes=11) == "market data"

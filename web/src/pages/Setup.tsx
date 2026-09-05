@@ -134,6 +134,16 @@ export function Setup() {
           title: "Retry live portfolio discovery",
           body: "The last sync could not read the IBKR portfolio, so QuantMind preserved the previous required universe and withheld readiness. Confirm the selected account and Gateway session, then sync market data again.",
         }
+      : data.next_action === "pin_book" && data.book.reason === "base_currency_mismatch"
+      ? {
+          title: "Re-pin the book in the analysis currency",
+          body: `The latest snapshot was pinned in a different base currency. Pin the current book again to create an immutable ${data.fx_data.base_currency} reference before analysis.`,
+        }
+      : data.next_action === "pin_book" && data.book.reason === "instrument_identity_mismatch"
+      ? {
+          title: "Re-pin the book after the instrument update",
+          body: "At least one symbol now resolves to a different contract than the pinned snapshot. Review the instrument mapping, then pin the current book again before analysis.",
+        }
       : data.next_action === "pin_book" && data.book.status === "stale"
       ? {
           title: "Refresh the pinned book",

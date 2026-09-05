@@ -163,6 +163,48 @@ def validate_pinned_book_scope(
         )
 
 
+def validate_pinned_instrument_identities(
+    store, pinned: dict, positions: list[ResolvedBookPosition]
+) -> None:
+    """Fail closed when a pinned symbol now resolves to another contract.
+
+    Symbol maps are mutable ingestion state, while a book_ref promises an
+    immutable analytical identity. Stock conIds (and manual option underlier
+    conIds) must therefore still match before any downstream route prices the
+    book. Live IBKR option conIds identify the option contract itself and are
+    checked against cached chains by the options/portfolio routes instead.
+    """
+    try:
+        symbol_map = store.read_symbol_map()
+    except (OSError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            422,
+            detail="symbol map is corrupt; run sync to rebuild it",
+        ) from exc
+    changed = sorted(
+        {
+            position.symbol
+            for position in positions
+            if (
+                position.sec_type == "STK"
+                or pinned.get("source") != "live_ibkr"
+            )
+            and (
+                position.con_id is None
+                or symbol_map.get(position.symbol) != position.con_id
+            )
+        }
+    )
+    if changed:
+        raise HTTPException(
+            409,
+            detail=(
+                "pinned book instrument identity changed for "
+                f"{changed}; re-pin the book before analysis"
+            ),
+        )
+
+
 def write_book(
     store,
     snapshot: BookSnapshot,
@@ -643,11 +685,12 @@ def rebase_book(snapshot_id: str, request: Request) -> BookSnapshotOut:
         payload,
         require_configured_base=False,
     )
+    resolved = read_book_positions(store, snapshot_id)
+    validate_pinned_instrument_identities(store, payload, resolved)
     target_base = request.app.state.base_currency
     if payload["base_currency"] == target_base:
         return _snapshot_out(payload)
 
-    resolved = read_book_positions(store, snapshot_id)
     portfolio = Portfolio(
         positions=tuple(
             Position(

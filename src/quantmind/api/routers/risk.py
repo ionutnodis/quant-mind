@@ -102,19 +102,23 @@ def _price_series_map(
     return series, converter
 
 
-def _resolve_factor_series(
+def _resolve_factor_levels(
     request: Request,
     name: str,
     years: int,
     price_series: dict[str, pd.Series],
 ) -> pd.Series:
-    """A factor's return series: a cached symbol resolves to its simple
-    price return; a named series (US10Y etc., see `_RATE_LEVEL_SERIES`
-    above) resolves to its own transform. Unknown name -> structured 422
-    naming both the symbol map and the named-series catalog, never a 500."""
+    """Resolve raw factor levels before constructing a common return calendar.
+
+    Cached symbols and named series are deliberately returned untransformed:
+    the regression route first inner-joins all levels, then computes every
+    return/change over the same pair of dates. Transforming independently and
+    aligning afterwards creates unequal holding periods around calendar gaps.
+    Unknown names remain a structured 422, never a 500.
+    """
     store = request.app.state.store
     if name in price_series:
-        return simple_returns(price_series[name])
+        return price_series[name]
     try:
         series = store.read_series(name)
     except FileNotFoundError:
@@ -123,9 +127,7 @@ def _resolve_factor_series(
         raise HTTPException(422, detail=f"factor {name!r} not in cache; known: {known}")
     if years > 0:
         series = series.iloc[-(years * 252):]
-    if name in _RATE_LEVEL_SERIES:
-        return bp_change_series(series)
-    return simple_returns(series)
+    return series
 
 
 class BetaPoint(BaseModel):
@@ -441,13 +443,24 @@ def regression(
     price_series, fx_converter = _price_series_map(
         request, [symbol, *priced_factors], years
     )
-    asset_returns = simple_returns(price_series[symbol])
-    factor_series = {
-        name: _resolve_factor_series(request, name, years, price_series)
+    factor_levels = {
+        name: _resolve_factor_levels(request, name, years, price_series)
         for name in factor_names
     }
-
-    aligned = pd.concat({"asset": asset_returns, **factor_series}, axis=1).dropna()
+    common_levels = pd.concat(
+        {"asset": price_series[symbol], **factor_levels},
+        axis=1,
+        sort=False,
+    ).dropna()
+    aligned = pd.DataFrame(index=common_levels.index[1:])
+    aligned["asset"] = simple_returns(common_levels["asset"])
+    for name in factor_names:
+        aligned[name] = (
+            bp_change_series(common_levels[name])
+            if name in _RATE_LEVEL_SERIES
+            else simple_returns(common_levels[name])
+        )
+    aligned = aligned.dropna()
     if window is not None:
         aligned = aligned.tail(window)
 

@@ -178,6 +178,62 @@ test("explains a failed live portfolio discovery without leaking its cache senti
   expect(screen.queryByText(/__LIVE_PORTFOLIO_DISCOVERY_FAILED__/)).not.toBeInTheDocument();
 });
 
+test("names a base-currency change when the book must be pinned again", async () => {
+  server.use(
+    http.get("/api/setup/status", () =>
+      HttpResponse.json({
+        ...EMPTY_STATUS,
+        broker: { ...EMPTY_STATUS.broker, status: "connected" },
+        fx_data: { ...EMPTY_STATUS.fx_data, base_currency: "GBP" },
+        book: {
+          ...EMPTY_STATUS.book,
+          status: "stale",
+          snapshot_count: 1,
+          latest_snapshot_id: "abc123def456",
+          valuation_ts: "2026-09-04T13:00:00Z",
+          age_days: 0,
+          source: "manual",
+          reason: "base_currency_mismatch",
+        },
+        next_action: "pin_book",
+      })
+    )
+  );
+
+  renderSetup();
+
+  expect(await screen.findByText("Re-pin the book in the analysis currency")).toBeInTheDocument();
+  expect(screen.getByText(/immutable GBP reference/)).toBeInTheDocument();
+  expect(screen.queryByText(/belongs to a different broker scope/)).not.toBeInTheDocument();
+});
+
+test("names an instrument identity change when the book must be pinned again", async () => {
+  server.use(
+    http.get("/api/setup/status", () =>
+      HttpResponse.json({
+        ...EMPTY_STATUS,
+        broker: { ...EMPTY_STATUS.broker, status: "connected" },
+        book: {
+          ...EMPTY_STATUS.book,
+          status: "stale",
+          snapshot_count: 1,
+          latest_snapshot_id: "abc123def456",
+          valuation_ts: "2026-09-04T13:00:00Z",
+          age_days: 0,
+          source: "manual",
+          reason: "instrument_identity_mismatch",
+        },
+        next_action: "pin_book",
+      })
+    )
+  );
+
+  renderSetup();
+
+  expect(await screen.findByText("Re-pin the book after the instrument update")).toBeInTheDocument();
+  expect(screen.getByText(/symbol now resolves to a different contract/)).toBeInTheDocument();
+});
+
 test("syncs missing dated FX evidence using the normal sync job", async () => {
   const missingFx = {
     ...EMPTY_STATUS,

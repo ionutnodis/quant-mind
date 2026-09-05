@@ -276,6 +276,38 @@ async def test_identity_conflict_removes_stale_mapping_and_blocks_setup(tmp_path
     assert "not in cache" in response.json()["detail"]
 
 
+async def test_failed_refresh_removes_a_mapping_for_a_new_authoritative_contract(
+    tmp_path,
+):
+    class FailingBarBroker(FakeBroker):
+        async def get_daily_bars(self, con_id, years=5):
+            self.bar_calls.append((con_id, years))
+            raise TimeoutError("IBKR bars timed out")
+
+    store = BarStore(tmp_path)
+    store.write_symbol_map({"ASML": 77777})
+    store.write_required_symbols(["ASML"])
+    broker = FailingBarBroker()
+    failures: dict[str, str] = {}
+
+    synced = await sync_daily_bars(
+        store,
+        broker,
+        ["ASML"],
+        sleep=FakeSleeper(),
+        known_con_ids={"ASML": 12345},
+        failures=failures,
+    )
+
+    assert synced == {}
+    assert broker.bar_calls == [(12345, 5)]
+    assert "TimeoutError" in failures["ASML"]
+    assert "ASML" not in store.read_symbol_map()
+    readiness = _market_data_status(store, "ASML")
+    assert readiness.status != "ready"
+    assert readiness.missing_symbols == ["ASML"]
+
+
 async def test_partial_universe_sync_preserves_existing_symbol_map_entries(tmp_path):
     # Fix-loop IMPORTANT 1: `python -m quantmind.sync_cli SPY` (documented
     # argv mode) syncs a subset — sync_daily_bars must read-modify-write the
@@ -460,6 +492,26 @@ async def test_sync_instrument_metadata_atomically_rebuilds_a_corrupt_cache(tmp_
     assert not path.with_suffix(".json.tmp").exists()
 
 
+@pytest.mark.parametrize("corrupt_payload", ["not-json", "[]"])
+async def test_metadata_sync_rebuilds_an_unrecoverable_master(
+    tmp_path, corrupt_payload
+):
+    store, broker, sleeper = BarStore(tmp_path), FakeMetadataBroker(), FakeSleeper()
+    path = tmp_path / "instruments.json"
+    path.write_text(corrupt_payload)
+
+    written = await sync_instrument_metadata(
+        store,
+        broker,
+        {"SPY": 756733},
+        sleep=sleeper,
+        pace_seconds=0,
+    )
+
+    assert set(written) == {"SPY"}
+    assert store.read_all_instrument_metadata()["SPY"]["con_id"] == 756733
+
+
 async def test_corrupt_metadata_rebuild_salvages_valid_records_during_partial_failure(
     tmp_path,
 ):
@@ -502,6 +554,52 @@ async def test_corrupt_metadata_rebuild_salvages_valid_records_during_partial_fa
     assert rebuilt["UNTOUCHED"]["con_id"] == 42
     assert rebuilt["FAILED"]["currency"] == "GBP"
     assert rebuilt["SPY"]["con_id"] == 756733
+
+
+async def test_corrupt_metadata_rebuild_preserves_enrichment_for_a_refreshed_identity(
+    tmp_path,
+):
+    import json
+
+    store, broker, sleeper = BarStore(tmp_path), FakeMetadataBroker(), FakeSleeper()
+    broker.details[12345] = {
+        "long_name": "iShares Core MSCI World UCITS ETF",
+        "exchange": "LSEETF",
+        "currency": "GBP",
+        "sec_type": "STK",
+        "stock_type": "ETF",
+        "isin": "IE00B4L5Y983",
+    }
+    (tmp_path / "instruments.json").write_text(
+        json.dumps(
+            {
+                "IWDA": {
+                    "con_id": 12345,
+                    "currency": "GBP",
+                    "provider": "ibkr",
+                    "stock_type": "ETF",
+                    "isin": "IE00B4L5Y983",
+                    "ucits_profile_isin": "IE00B4L5Y983",
+                    "ucits_profile_status": "FRESH",
+                    "ucits_profile_reason": "verified cache",
+                },
+                "POISON": 7,
+            }
+        )
+    )
+
+    await sync_instrument_metadata(
+        store,
+        broker,
+        {"IWDA": 12345},
+        sleep=sleeper,
+        pace_seconds=0,
+    )
+
+    rebuilt = store.read_instrument_metadata("IWDA")
+    assert rebuilt["ucits_profile_isin"] == "IE00B4L5Y983"
+    assert rebuilt["ucits_profile_status"] == "FRESH"
+    assert rebuilt["ucits_profile_reason"] == "verified cache"
 
 
 async def test_sync_instrument_metadata_merges_extra_tags(tmp_path):

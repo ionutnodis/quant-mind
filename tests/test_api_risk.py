@@ -432,6 +432,52 @@ def test_regression_multi_factor_includes_named_rate_series(client_with_named_se
     assert body["fit_line"]["factor"] == "SPY"
 
 
+def test_regression_aligns_price_levels_before_building_cross_calendar_returns(
+    tmp_path,
+):
+    index = pd.bdate_range(end="2026-07-24", periods=601)
+    rng = np.random.default_rng(808)
+    close = pd.Series(
+        100.0 * np.cumprod(1 + rng.normal(0.0002, 0.01, len(index))),
+        index=index,
+    )
+
+    def bars(series):
+        return pd.DataFrame(
+            {
+                "open": series,
+                "high": series,
+                "low": series,
+                "close": series,
+                "volume": 1000.0,
+            },
+            index=series.index,
+        )
+
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(1, "1d", bars(close), meta)
+    store.write_bars(2, "1d", bars(close.iloc[::2]), meta)
+    store.write_symbol_map({"ASSET": 1, "FACTOR": 2})
+    _write_usd_metadata(store, "ASSET", "FACTOR")
+    client = TestClient(
+        create_app(store=store, benchmark="FACTOR", api_token="testtoken"),
+        base_url="http://127.0.0.1",
+        headers={"Authorization": "Bearer testtoken"},
+    )
+
+    response = client.get(
+        "/api/risk/ASSET/regression",
+        params={"factors": "FACTOR", "years": 5},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["n_obs"] == len(close.iloc[::2]) - 1
+    assert body["betas"][0]["beta"] == pytest.approx(1.0, abs=1e-9)
+    assert body["fit_line"]["slope"] == pytest.approx(1.0, abs=1e-9)
+
+
 def test_regression_unknown_factor_is_422_not_500(client_with_named_series):
     r = client_with_named_series.get("/api/risk/MTUM/regression", params={"factors": "NOPE"})
     assert r.status_code == 422

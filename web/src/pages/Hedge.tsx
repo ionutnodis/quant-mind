@@ -19,61 +19,29 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { BookBuilder, newBookRow, rowsToPositions, snapshotToRows, type BookRow } from "../components/BookBuilder";
 import { Panel } from "../components/Panel";
 import { request } from "../lib/api";
+import type { components } from "../lib/api-types";
 import { getBook, readActiveBookRef, type BookSnapshotOut } from "../lib/book";
 
-interface HedgeCandidate {
-  symbol: string;
-  beta: number | null;
-  unusable: boolean;
-  hedge_qty: number | null;
-  hedge_notional: number | null;
-  es_before: number | null;
-  es_after: number | null;
-  protection: number | null;
-  residual_beta: number | null;
-  corr_stability: number | null;
-}
+type HedgeRequest = components["schemas"]["HedgeRequest"];
+type HedgeResponse = components["schemas"]["HedgeResponse"];
+type LeverageRequest = components["schemas"]["LeverageRequest"];
+type LeverageResponse = components["schemas"]["LeverageResponse"];
+type FxEvidence = components["schemas"]["FxEvidenceOut"];
 
-interface HedgeResponse {
-  benchmark: string;
-  objective: { kind: string; value: number };
-  book_value: number | null;
-  book_beta: number | null;
-  es_before: number | null;
-  n_candidates_evaluated: number;
-  candidates: HedgeCandidate[];
-  as_of: string | null;
-}
-
-function runHedge(body: {
-  book?: { symbol: string; qty: number }[];
-  book_ref?: string;
-  objective: { kind: string; value: number };
-  years: number;
-}) {
+function runHedge(body: HedgeRequest) {
   return request<HedgeResponse>("/api/hedge", { method: "POST", body: JSON.stringify(body) });
 }
 
-interface LeverageResponse {
-  symbols: string[];
-  n_obs: number;
-  max_drawdown: number | null;
-  drawdown_budget: number;
-  leverage_headroom: number | null;
-  diversification_ratio: number | null;
-  book_value: number | null;
-  gross: number | null;
-  note: string;
-  as_of: string | null;
+function runLeverage(body: LeverageRequest) {
+  return request<LeverageResponse>("/api/leverage", { method: "POST", body: JSON.stringify(body) });
 }
 
-function runLeverage(body: {
-  book?: { symbol: string; qty: number }[];
-  book_ref?: string;
-  drawdown_budget: number;
-  years: number;
-}) {
-  return request<LeverageResponse>("/api/leverage", { method: "POST", body: JSON.stringify(body) });
+function FxEvidenceLine({ fx, testId }: { fx: FxEvidence; testId: string }) {
+  return (
+    <p data-testid={testId} className="num text-muted text-[10px]">
+      FX base {fx.base_currency} · source {fx.source ?? "identity"} · as of {fx.as_of ?? "not required"}
+    </p>
+  );
 }
 
 function num(x: number | null | undefined, digits = 2): string {
@@ -257,7 +225,8 @@ export function Hedge() {
 
         {leverage.data && (
           <Panel title="Resilience" note={`drawdown budget ${pct(leverage.data.drawdown_budget)}`}>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+            <FxEvidenceLine fx={leverage.data.fx} testId="leverage-fx-evidence" />
+            <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3">
               <div>
                 <div className="text-[10px] tracking-wider uppercase text-muted">Max drawdown (hist.)</div>
                 <div className="num text-lg">{pct(leverage.data.max_drawdown)}</div>
@@ -298,6 +267,31 @@ export function Hedge() {
           </p>
         )}
         {run.isPending && <p className="text-muted text-[12px]">Ranking candidates…</p>}
+        {run.data && (
+          <div className="mb-3 space-y-1">
+            <FxEvidenceLine fx={run.data.fx} testId="hedge-fx-evidence" />
+            <p data-testid="hedge-comparison-evidence" className="num text-muted text-[10px]">
+              Common comparison · as of {run.data.comparison_as_of?.slice(0, 10) ?? "—"} ·{" "}
+              {run.data.comparison_n_obs.toLocaleString()} obs
+            </p>
+          </div>
+        )}
+        {run.data && run.data.skipped_candidates.length > 0 && (
+          <div
+            role="status"
+            aria-label="Skipped hedge candidates"
+            className="mb-3 border border-warning/40 bg-warning/5 px-3 py-2 text-warning"
+          >
+            <p className="text-[10px] tracking-wider uppercase">Candidate coverage warning</p>
+            <ul className="mt-1 space-y-1 text-[11px]">
+              {run.data.skipped_candidates.map((candidate) => (
+                <li key={candidate.symbol}>
+                  <span className="num text-ink">{candidate.symbol}</span>: {candidate.reason}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {run.data && run.data.candidates.length === 0 && (
           <p className="text-muted text-[12px]">No candidates evaluated.</p>
         )}

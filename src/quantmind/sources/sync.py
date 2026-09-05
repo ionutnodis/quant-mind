@@ -112,8 +112,9 @@ async def sync_daily_bars(
     option_contract_con_ids = option_contract_con_ids or {}
     symbol_map: dict[str, int] = {}
     for symbol in symbols:
+        resolved_con_id: int | None = None
         try:
-            con_id = await _resolve_daily_con_id(
+            resolved_con_id = await _resolve_daily_con_id(
                 broker,
                 symbol,
                 known_con_id=known_con_ids.get(symbol),
@@ -123,22 +124,24 @@ async def sync_daily_bars(
                     else None
                 ),
             )
-            watermark = store.watermark(con_id=con_id, bar_size="1d")
+            watermark = store.watermark(con_id=resolved_con_id, bar_size="1d")
             fetch_years = years if watermark is None else 1
-            new = await broker.get_daily_bars(con_id, years=fetch_years)
+            new = await broker.get_daily_bars(resolved_con_id, years=fetch_years)
 
             if watermark is not None:
-                existing, _ = store.read_bars(con_id=con_id, bar_size="1d")
+                existing, _ = store.read_bars(
+                    con_id=resolved_con_id, bar_size="1d"
+                )
                 new = merge_bars(existing, new)
 
             store.write_bars(
-                con_id=con_id,
+                con_id=resolved_con_id,
                 bar_size="1d",
                 bars=new,
                 meta=BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today())),
             )
-            symbol_map[symbol] = con_id
-            persisted_map[symbol] = con_id
+            symbol_map[symbol] = resolved_con_id
+            persisted_map[symbol] = resolved_con_id
         except InstrumentIdentityConflictError as exc:
             # A cached symbol mapping is unsafe once the live book proves that
             # the ticker names more than one contract. Keep the conId-addressed
@@ -151,6 +154,15 @@ async def sync_daily_bars(
                 raise
             failures[symbol] = f"{type(exc).__name__}: {exc}"
         except Exception as exc:
+            if (
+                resolved_con_id is not None
+                and persisted_map.get(symbol) not in {None, resolved_con_id}
+            ):
+                # The broker has established that the cached ticker points at
+                # a different contract. If the replacement bars fail, remove
+                # the known-wrong pointer instead of serving the prior listing.
+                persisted_map.pop(symbol, None)
+                store.write_symbol_map(persisted_map)
             if failures is None:
                 raise
             failures[symbol] = f"{type(exc).__name__}: {exc}"
@@ -251,6 +263,7 @@ async def sync_instrument_metadata(
             details = await broker.fetch_contract_details(con_id)
             previous = existing_metadata.get(symbol) or {}
             fields = {
+                **previous,
                 "con_id": con_id,
                 "provider": "ibkr",
                 **provider_identity_defaults,

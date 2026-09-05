@@ -56,6 +56,7 @@ from quantmind.api.routers.book import (
     read_book,
     read_book_positions,
     validate_pinned_book_scope,
+    validate_pinned_instrument_identities,
 )
 from quantmind.core.snapshot import BookSnapshot
 from quantmind.datastore.options_store import OptionsSnapshotMeta, OptionsStore
@@ -703,12 +704,15 @@ def _bucket_expiry_legs(rows: list[ExpiryLegOut]) -> ExpiryBucketsOut:
     return ExpiryBucketsOut(le_7d=le7, le_30d=le30, le_90d=le90, later=later)
 
 
-def _book_return_series(
-    close_series: dict[int, pd.Series], market_values: dict[int, float]
-) -> tuple[pd.Series, float] | None:
-    """Weighted daily return series over every priced conId (weights are
-    fractions of GROSS |market value| — hedge.py's `_portfolio_returns`
-    convention), plus the gross value the caller must use as the dollar
+def _book_and_benchmark_returns(
+    close_series: dict[int, pd.Series],
+    market_values: dict[int, float],
+    benchmark_series: pd.Series,
+) -> tuple[pd.DataFrame, float] | None:
+    """Weighted book and benchmark returns over one common price calendar.
+
+    Book weights are fractions of GROSS |market value| — hedge.py's
+    `_portfolio_returns` convention — plus the gross value the caller must use as the dollar
     scale for any per-book-dollar quantity built from this series (module
     docstring's normalization convention, same one routers/hedge.py's
     overlay math documents). `market_values` is per-CONID (the caller sums
@@ -720,14 +724,31 @@ def _book_return_series(
     gross = sum(abs(market_values[cid]) for cid in con_ids)
     if not gross:
         return None
-    prices = pd.concat({cid: close_series[cid] for cid in con_ids}, axis=1).dropna()
+    benchmark_column = "__benchmark__"
+    prices = pd.concat(
+        {
+            **{cid: close_series[cid] for cid in con_ids},
+            benchmark_column: benchmark_series,
+        },
+        axis=1,
+        sort=False,
+    ).dropna()
     if len(prices) < 2:
         return None
     returns = prices.pct_change().dropna()
     if returns.empty:
         return None
     weights = np.array([market_values[cid] / gross for cid in con_ids])
-    return weighted_portfolio_returns(returns, con_ids, weights), gross
+    return (
+        pd.concat(
+            {
+                "book": weighted_portfolio_returns(returns, con_ids, weights),
+                "bench": returns[benchmark_column],
+            },
+            axis=1,
+        ),
+        gross,
+    )
 
 
 def _empty_attribution(reason: str, window_days: int) -> AttributionOut:
@@ -757,11 +778,6 @@ def _compute_attribution(
 ) -> AttributionOut:
     empty = lambda reason: _empty_attribution(reason, window_days)  # noqa: E731
 
-    result = _book_return_series(close_series, market_values)
-    if result is None:
-        return empty("no priced positions with enough overlapping history for a book return series")
-    book_returns, gross = result
-
     if benchmark not in symbol_map:
         return empty(f"benchmark {benchmark!r} not in cache")
     bench_series = (
@@ -771,9 +787,15 @@ def _compute_attribution(
     )
     if bench_series is None:
         return empty(f"benchmark {benchmark!r} has no cached bars")
-    bench_returns = bench_series.pct_change().dropna()
 
-    aligned = pd.concat({"book": book_returns, "bench": bench_returns}, axis=1).dropna()
+    result = _book_and_benchmark_returns(
+        close_series, market_values, bench_series
+    )
+    if result is None:
+        return empty(
+            "no priced positions with enough common book/benchmark price history"
+        )
+    aligned, gross = result
     if len(aligned) < _BETA_WINDOW + 2:
         return empty(
             f"only {len(aligned)} overlapping book/benchmark observations; need > window+1 ({_BETA_WINDOW + 1})"
@@ -842,6 +864,8 @@ async def get_portfolio(
         validate_pinned_book_scope(request.app.state, pinned)
         valuation_ts = pinned["valuation_ts"]
         pinned_snapshot_id = pinned["snapshot_id"]
+        pinned_positions = read_book_positions(store, book_ref)
+        validate_pinned_instrument_identities(store, pinned, pinned_positions)
         portfolio, option_legs = _book_from_book_ref(
             store,
             book_ref,
@@ -1030,6 +1054,8 @@ async def get_portfolio(
             )
         )
         last_closes.append(last_close)
+        if p.sec_type == "STK" and last_close is None:
+            missing_base_history_symbols.add(p.symbol)
         mark_date = (
             _last_observation_date(close_series.get(p.con_id))
             if last_close is not None and p.sec_type == "STK"
@@ -1195,6 +1221,8 @@ async def get_portfolio(
     )
     if benchmark_local_series is None:
         benchmark_unavailability_reason = f"benchmark {benchmark} has no cached bars"
+    elif _series_is_stale(benchmark_local_series, today):
+        benchmark_unavailability_reason = f"benchmark {benchmark} cached bars are stale"
     elif not benchmark_currency:
         benchmark_unavailability_reason = (
             f"benchmark {benchmark} currency metadata unavailable"

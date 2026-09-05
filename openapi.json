@@ -718,6 +718,7 @@
                   "invalid_timestamp",
                   "legacy_scope",
                   "base_currency_mismatch",
+                  "instrument_identity_mismatch",
                   "cross_currency_option",
                   "account_mismatch",
                   "mode_mismatch",

@@ -16,6 +16,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { BookBuilder, newBookRow, rowsToPositions, snapshotToRows, type BookRow } from "../components/BookBuilder";
 import { Panel, Skeleton } from "../components/Panel";
 import { api, request } from "../lib/api";
+import type { components } from "../lib/api-types";
 import { getBook, readActiveBookRef, type BookSnapshotOut } from "../lib/book";
 
 interface Scenario {
@@ -26,40 +27,9 @@ interface Scenario {
   seed?: number;
 }
 
-interface WeightOut {
-  symbol: string;
-  qty: number;
-  // Nullable per the backend serialization policy (NaN/Inf -> null): render
-  // "—" via pct()/num(), never crash on a null field.
-  price: number | null;
-  market_value: number | null;
-  weight: number | null;
-}
-
-interface MonteCarloOut {
-  histogram: { bin_edges: number[]; counts: number[] };
-  p5: number | null;
-  p50: number | null;
-  p95: number | null;
-  n_nonfinite: number;
-}
-
-interface BenchmarkOut {
-  symbol: string;
-  es_975: number | null;
-  ann_vol: number | null;
-}
-
-interface WhatIfResponse {
-  weights: WeightOut[];
-  beta: number | null;
-  es_975: number | null;
-  ann_vol: number | null;
-  mc: MonteCarloOut;
-  benchmark: BenchmarkOut;
-  n_obs: number;
-  as_of: string | null;
-}
+type WhatIfRequest = components["schemas"]["WhatIfRequest"];
+type WhatIfResponse = components["schemas"]["WhatIfResponse"];
+type FxEvidence = components["schemas"]["FxEvidenceOut"];
 
 const SCENARIOS_KEY = "quantmind.whatif.scenarios";
 const YEARS_BOUNDS = { min: 1, max: 25 };
@@ -83,13 +53,16 @@ function persistScenarios(scenarios: Record<string, Scenario>) {
   }
 }
 
-function postWhatIf(body: {
-  positions?: { symbol: string; qty: number }[];
-  book_ref?: string;
-  years: number;
-  mc: { horizon: number; n_paths: number; seed?: number };
-}): Promise<WhatIfResponse> {
+function postWhatIf(body: WhatIfRequest): Promise<WhatIfResponse> {
   return request<WhatIfResponse>("/api/whatif", { method: "POST", body: JSON.stringify(body) });
+}
+
+function FxEvidenceLine({ fx }: { fx: FxEvidence }) {
+  return (
+    <p data-testid="whatif-fx-evidence" className="num text-muted text-[10px]">
+      FX base {fx.base_currency} · source {fx.source ?? "identity"} · as of {fx.as_of ?? "not required"}
+    </p>
+  );
 }
 
 function pct(x: number | null): string {
@@ -316,7 +289,9 @@ export function WhatIf() {
             <p className="text-muted text-[11px]">Awaiting compute — book/benchmark risk lands here once you run Compute.</p>
           )}
           {data && (
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <>
+              <FxEvidenceLine fx={data.fx} />
+              <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div data-testid="whatif-book-risk" className="text-you space-y-2">
                 <div className="text-[10px] tracking-wider uppercase text-you/70">This book (amber)</div>
                 <div className="num text-[12px]">
@@ -345,7 +320,8 @@ export function WhatIf() {
                   <span className="ml-2">{pct(data.benchmark.ann_vol)}</span>
                 </div>
               </div>
-            </div>
+              </div>
+            </>
           )}
         </Panel>
       </div>

@@ -19,7 +19,7 @@ from quantmind.config import Settings
 from quantmind.datastore.locking import exclusive_sync_lock
 from quantmind.datastore.options_store import OptionsStore
 from quantmind.datastore.store import BarStore, PORTFOLIO_DISCOVERY_FAILURE_SYMBOL
-from quantmind.fx import EcbFxProvider, sync_ecb_fx
+from quantmind.fx import EcbFxProvider, FxConversionUnavailable, sync_ecb_fx
 from quantmind.portfolio import Portfolio
 from quantmind.sources.options_sync import sync_options_chains
 from quantmind.sources.providers.justetf import JustEtfProvider
@@ -289,12 +289,47 @@ async def _run_main(symbols: list[str], ib_connections: list) -> None:
         | {base_currency}
     )
     if fx_currencies - {base_currency}:
+        provider = EcbFxProvider()
         try:
-            fx_result = sync_ecb_fx(store, EcbFxProvider(), fx_currencies)
+            fx_result = sync_ecb_fx(store, provider, fx_currencies)
             print(
                 f"ECB FX {', '.join(sorted(fx_currencies))} through {fx_result.as_of} "
                 "(reference rates)"
             )
+        except FxConversionUnavailable as exc:
+            # One unsupported/missing ledger currency must not suppress usable
+            # ECB evidence for every other European holding. Each successful
+            # atomic publication merges the previous manifest, so retries are
+            # safe and preserve already cached currencies.
+            synced: list[str] = []
+            unresolved: list[str] = []
+            last_result = None
+            for currency in sorted(fx_currencies - {base_currency}):
+                try:
+                    last_result = sync_ecb_fx(
+                        store, provider, {base_currency, currency}
+                    )
+                    synced.append(currency)
+                except FxConversionUnavailable:
+                    unresolved.append(currency)
+            if synced and last_result is not None:
+                print(
+                    f"ECB FX {base_currency}, {', '.join(synced)} through "
+                    f"{last_result.as_of} (reference rates; partial universe)"
+                )
+                if unresolved:
+                    warnings.append("FX reference rates incomplete")
+                    print(
+                        "WARNING: FX reference rates remain unavailable for "
+                        f"{', '.join(unresolved)} ({type(exc).__name__}: {exc}); "
+                        "analysis requiring those currencies remains unavailable"
+                    )
+            else:
+                warnings.append("FX reference rates unavailable")
+                print(
+                    f"WARNING: FX sync unavailable ({type(exc).__name__}: {exc}); "
+                    "local-currency bars remain cached but mixed-currency analysis is unavailable"
+                )
         except Exception as exc:
             warnings.append("FX reference rates unavailable")
             print(

@@ -90,6 +90,7 @@ from quantmind.api.routers.book import (
     read_book,
     read_book_positions,
     validate_pinned_book_scope,
+    validate_pinned_instrument_identities,
 )
 from quantmind.hedge.core import diversification_ratio, leverage_headroom, max_drawdown
 from quantmind.fx import FxConversionUnavailable, FxConverter
@@ -205,7 +206,6 @@ class HedgeResponse(BaseModel):
 class _PreparedCandidate:
     symbol: str
     prices: pd.Series
-    returns: pd.Series
     beta: float | None
     unusable: bool
     corr_stability: float | None
@@ -271,6 +271,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         pinned = read_book(store, req.book_ref)
         validate_pinned_book_scope(request.app.state, pinned)
         book_positions = read_book_positions(store, req.book_ref)
+        validate_pinned_instrument_identities(store, pinned, book_positions)
     if not book_positions:
         raise HTTPException(422, detail="book_ref resolved to an empty book")
     if len(book_positions) > _MAX_BOOK_POSITIONS:
@@ -321,14 +322,30 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
             ),
         )
 
-    book_returns, _weights, book_value, book_gross, book_prices = _portfolio_returns(series_map, qtys, unique_book)
+    benchmark_column = "__benchmark__"
+    analysis_prices = pd.concat(
+        {
+            **{symbol: series_map[symbol] for symbol in unique_book},
+            benchmark_column: series_map[benchmark],
+        },
+        axis=1,
+        sort=False,
+    ).dropna()
+    aligned_book_series = {
+        symbol: analysis_prices[symbol] for symbol in unique_book
+    }
+    book_returns, book_weights, book_value, book_gross, book_prices = (
+        _portfolio_returns(aligned_book_series, qtys, unique_book)
+    )
     if book_gross <= 0:
         raise HTTPException(422, detail="portfolio has zero gross market value")
     if book_returns is None:
         raise HTTPException(422, detail="book has no overlapping trading days")
 
-    bench_returns = series_map[benchmark].pct_change().dropna()
-    aligned = pd.concat({"book": book_returns, "bench": bench_returns}, axis=1).dropna()
+    bench_returns = analysis_prices[benchmark_column].pct_change().dropna()
+    aligned = pd.concat(
+        {"book": book_returns, "bench": bench_returns}, axis=1
+    ).dropna()
     if len(aligned) < _BETA_WINDOW + 2:
         raise HTTPException(
             422,
@@ -369,7 +386,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         candidate_count = len(symbol_map) - len(book_symbols)
         candidate_pool = list(
             islice(
-                (symbol for symbol in symbol_map if symbol not in book_symbols),
+                (symbol for symbol in sorted(symbol_map) if symbol not in book_symbols),
                 _MAX_DEFAULT_CANDIDATE_SCAN,
             )
         )
@@ -388,7 +405,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         currency: fx_converter for currency in set(book_currencies.values())
     }
     book_as_of = book_prices.index[-1]
-    comparison_index = book_returns.index
+    comparison_level_index = analysis_prices.index
     for candidate_index, csym in enumerate(candidate_pool):
         if (
             req.candidates is None
@@ -405,7 +422,23 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                 for remaining_symbol in candidate_pool[candidate_index:]
             )
             break
-        currency_value = (candidate_metadata.get(csym) or {}).get("currency")
+        metadata_fields = candidate_metadata.get(csym) or {}
+        metadata_con_id = metadata_fields.get("con_id")
+        if (
+            metadata_con_id is not None
+            and metadata_con_id != symbol_map.get(csym)
+        ):
+            skipped_candidates.append(
+                HedgeCandidateSkipOut(
+                    symbol=csym,
+                    reason=(
+                        "instrument metadata contract identity does not match "
+                        "the current symbol map; run sync"
+                    ),
+                )
+            )
+            continue
+        currency_value = metadata_fields.get("currency")
         currency = (
             str(currency_value).strip().upper() if currency_value else None
         )
@@ -488,13 +521,23 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         if candidate_converter.fetched_at:
             fx_fetched_at_values.append(candidate_converter.fetched_at)
 
-        cand_returns = cand_prices.pct_change().dropna()
-
-        aligned_c = pd.concat(
-            {"asset": cand_returns, "bench": bench_returns},
-            axis=1,
-            sort=False,
-        ).dropna()
+        candidate_level_index = analysis_prices.index.intersection(
+            cand_prices.index, sort=False
+        ).sort_values()
+        candidate_levels = analysis_prices.loc[candidate_level_index].copy()
+        candidate_levels["__candidate__"] = cand_prices.loc[
+            candidate_level_index
+        ]
+        candidate_returns = candidate_levels.pct_change().dropna()
+        cand_returns = candidate_returns["__candidate__"]
+        candidate_book_returns = weighted_portfolio_returns(
+            candidate_returns,
+            unique_book,
+            np.array([book_weights[symbol] for symbol in unique_book]),
+        )
+        aligned_c = candidate_returns[["__candidate__", benchmark_column]].rename(
+            columns={"__candidate__": "asset", benchmark_column: "bench"}
+        )
         beta_cand: float | None = None
         if len(aligned_c) >= _BETA_WINDOW + 2:
             try:
@@ -506,10 +549,8 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                 beta_cand = None
 
         aligned_bc = pd.concat(
-            {"book": book_returns, "cand": cand_returns},
-            axis=1,
-            sort=False,
-        ).dropna()
+            {"book": candidate_book_returns, "cand": cand_returns}, axis=1
+        )
         corr_stability: float | None = None
         if len(aligned_bc) >= _BETA_WINDOW + 2:
             roll_corr = rolling_correlation(aligned_bc["book"], aligned_bc["cand"], window=_BETA_WINDOW).dropna()
@@ -519,16 +560,14 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         unusable = beta_cand is None or not math.isfinite(beta_cand) or abs(beta_cand) < _MIN_BETA_ABS
 
         if not unusable and book_beta is not None:
-            candidate_comparison_index = book_returns.index.intersection(
-                cand_returns.index, sort=False
-            ).sort_values()
-            if len(candidate_comparison_index) < _MIN_PROTECTION_OBSERVATIONS:
+            candidate_n_obs = max(0, len(candidate_level_index) - 1)
+            if candidate_n_obs < _MIN_PROTECTION_OBSERVATIONS:
                 skipped_candidates.append(
                     HedgeCandidateSkipOut(
                         symbol=csym,
                         reason=(
                             "insufficient common comparison history: "
-                            f"{len(candidate_comparison_index)} observations; need "
+                            f"{candidate_n_obs} observations; need "
                             f"at least {_MIN_PROTECTION_OBSERVATIONS}"
                         ),
                     )
@@ -539,7 +578,6 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
             _PreparedCandidate(
                 symbol=csym,
                 prices=cand_prices,
-                returns=cand_returns,
                 beta=beta_cand,
                 unusable=unusable,
                 corr_stability=corr_stability,
@@ -553,10 +591,11 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     ]
     if req.candidates is not None and comparable_candidates:
         for candidate in comparable_candidates:
-            comparison_index = comparison_index.intersection(
-                candidate.returns.index, sort=False
+            comparison_level_index = comparison_level_index.intersection(
+                candidate.prices.index, sort=False
             ).sort_values()
-        if len(comparison_index) < _MIN_PROTECTION_OBSERVATIONS:
+        comparison_n_obs = max(0, len(comparison_level_index) - 1)
+        if comparison_n_obs < _MIN_PROTECTION_OBSERVATIONS:
             names = ", ".join(
                 sorted(candidate.symbol for candidate in comparable_candidates)
             )
@@ -564,7 +603,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                 422,
                 detail=(
                     "requested hedge candidates unavailable: "
-                    f"{names} collectively share {len(comparison_index)} common "
+                    f"{names} collectively share {comparison_n_obs} common "
                     "comparison observations; need at least "
                     f"{_MIN_PROTECTION_OBSERVATIONS}"
                 ),
@@ -575,27 +614,28 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         ordered_candidates = sorted(
             comparable_candidates,
             key=lambda candidate: (
-                -len(book_returns.index.intersection(candidate.returns.index)),
+                -len(analysis_prices.index.intersection(candidate.prices.index)),
                 candidate.symbol,
             ),
         )
         for candidate in ordered_candidates:
-            cohort_index = comparison_index.intersection(
-                candidate.returns.index, sort=False
+            cohort_level_index = comparison_level_index.intersection(
+                candidate.prices.index, sort=False
             ).sort_values()
-            if len(cohort_index) < _MIN_PROTECTION_OBSERVATIONS:
+            cohort_n_obs = max(0, len(cohort_level_index) - 1)
+            if cohort_n_obs < _MIN_PROTECTION_OBSERVATIONS:
                 skipped_candidates.append(
                     HedgeCandidateSkipOut(
                         symbol=candidate.symbol,
                         reason=(
                             "incompatible with the common comparison cohort: "
-                            f"{len(cohort_index)} observations; need at least "
+                            f"{cohort_n_obs} observations; need at least "
                             f"{_MIN_PROTECTION_OBSERVATIONS}"
                         ),
                     )
                 )
                 continue
-            comparison_index = cohort_index
+            comparison_level_index = cohort_level_index
             accepted_symbols.add(candidate.symbol)
         prepared_candidates = [
             candidate
@@ -609,7 +649,15 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     # Protection is a cross-candidate ranking metric, so every beta-usable
     # candidate must use one common book/candidate sample. Candidate-specific
     # overlaps make shorter or differently listed histories incomparable.
-    comparison_book_returns = book_returns.loc[comparison_index]
+    comparison_returns = analysis_prices.loc[
+        comparison_level_index
+    ].pct_change().dropna()
+    comparison_book_returns = weighted_portfolio_returns(
+        comparison_returns,
+        unique_book,
+        np.array([book_weights[symbol] for symbol in unique_book]),
+    )
+    comparison_bench_returns = comparison_returns[benchmark_column]
     if has_comparable_candidate:
         try:
             comparison_es_before = clean(
@@ -624,8 +672,43 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     for candidate in prepared_candidates:
         hedge_qty = hedge_notional = es_after = protection = residual_beta = None
         beta_cand = candidate.beta
+        corr_stability = candidate.corr_stability
 
-        if not candidate.unusable and book_beta is not None and beta_cand is not None:
+        if not candidate.unusable and book_beta is not None:
+            candidate_returns = (
+                candidate.prices.loc[comparison_level_index]
+                .pct_change()
+                .dropna()
+            )
+            try:
+                common_beta = rolling_beta(
+                    candidate_returns,
+                    comparison_bench_returns,
+                    window=_BETA_WINDOW,
+                    rf=0.0,
+                ).dropna()
+                beta_cand = (
+                    float(common_beta.iloc[-1]) if len(common_beta) else None
+                )
+            except InsufficientDataError:
+                beta_cand = None
+            common_corr = rolling_correlation(
+                comparison_book_returns,
+                candidate_returns,
+                window=_BETA_WINDOW,
+            ).dropna()
+            corr_stability = (
+                clean(float(common_corr.std())) if len(common_corr) else None
+            )
+
+        unusable = (
+            candidate.unusable
+            or beta_cand is None
+            or not math.isfinite(beta_cand)
+            or abs(beta_cand) < _MIN_BETA_ABS
+        )
+
+        if not unusable and book_beta is not None and beta_cand is not None:
             price_cand_last = float(candidate.prices.iloc[-1])
             if math.isfinite(price_cand_last) and price_cand_last != 0:
                 raw_size = (
@@ -639,9 +722,8 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                 # Overlay, not a re-blended portfolio (see module docstring's
                 # normalization convention). The common index guarantees
                 # es_before and every ranked es_after use identical dates.
-                candidate_returns = candidate.returns.loc[comparison_index]
                 hedged_returns: pd.Series | None = None
-                if len(comparison_index) > 0 and book_gross:
+                if len(comparison_book_returns) > 0 and book_gross:
                     hedge_leg_returns = (
                         hedge_notional * candidate_returns / book_gross
                     )
@@ -658,10 +740,12 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                         protection = comparison_es_before - es_after
 
                     aligned_h = pd.concat(
-                        {"book": hedged_returns, "bench": bench_returns},
+                        {
+                            "book": hedged_returns,
+                            "bench": comparison_bench_returns,
+                        },
                         axis=1,
-                        sort=False,
-                    ).dropna()
+                    )
                     if len(aligned_h) >= _BETA_WINDOW + 2:
                         try:
                             rb_series = rolling_beta(
@@ -680,14 +764,14 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
             HedgeCandidateOut(
                 symbol=candidate.symbol,
                 beta=clean(beta_cand),
-                unusable=candidate.unusable,
+                unusable=unusable,
                 hedge_qty=clean(hedge_qty),
                 hedge_notional=clean(hedge_notional),
                 es_before=comparison_es_before,
                 es_after=es_after,
                 protection=clean(protection),
                 residual_beta=residual_beta,
-                corr_stability=candidate.corr_stability,
+                corr_stability=corr_stability,
             )
         )
 
@@ -755,10 +839,12 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         book_beta=book_beta,
         es_before=es_before,
         comparison_as_of=(
-            iso(comparison_index[-1]) if has_comparable_candidate else None
+            iso(comparison_book_returns.index[-1])
+            if has_comparable_candidate and len(comparison_book_returns)
+            else None
         ),
         comparison_n_obs=(
-            len(comparison_index) if has_comparable_candidate else 0
+            len(comparison_book_returns) if has_comparable_candidate else 0
         ),
         n_candidates_evaluated=n_evaluated,
         candidates=results[:_MAX_CANDIDATES_OUT],
@@ -783,6 +869,7 @@ def leverage(request: Request, req: LeverageRequest) -> LeverageResponse:
         pinned = read_book(store, req.book_ref)
         validate_pinned_book_scope(request.app.state, pinned)
         book_positions = read_book_positions(store, req.book_ref)
+        validate_pinned_instrument_identities(store, pinned, book_positions)
     if not book_positions:
         raise HTTPException(422, detail="book_ref resolved to an empty book")
     if len(book_positions) > _MAX_BOOK_POSITIONS:

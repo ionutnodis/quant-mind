@@ -557,6 +557,37 @@ async def test_account_summary_prefers_base_totals_over_currency_ledgers():
     assert summary["currency"] == "USD"
 
 
+async def test_account_summary_never_labels_a_local_ledger_as_base_currency():
+    ib = FakeIB(
+        account_values=[
+            _account_value("BaseCurrency", "EUR", currency=""),
+            _account_value("NetLiquidation", "125000.50", currency="BASE"),
+            _account_value("TotalCashValue", "20000.00", currency="USD"),
+        ]
+    )
+
+    summary = await IbBroker(ib).get_account_summary()
+
+    assert summary["net_liquidation"] == 125000.50
+    assert summary["total_cash_value"] is None
+    assert summary["currency"] == "EUR"
+
+
+async def test_account_summary_with_mixed_local_ledgers_is_withheld():
+    ib = FakeIB(
+        account_values=[
+            _account_value("NetLiquidation", "125000.50", currency="EUR"),
+            _account_value("TotalCashValue", "20000.00", currency="USD"),
+        ]
+    )
+
+    summary = await IbBroker(ib).get_account_summary()
+
+    assert summary["net_liquidation"] is None
+    assert summary["total_cash_value"] is None
+    assert summary["currency"] is None
+
+
 async def test_account_summary_with_base_totals_and_no_base_currency_is_withheld():
     ib = FakeIB(
         account_values=[

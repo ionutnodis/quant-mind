@@ -111,7 +111,10 @@ def _validate_instrument_metadata(payload: object) -> dict[str, dict]:
         profile_status = fields.get("ucits_profile_status")
         if (
             profile_status is not None
-            and profile_status not in _UCITS_PROFILE_STATUSES
+            and (
+                not isinstance(profile_status, str)
+                or profile_status not in _UCITS_PROFILE_STATUSES
+            )
         ):
             raise _instrument_metadata_value_error(
                 symbol,

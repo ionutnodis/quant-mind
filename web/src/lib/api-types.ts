@@ -674,7 +674,7 @@ export interface components {
             /** Option Positions */
             option_positions: number;
             /** Reason */
-            reason: ("empty_book" | "stale_snapshot" | "invalid_timestamp" | "legacy_scope" | "base_currency_mismatch" | "cross_currency_option" | "account_mismatch" | "mode_mismatch" | "unsupported_currency" | "unsupported_security_type") | null;
+            reason: ("empty_book" | "stale_snapshot" | "invalid_timestamp" | "legacy_scope" | "base_currency_mismatch" | "instrument_identity_mismatch" | "cross_currency_option" | "account_mismatch" | "mode_mismatch" | "unsupported_currency" | "unsupported_security_type") | null;
             /** Snapshot Count */
             snapshot_count: number;
             /** Source */

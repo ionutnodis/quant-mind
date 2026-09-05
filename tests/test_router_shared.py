@@ -76,6 +76,18 @@ def test_currency_resolution_rejects_metadata_for_a_different_contract(tmp_path)
     assert "contract identity" in error.value.detail
 
 
+def test_currency_resolution_names_a_corrupt_symbol_map(tmp_path):
+    store = BarStore(tmp_path)
+    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
+    (tmp_path / "symbols.json").write_text("not-json")
+
+    with pytest.raises(HTTPException) as error:
+        resolve_symbol_currencies(store, ["SPY"])
+
+    assert error.value.status_code == 422
+    assert "symbol map is corrupt" in error.value.detail
+
+
 def test_clean_passes_through_finite_numbers():
     assert clean(1.5) == 1.5
     assert clean(0) == 0.0

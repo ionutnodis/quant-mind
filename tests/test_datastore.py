@@ -181,7 +181,14 @@ def test_single_instrument_metadata_read_rejects_invalid_record_shape(tmp_path):
         {"external_identifiers": ["ISIN", "IE00B4L5Y983"]},
         {"external_identifiers": {"ISIN": "IE00B4L5Y983"}},
         {"ucits_profile_status": "READY"},
+        {"ucits_profile_status": []},
+        {"ucits_profile_status": {}},
         {"con_id": True},
+        {"price_scale": True},
+        {"price_scale": 0},
+        {"price_scale": -1},
+        {"price_scale": float("nan")},
+        {"price_scale": float("inf")},
     ],
 )
 def test_instrument_metadata_rejects_invalid_known_field_values(tmp_path, fields):

@@ -222,8 +222,14 @@ class IbBroker(ReadOnlyBroker):
                 continue
             candidates[key].append(v)
 
-        currencies: set[str] = set()
-        selected_base_total = False
+        has_base_totals = any(
+            str(getattr(row, "currency", "") or "").strip() == "BASE"
+            for rows in candidates.values()
+            for row in rows
+        )
+        base_mode = base_currency is not None or has_base_totals
+        selected_rows: dict[str, object] = {}
+        selected_currencies: set[str] = set()
         for key, rows in candidates.items():
             if not rows:
                 continue
@@ -232,28 +238,41 @@ class IbBroker(ReadOnlyBroker):
                 for row in rows
                 if str(getattr(row, "currency", "") or "").strip() == "BASE"
             ]
-            if base_rows:
-                selected = base_rows[-1]
-                selected_base_total = True
-            else:
-                row_currencies = {
-                    str(getattr(row, "currency", "") or "").strip()
-                    for row in rows
-                    if str(getattr(row, "currency", "") or "").strip()
-                }
-                if len(row_currencies) > 1:
+            if base_mode:
+                # A BASE ledger is already converted by IBKR. Never fill a
+                # missing BASE tag from a local-currency ledger and then label
+                # it with the account base currency.
+                if not base_rows:
                     continue
-                selected = rows[-1]
-                currencies.update(row_currencies)
+                selected_rows[key] = base_rows[-1]
+                continue
+
+            row_currencies = {
+                str(getattr(row, "currency", "") or "").strip()
+                for row in rows
+                if str(getattr(row, "currency", "") or "").strip()
+            }
+            if len(row_currencies) != 1:
+                continue
+            selected_rows[key] = rows[-1]
+            selected_currencies.update(row_currencies)
+
+        # Without a BASE ledger, one response may only declare one currency.
+        # If tags came from different local ledgers, withhold all of them
+        # rather than publish an internally inconsistent AccountOut.
+        if not base_mode and len(selected_currencies) != 1:
+            selected_rows.clear()
+
+        for key, selected in selected_rows.items():
             try:
                 out[key] = float(selected.value)
             except (TypeError, ValueError):
                 out[key] = None
         out["currency"] = (
             base_currency
-            if selected_base_total
-            else next(iter(currencies))
-            if len(currencies) == 1
+            if base_mode
+            else next(iter(selected_currencies))
+            if len(selected_currencies) == 1
             else None
         )
         return out

@@ -917,6 +917,34 @@ def test_attribution_is_withheld_when_a_priced_leg_lacks_historical_fx(tmp_path)
     assert "base-currency history" in body["attribution"]["reason"]
 
 
+def test_attribution_is_withheld_when_any_book_leg_has_only_a_stale_mark(tmp_path):
+    store = BarStore(tmp_path)
+    fresh = _random_bars(seed=17, start=100.0)
+    stale = _random_bars(seed=18, start=80.0).iloc[:-10]
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today()))
+    store.write_bars(1, "1d", fresh, meta)
+    store.write_bars(2, "1d", stale, meta)
+    store.write_symbol_map({"SPY": 1, "QQQ": 2})
+    store.write_instrument_metadata("SPY", {"currency": "USD"})
+    store.write_instrument_metadata("QQQ", {"currency": "USD"})
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=1, symbol="SPY", qty=10, currency="USD"),
+            Position(con_id=2, symbol="QQQ", qty=10, currency="USD"),
+        ),
+        as_of=date.today().isoformat(),
+    )
+
+    body = _client(store, broker=FakeBroker(portfolio)).get(
+        "/api/portfolio", params={"attribution_days": 90}
+    ).json()
+
+    assert body["totals"]["valuation_status"] == "partial"
+    assert body["attribution"]["available"] is False
+    assert "QQQ" in body["attribution"]["reason"]
+    assert "base-currency history" in body["attribution"]["reason"]
+
+
 def test_exposure_loads_fx_for_a_foreign_benchmark_not_held_in_the_book(tmp_path):
     store = BarStore(tmp_path)
     bars = _random_bars(seed=14, start=100.0)
@@ -1033,6 +1061,31 @@ def test_exposure_and_attribution_fail_closed_without_benchmark_fx(tmp_path):
     assert "benchmark UKBENCH FX evidence" in exposure["beta_note"]
     assert body["attribution"]["available"] is False
     assert "benchmark UKBENCH FX evidence" in body["attribution"]["reason"]
+
+
+def test_exposure_and_attribution_fail_closed_with_a_stale_benchmark(tmp_path):
+    store = BarStore(tmp_path)
+    benchmark = _random_bars(seed=19, start=100.0).iloc[:-10]
+    position = _random_bars(seed=20, start=80.0)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today()))
+    store.write_bars(1, "1d", benchmark, meta)
+    store.write_bars(2, "1d", position, meta)
+    store.write_symbol_map({"SPY": 1, "QQQ": 2})
+    store.write_instrument_metadata("SPY", {"currency": "USD"})
+    store.write_instrument_metadata("QQQ", {"currency": "USD"})
+    portfolio = Portfolio(
+        positions=(Position(con_id=2, symbol="QQQ", qty=10, currency="USD"),),
+        as_of=date.today().isoformat(),
+    )
+
+    body = _client(store, broker=FakeBroker(portfolio)).get(
+        "/api/portfolio", params={"attribution_days": 90}
+    ).json()
+
+    assert body["exposure"][0]["beta"] is None
+    assert "benchmark SPY cached bars are stale" in body["exposure"][0]["beta_note"]
+    assert body["attribution"]["available"] is False
+    assert "benchmark SPY cached bars are stale" in body["attribution"]["reason"]
 
 
 def test_unsupported_live_security_type_is_blocked(store):
@@ -1823,6 +1876,50 @@ def test_attribution_available_with_sufficient_history(rich_store):
     for point in attribution["series"]:
         assert point["date"].endswith("Z")
         assert point["total_pnl"] == pytest.approx(point["core_pnl"] + point["overlay_pnl"], abs=1e-6)
+
+
+def test_attribution_aligns_price_levels_before_cross_calendar_returns(tmp_path):
+    index = pd.bdate_range(end=date.today(), periods=601)
+    rng = np.random.default_rng(909)
+    close = pd.Series(
+        100.0 * np.cumprod(1 + rng.normal(0.0002, 0.01, len(index))),
+        index=index,
+    )
+
+    def bars(series):
+        return pd.DataFrame(
+            {
+                "open": series,
+                "high": series,
+                "low": series,
+                "close": series,
+                "volume": 1000.0,
+            },
+            index=series.index,
+        )
+
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today()))
+    store.write_bars(1, "1d", bars(close), meta)
+    store.write_bars(2, "1d", bars(close.iloc[::2]), meta)
+    store.write_symbol_map({"SPY": 1, "BOOK": 2})
+    for symbol in ("SPY", "BOOK"):
+        store.write_instrument_metadata(symbol, {"currency": "USD"})
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=2, symbol="BOOK", qty=10, currency="USD"),
+        ),
+        as_of=date.today().isoformat(),
+    )
+
+    response = _client(store, broker=FakeBroker(portfolio)).get(
+        "/api/portfolio", params={"attribution_days": 252}
+    )
+
+    assert response.status_code == 200, response.text
+    attribution = response.json()["attribution"]
+    assert attribution["available"] is True
+    assert attribution["beta"] == pytest.approx(1.0, abs=1e-9)
 
 
 def test_attribution_is_unavailable_for_option_book_without_option_price_history(rich_store):

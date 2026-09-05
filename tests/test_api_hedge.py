@@ -404,6 +404,25 @@ def test_hedge_requested_candidate_without_currency_is_named_422(client):
     assert "QQQ: missing currency metadata" in response.json()["detail"]
 
 
+def test_hedge_rejects_candidate_metadata_for_a_different_contract(client):
+    client.app.state.store.write_instrument_metadata(
+        "QQQ", {"con_id": 999, "currency": "USD"}
+    )
+
+    response = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "SPY", "qty": 10}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["QQQ"],
+        },
+    )
+
+    assert response.status_code == 422
+    assert "QQQ" in response.json()["detail"]
+    assert "contract identity" in response.json()["detail"]
+
+
 def test_hedge_default_universe_reports_skipped_candidates(client):
     client.app.state.store.write_instrument_metadata("QQQ", {"currency": None})
 
@@ -432,7 +451,7 @@ def test_hedge_default_discovery_fills_budget_past_unusable_early_entries(
     meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
     store.write_bars(1, "1d", spy, meta)
     store.write_bars(2, "1d", candidate, meta)
-    missing = [f"MISSING_{index:02d}" for index in range(10)]
+    missing = [f"AAA_MISSING_{index:02d}" for index in range(10)]
     eligible = [f"ELIGIBLE_{index:02d}" for index in range(55)]
     store.write_symbol_map(
         {
@@ -489,11 +508,11 @@ def test_hedge_default_discovery_names_candidates_omitted_by_scan_cap(tmp_path):
         {
             "SPY": 1,
             **{symbol: 100 + index for index, symbol in enumerate(missing)},
-            "LATE_ELIGIBLE": 2,
+        "ZZZ_LATE_ELIGIBLE": 2,
         }
     )
     store.write_instrument_metadata("SPY", {"currency": "USD"})
-    store.write_instrument_metadata("LATE_ELIGIBLE", {"currency": "USD"})
+    store.write_instrument_metadata("ZZZ_LATE_ELIGIBLE", {"currency": "USD"})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     c = TestClient(
         app,
@@ -514,6 +533,42 @@ def test_hedge_default_discovery_names_candidates_omitted_by_scan_cap(tmp_path):
     detail = response.json()["detail"]
     assert "default candidate scan limit" in detail
     assert "2 additional cached candidates" in detail
+
+
+def test_hedge_default_evaluation_is_independent_of_symbol_map_order(tmp_path):
+    store = BarStore(tmp_path)
+    spy = _bars(seed=1)
+    candidate = _beta_correlated_bars(
+        spy["close"], beta=0.8, noise_scale=0.002, seed=2
+    )
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(1, "1d", spy, meta)
+    store.write_bars(2, "1d", candidate, meta)
+    candidates = [f"CANDIDATE_{index:02d}" for index in range(51)]
+    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
+    for symbol in candidates:
+        store.write_instrument_metadata(symbol, {"con_id": 2, "currency": "USD"})
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    client = TestClient(
+        app,
+        base_url="http://127.0.0.1",
+        headers={"Authorization": "Bearer testtoken"},
+    )
+    payload = {
+        "book": [{"symbol": "SPY", "qty": 10}],
+        "objective": {"kind": "beta_target", "value": 0.0},
+        "years": 1,
+    }
+
+    store.write_symbol_map({"SPY": 1, **dict.fromkeys(candidates, 2)})
+    forward = client.post("/api/hedge", json=payload)
+    store.write_symbol_map(
+        {"SPY": 1, **dict.fromkeys(reversed(candidates), 2)}
+    )
+    reverse = client.post("/api/hedge", json=payload)
+
+    assert forward.status_code == reverse.status_code == 200
+    assert forward.json() == reverse.json()
 
 
 def test_hedge_unknown_book_symbol_is_422(client):
@@ -748,6 +803,66 @@ def test_hedge_candidates_share_one_es_window_when_one_has_recent_history(tmp_pa
     assert recent["es_before"] == pytest.approx(expected_es_before)
     assert full["es_after"] == pytest.approx(recent["es_after"])
     assert full["protection"] == pytest.approx(recent["protection"])
+
+
+def test_hedge_builds_every_candidate_return_on_one_cross_calendar_grid(tmp_path):
+    index = pd.bdate_range(end="2026-07-24", periods=601)
+    rng = np.random.default_rng(707)
+    close = pd.Series(
+        100.0 * np.cumprod(1 + rng.normal(0.0002, 0.01, len(index))),
+        index=index,
+    )
+
+    def bars(series):
+        return pd.DataFrame(
+            {
+                "open": series,
+                "high": series,
+                "low": series,
+                "close": series,
+                "volume": 1000.0,
+            },
+            index=series.index,
+        )
+
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(1, "1d", bars(close), meta)
+    store.write_bars(2, "1d", bars(close.copy()), meta)
+    store.write_bars(3, "1d", bars(close.copy()), meta)
+    store.write_bars(4, "1d", bars(close.iloc[::2]), meta)
+    store.write_symbol_map({"BENCH": 1, "BOOK": 2, "FULL": 3, "GAPS": 4})
+    for symbol in ("BENCH", "BOOK", "FULL", "GAPS"):
+        store.write_instrument_metadata(symbol, {"currency": "USD"})
+    client = TestClient(
+        create_app(store=store, benchmark="BENCH", api_token="testtoken"),
+        base_url="http://127.0.0.1",
+        headers={"Authorization": "Bearer testtoken"},
+    )
+
+    response = client.post(
+        "/api/hedge",
+        json={
+            "book": [{"symbol": "BOOK", "qty": 10}],
+            "objective": {"kind": "beta_target", "value": 0.0},
+            "candidates": ["FULL", "GAPS"],
+            "years": 5,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    by_symbol = {row["symbol"]: row for row in body["candidates"]}
+    assert body["book_beta"] == pytest.approx(1.0, abs=1e-9)
+    assert body["comparison_n_obs"] == len(close.iloc[::2]) - 1
+    assert by_symbol["FULL"]["beta"] == pytest.approx(1.0, abs=1e-9)
+    assert by_symbol["GAPS"]["beta"] == pytest.approx(1.0, abs=1e-9)
+    assert by_symbol["FULL"]["es_after"] == pytest.approx(
+        by_symbol["GAPS"]["es_after"], abs=1e-12
+    )
+    assert by_symbol["FULL"]["protection"] == pytest.approx(
+        by_symbol["GAPS"]["protection"], abs=1e-12
+    )
 
 
 def test_incompatible_candidate_cohort_error_is_independent_of_request_order(tmp_path):

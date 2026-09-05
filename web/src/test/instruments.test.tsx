@@ -334,6 +334,27 @@ test("sheet distinguishes a candle request failure from an empty cache", async (
   expect(screen.queryByText(/no cached candles yet/i)).not.toBeInTheDocument();
 });
 
+test("sheet retries a failed candle request and renders the recovered chart", async () => {
+  let candleRequests = 0;
+  server.use(
+    http.get("/api/instruments/EEM", () => HttpResponse.json(INSTRUMENT)),
+    http.get("/api/instruments/EEM/candles", () => {
+      candleRequests += 1;
+      return candleRequests === 1
+        ? HttpResponse.json({ detail: "cache temporarily unavailable" }, { status: 500 })
+        : HttpResponse.json(CANDLES);
+    }),
+  );
+  renderHover();
+  fireEvent.click(screen.getByTestId("instrument-trigger-EEM"));
+
+  fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+
+  expect(await screen.findByTestId("candle-chart")).toBeInTheDocument();
+  expect(candleRequests).toBe(2);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
 test("sheet separates fresh UCITS facts from price provenance", async () => {
   const ucits = {
     ...INSTRUMENT,

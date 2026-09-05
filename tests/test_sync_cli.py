@@ -7,6 +7,7 @@ import pandas as pd
 import quantmind.sync_cli as sync_cli
 from quantmind.api.routers.setup import _market_data_status
 from quantmind.datastore.store import BarMeta
+from quantmind.fx import FxConversionUnavailable
 from quantmind.portfolio import Portfolio, Position
 from quantmind.sync_cli import DEFAULT_UNIVERSE, INDEX_UNIVERSE, WORLD_ETF_REGIONS
 
@@ -424,6 +425,42 @@ async def test_fx_failure_is_partial_and_keeps_market_sync(monkeypatch, tmp_path
     output = capsys.readouterr().out
     assert "FX sync unavailable" in output
     assert output.strip().endswith("SYNC_RESULT: partial · FX reference rates unavailable")
+
+
+async def test_missing_one_fx_currency_still_publishes_supported_evidence(
+    monkeypatch, tmp_path, capsys
+):
+    _wire_sync_main(
+        monkeypatch,
+        tmp_path,
+        Portfolio(positions=(), as_of="2026-09-04"),
+        yfinance_symbols=["IWDA.AS"],
+        account_currency="HKD",
+    )
+    fx_calls: list[list[str]] = []
+
+    def sync_fx(_store, _provider, currencies, **_kwargs):
+        requested = sorted(currencies)
+        fx_calls.append(requested)
+        if "HKD" in requested:
+            raise FxConversionUnavailable("ECB returned no usable HKD rates")
+        return type("Result", (), {"as_of": "2026-09-04"})()
+
+    monkeypatch.setattr(sync_cli, "sync_ecb_fx", sync_fx)
+
+    await sync_cli.main(["SPY"])
+
+    assert fx_calls == [
+        ["EUR", "HKD", "USD"],
+        ["EUR", "USD"],
+        ["HKD", "USD"],
+    ]
+    output = capsys.readouterr().out
+    assert "EUR through 2026-09-04" in output
+    assert "remain unavailable for HKD" in output
+    assert output.strip().endswith(
+        "SYNC_RESULT: partial · FX reference rates incomplete"
+    )
 
 
 async def test_main_runs_opt_in_ucits_enrichment_after_ibkr_metadata(monkeypatch, tmp_path):

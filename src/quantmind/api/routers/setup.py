@@ -116,6 +116,7 @@ class BookReadiness(BaseModel):
         "invalid_timestamp",
         "legacy_scope",
         "base_currency_mismatch",
+        "instrument_identity_mismatch",
         "cross_currency_option",
         "account_mismatch",
         "mode_mismatch",
@@ -370,6 +371,21 @@ def _book_status(store, state, *, snapshots=None) -> BookReadiness:
             if position.sec_type not in {"STK", "OPT"}
         }
     )
+    try:
+        symbol_map = store.read_symbol_map()
+    except Exception:
+        symbol_map = {}
+    changed_instrument_identities = sorted(
+        {
+            position.symbol
+            for position in latest.positions
+            if (
+                position.sec_type == "STK" or latest.source != "live_ibkr"
+            )
+            and symbol_map.get(position.symbol) is not None
+            and symbol_map.get(position.symbol) != position.con_id
+        }
+    )
     reason = None
     if not latest.positions:
         reason = "empty_book"
@@ -379,6 +395,8 @@ def _book_status(store, state, *, snapshots=None) -> BookReadiness:
         reason = "cross_currency_option"
     elif unsupported_security_types:
         reason = "unsupported_security_type"
+    elif changed_instrument_identities:
+        reason = "instrument_identity_mismatch"
     elif latest.base_currency != getattr(state, "base_currency", "USD"):
         reason = "base_currency_mismatch"
     elif age_days is None:

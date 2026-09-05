@@ -40,6 +40,7 @@ from quantmind.api.routers.book import (
     read_book,
     read_book_positions,
     validate_pinned_book_scope,
+    validate_pinned_instrument_identities,
 )
 from quantmind.datastore.options_store import OptionsStore
 from quantmind.exposure.book_greeks import (
@@ -340,6 +341,7 @@ def book_greeks(request: Request, req: BookGreeksRequest) -> BookGreeksResponse:
         pinned = read_book(store, req.book_ref)
         validate_pinned_book_scope(request.app.state, pinned)
         positions = read_book_positions(store, req.book_ref)
+        validate_pinned_instrument_identities(store, pinned, positions)
         use_persisted_contract_ids = pinned["source"] == "live_ibkr"
 
     unsupported_security_types = sorted(

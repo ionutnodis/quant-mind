@@ -114,6 +114,93 @@ def test_pin_explicit_positions_persists_and_echoes(store):
     assert pos["multiplier"] == 1.0
 
 
+@pytest.mark.parametrize(
+    ("method", "path_template", "payload"),
+    [
+        ("get", "/api/portfolio?book_ref={book_ref}", None),
+        (
+            "post",
+            "/api/whatif",
+            {
+                "book_ref": "{book_ref}",
+                "years": 1,
+                "mc": {"horizon": 5, "n_paths": 100, "seed": 1},
+            },
+        ),
+        (
+            "post",
+            "/api/hedge",
+            {
+                "book_ref": "{book_ref}",
+                "objective": {"kind": "beta_target", "value": 0},
+                "candidates": ["QQQ"],
+                "years": 1,
+            },
+        ),
+        (
+            "post",
+            "/api/leverage",
+            {"book_ref": "{book_ref}", "drawdown_budget": 0.25, "years": 1},
+        ),
+        (
+            "post",
+            "/api/options/book-greeks",
+            {"book_ref": "{book_ref}", "betas": {}},
+        ),
+        ("post", "/api/book/{book_ref}/rebase", None),
+    ],
+)
+def test_pinned_book_analysis_rejects_a_repointed_symbol_identity(
+    store, method, path_template, payload
+):
+    client = _client(store)
+    pinned = client.post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 10}]}
+    ).json()
+    book_ref = pinned["snapshot_id"]
+    store.write_bars(
+        con_id=99,
+        bar_size="1d",
+        bars=_bars(seed=99),
+        meta=BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24"),
+    )
+    store.write_symbol_map({"SPY": 99, "QQQ": 2})
+    path = path_template.format(book_ref=book_ref)
+    body = (
+        {
+            key: value.format(book_ref=book_ref)
+            if isinstance(value, str)
+            else value
+            for key, value in payload.items()
+        }
+        if payload is not None
+        else None
+    )
+
+    response = getattr(client, method)(path, json=body) if body is not None else getattr(client, method)(path)
+
+    assert response.status_code == 409, response.text
+    assert "instrument identity changed" in response.json()["detail"]
+    assert "re-pin" in response.json()["detail"]
+
+
+def test_pinned_book_analysis_names_a_corrupt_symbol_map(store):
+    client = _client(store)
+    pinned = client.post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 10}]}
+    ).json()
+    (store.root / "symbols.json").write_text("not-json")
+
+    response = client.get(
+        "/api/portfolio", params={"book_ref": pinned["snapshot_id"]}
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == (
+        "symbol map is corrupt; run sync to rebuild it"
+    )
+
+
 def test_pin_uses_the_configured_investor_base_currency(store):
     body = _client(store, base_currency="GBP").post(
         "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 10}]}
