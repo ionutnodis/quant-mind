@@ -1301,6 +1301,8 @@ export interface components {
             corrupt_symbols: string[];
             /** Missing Symbols */
             missing_symbols: string[];
+            /** Portfolio Discovery Error */
+            portfolio_discovery_error?: "live_portfolio_unavailable" | null;
             /** Ready Symbols */
             ready_symbols: number;
             /** Series */
@@ -1802,7 +1804,7 @@ export interface components {
              * Next Action
              * @enum {string}
              */
-            next_action: "configure_account" | "start_gateway" | "wait_for_gateway" | "sync_market_data" | "sync_option_data" | "sync_fx_data" | "pin_book" | "resolve_currency" | "resolve_instruments" | "rebase_option_book" | "ready";
+            next_action: "configure_account" | "start_gateway" | "wait_for_gateway" | "sync_market_data" | "sync_option_data" | "sync_fx_data" | "pin_book" | "resolve_currency" | "resolve_instruments" | "resolve_option_currency" | "ready";
             options_data: components["schemas"]["OptionsDataReadiness"];
             /**
              * Overall

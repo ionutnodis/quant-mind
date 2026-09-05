@@ -42,9 +42,9 @@ const NEXT_ACTION: Record<SetupStatus["next_action"], { title: string; body: str
     title: "Unsupported instruments are present",
     body: "This release analyses stocks, ETFs, and equity options only. Split futures, bonds, CFDs, cash, and other unsupported contracts out of the acceptance book before continuing.",
   },
-  rebase_option_book: {
+  resolve_option_currency: {
     title: "Align the option book currency",
-    body: "Cross-currency option Greeks and stress P&L are not normalized yet. Use the option currency as the analysis base, or remove those option legs before pinning this acceptance book.",
+    body: "Cross-currency option Greeks and stress P&L are not normalized yet. Set QM_BASE_CURRENCY to the single option currency and restart, or remove/split foreign option legs before pinning a new book. A book with options in multiple currencies is unsupported in this release.",
   },
   ready: {
     title: "The workbench is ready",
@@ -129,7 +129,12 @@ export function Setup() {
   if (error || !data) return <p className="text-down">Setup unavailable: {String(error)}</p>;
 
   const action =
-    data.next_action === "pin_book" && data.book.status === "stale"
+    data.next_action === "sync_market_data" && data.market_data.portfolio_discovery_error
+      ? {
+          title: "Retry live portfolio discovery",
+          body: "The last sync could not read the IBKR portfolio, so QuantMind preserved the previous required universe and withheld readiness. Confirm the selected account and Gateway session, then sync market data again.",
+        }
+      : data.next_action === "pin_book" && data.book.status === "stale"
       ? {
           title: "Refresh the pinned book",
           body: "The latest snapshot is empty, out of date, or belongs to a different broker scope. Pin the current IBKR book before analysis.",
@@ -139,7 +144,7 @@ export function Setup() {
     .filter(Boolean)
     .join(" · ");
   const marketDetail = data.market_data.as_of
-    ? `${data.market_data.ready_symbols ?? data.market_data.symbols}/${data.market_data.symbols} symbols ready · ${data.market_data.series} macro series · weakest as of ${data.market_data.as_of}${(data.market_data.missing_symbols ?? []).length ? ` · missing ${data.market_data.missing_symbols.join(", ")}` : ""}${(data.market_data.stale_symbols ?? []).length ? ` · stale ${data.market_data.stale_symbols.join(", ")}` : ""}${(data.market_data.corrupt_symbols ?? []).length ? ` · corrupt ${data.market_data.corrupt_symbols.join(", ")}` : ""}`
+    ? `${data.market_data.ready_symbols ?? data.market_data.symbols}/${data.market_data.symbols} symbols ready · ${data.market_data.series} macro series · weakest as of ${data.market_data.as_of}${data.market_data.portfolio_discovery_error ? " · live IBKR portfolio unavailable" : ""}${(data.market_data.missing_symbols ?? []).length ? ` · missing ${data.market_data.missing_symbols.join(", ")}` : ""}${(data.market_data.stale_symbols ?? []).length ? ` · stale ${data.market_data.stale_symbols.join(", ")}` : ""}${(data.market_data.corrupt_symbols ?? []).length ? ` · corrupt ${data.market_data.corrupt_symbols.join(", ")}` : ""}`
     : "No adjusted daily bars are cached yet.";
   const bookDetail = data.book.latest_snapshot_id
     ? `${data.book.snapshot_count} snapshot${data.book.snapshot_count === 1 ? "" : "s"} · ${data.book.option_positions} option position${data.book.option_positions === 1 ? "" : "s"} · latest ${data.book.latest_snapshot_id}${(data.book.unsupported_currencies ?? []).length ? ` · unsupported currencies ${data.book.unsupported_currencies.join(", ")}` : ""}${(data.book.unsupported_security_types ?? []).length ? ` · unsupported instruments ${data.book.unsupported_security_types.join(", ")}` : ""}${data.book.reason ? ` · ${data.book.reason.replaceAll("_", " ")}` : ""}`

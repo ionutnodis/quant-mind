@@ -62,6 +62,20 @@ def test_currency_resolution_names_a_corrupt_instrument_master(tmp_path):
     assert "instrument metadata cache is corrupt" in error.value.detail
 
 
+def test_currency_resolution_rejects_metadata_for_a_different_contract(tmp_path):
+    store = BarStore(tmp_path)
+    store.write_symbol_map({"IWDA": 2})
+    store.write_instrument_metadata(
+        "IWDA", {"con_id": 1, "currency": "USD", "provider": "ibkr"}
+    )
+
+    with pytest.raises(HTTPException) as error:
+        resolve_symbol_currencies(store, ["IWDA"])
+
+    assert error.value.status_code == 422
+    assert "contract identity" in error.value.detail
+
+
 def test_clean_passes_through_finite_numbers():
     assert clean(1.5) == 1.5
     assert clean(0) == 0.0

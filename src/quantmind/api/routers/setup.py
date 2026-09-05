@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from quantmind.api.routers.book import _account_fingerprint, list_books
 from quantmind.datastore.options_store import OptionsStore
+from quantmind.datastore.store import PORTFOLIO_DISCOVERY_FAILURE_SYMBOL
 from quantmind.fx import FxConversionUnavailable, FxConverter, FxObservationStale
 from quantmind.instruments.metadata import (
     ProfileFreshness,
@@ -56,6 +57,7 @@ class MarketDataReadiness(BaseModel):
     series: int
     as_of: str | None
     age_days: int | None
+    portfolio_discovery_error: Literal["live_portfolio_unavailable"] | None = None
 
 
 class MacroDataReadiness(BaseModel):
@@ -142,7 +144,7 @@ class SetupStatus(BaseModel):
         "pin_book",
         "resolve_currency",
         "resolve_instruments",
-        "rebase_option_book",
+        "resolve_option_currency",
         "ready",
     ]
 
@@ -165,6 +167,14 @@ def _market_data_status(store, benchmark: str) -> MarketDataReadiness:
         )
 
     has_required_manifest = bool(required_symbols)
+    portfolio_discovery_failed = (
+        PORTFOLIO_DISCOVERY_FAILURE_SYMBOL in required_symbols
+    )
+    required_symbols = [
+        symbol
+        for symbol in required_symbols
+        if symbol != PORTFOLIO_DISCOVERY_FAILURE_SYMBOL
+    ]
     try:
         instrument_metadata = store.read_all_instrument_metadata()
     except Exception:
@@ -172,7 +182,7 @@ def _market_data_status(store, benchmark: str) -> MarketDataReadiness:
     required_symbols = list(dict.fromkeys([benchmark, *required_symbols]))
     if not symbol_map:
         return MarketDataReadiness(
-            status="empty",
+            status="incomplete" if portfolio_discovery_failed else "empty",
             symbols=len(required_symbols),
             ready_symbols=0,
             missing_symbols=required_symbols,
@@ -181,6 +191,9 @@ def _market_data_status(store, benchmark: str) -> MarketDataReadiness:
             series=len(store.list_series()),
             as_of=None,
             age_days=None,
+            portfolio_discovery_error=(
+                "live_portfolio_unavailable" if portfolio_discovery_failed else None
+            ),
         )
 
     today = datetime.now(timezone.utc).date()
@@ -229,7 +242,7 @@ def _market_data_status(store, benchmark: str) -> MarketDataReadiness:
 
     weakest = min(watermarks).date() if watermarks else None
     age_days = None if weakest is None else _business_age_days(weakest, today)
-    if missing_symbols or corrupt_symbols:
+    if portfolio_discovery_failed or missing_symbols or corrupt_symbols:
         status = "incomplete"
     elif stale_symbols:
         status = "stale"
@@ -245,6 +258,9 @@ def _market_data_status(store, benchmark: str) -> MarketDataReadiness:
         series=len(store.list_series()),
         as_of=None if weakest is None else weakest.isoformat(),
         age_days=age_days,
+        portfolio_discovery_error=(
+            "live_portfolio_unavailable" if portfolio_discovery_failed else None
+        ),
     )
 
 
@@ -537,6 +553,7 @@ def _options_data_status(store) -> OptionsDataReadiness:
 def _fx_data_status(
     store,
     default_base_currency: str = "USD",
+    benchmark: str = "SPY",
     *,
     snapshots=None,
 ) -> FxDataReadiness:
@@ -560,6 +577,20 @@ def _fx_data_status(
             provider=None,
             as_of=None,
         )
+    try:
+        benchmark_metadata = store.read_instrument_metadata(benchmark) or {}
+    except Exception:
+        benchmark_metadata = {}
+    benchmark_currency = str(benchmark_metadata.get("currency") or "").strip().upper()
+    if len(benchmark_currency) != 3 or not benchmark_currency.isalpha():
+        return FxDataReadiness(
+            status="missing",
+            base_currency=latest.base_currency,
+            required_currencies=[],
+            missing_currencies=[],
+            provider=None,
+            as_of=None,
+        )
     required = sorted(
         {
             position.currency
@@ -568,6 +599,11 @@ def _fx_data_status(
             and position.currency != "UNKNOWN"
             and position.currency != latest.base_currency
         }
+        | (
+            {benchmark_currency}
+            if benchmark_currency != latest.base_currency
+            else set()
+        )
     )
     if not required:
         return FxDataReadiness(
@@ -688,6 +724,7 @@ def get_setup_status(request: Request) -> SetupStatus:
     fx_data = _fx_data_status(
         state.store,
         getattr(state, "base_currency", "USD"),
+        state.benchmark,
         snapshots=snapshots,
     )
     ucits_data = _ucits_data_status(state.store)
@@ -701,13 +738,15 @@ def get_setup_status(request: Request) -> SetupStatus:
     elif market_data.status != "ready" or macro_data.status != "ready":
         next_action = "sync_market_data"
     elif book.reason == "cross_currency_option":
-        next_action = "rebase_option_book"
+        next_action = "resolve_option_currency"
     elif book.reason == "unsupported_security_type":
         next_action = "resolve_instruments"
     elif book.status == "unsupported":
         next_action = "resolve_currency"
     elif book.status != "ready":
         next_action = "pin_book"
+    elif fx_data.status == "missing" and not fx_data.required_currencies:
+        next_action = "sync_market_data"
     elif fx_data.status not in {"not_required", "ready"}:
         next_action = "sync_fx_data"
     elif options_data.status not in {"not_required", "ready"}:

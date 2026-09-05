@@ -50,10 +50,7 @@ _PROFILE_FIELDS = frozenset(
         "index-name",
     }
 )
-_USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36"
-)
+_USER_AGENT = "QuantMind/0.5.0.0 (+https://github.com/ionutnodis/quant-mind)"
 _MAX_PROFILE_RESPONSE_BYTES = 5 * 1024 * 1024
 _ALLOWED_JUSTETF_HOSTS = frozenset({"justetf.com", "www.justetf.com"})
 

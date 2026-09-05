@@ -232,10 +232,9 @@ async def sync_instrument_metadata(
         existing_metadata = store.read_all_instrument_metadata()
         rebuild_corrupt_cache = False
     except ValueError:
-        # A corrupt master cannot be merged safely.  Stage freshly fetched
-        # records in memory and atomically replace it only after the pass has
-        # produced at least one valid record.
-        existing_metadata = {}
+        # Salvage valid records before rebuilding so an unrelated malformed
+        # entry plus a partial provider outage cannot erase good metadata.
+        existing_metadata = store.read_recoverable_instrument_metadata()
         rebuild_corrupt_cache = True
     provider_identity_defaults = {
         "primary_exchange": None,
@@ -280,7 +279,7 @@ async def sync_instrument_metadata(
             failures[symbol] = f"{type(exc).__name__}: {exc}"
         await sleep(pace_seconds)
     if rebuild_corrupt_cache and written:
-        store.replace_instrument_metadata(written)
+        store.replace_instrument_metadata({**existing_metadata, **written})
     return written
 
 

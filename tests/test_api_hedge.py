@@ -750,6 +750,65 @@ def test_hedge_candidates_share_one_es_window_when_one_has_recent_history(tmp_pa
     assert full["protection"] == pytest.approx(recent["protection"])
 
 
+def test_incompatible_candidate_cohort_error_is_independent_of_request_order(tmp_path):
+    spy = _bars(n=450, seed=101)
+    early_full = _beta_correlated_bars(
+        spy["close"], beta=0.8, noise_scale=0.001, seed=102
+    )
+    late = _beta_correlated_bars(
+        spy["close"], beta=0.7, noise_scale=0.001, seed=103
+    ).iloc[-300:]
+    early_index = spy.index[:300].append(spy.index[-1:])
+    early = early_full.loc[early_index]
+
+    store = BarStore(tmp_path)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(1, "1d", spy, meta)
+    store.write_bars(2, "1d", early, meta)
+    store.write_bars(3, "1d", late, meta)
+    store.write_symbol_map({"SPY": 1, "EARLY": 2, "LATE": 3})
+    for symbol in ("SPY", "EARLY", "LATE"):
+        store.write_instrument_metadata(symbol, {"currency": "USD"})
+    client = TestClient(
+        create_app(store=store, benchmark="SPY", api_token="testtoken"),
+        base_url="http://127.0.0.1",
+        headers={"Authorization": "Bearer testtoken"},
+    )
+
+    payload = {
+        "book": [{"symbol": "SPY", "qty": 10}],
+        "objective": {"kind": "beta_target", "value": 0.0},
+        "years": 5,
+    }
+    forward = client.post(
+        "/api/hedge", json={**payload, "candidates": ["EARLY", "LATE"]}
+    )
+    reverse = client.post(
+        "/api/hedge", json={**payload, "candidates": ["LATE", "EARLY"]}
+    )
+
+    assert forward.status_code == reverse.status_code == 422
+    assert forward.json() == reverse.json()
+    detail = forward.json()["detail"]
+    assert "EARLY, LATE" in detail
+    assert "collectively" in detail
+
+    store.write_symbol_map({"SPY": 1, "EARLY": 2, "LATE": 3})
+    default_forward = client.post("/api/hedge", json=payload)
+    store.write_symbol_map({"SPY": 1, "LATE": 3, "EARLY": 2})
+    default_reverse = client.post("/api/hedge", json=payload)
+
+    assert default_forward.status_code == default_reverse.status_code == 200
+    first = default_forward.json()
+    second = default_reverse.json()
+    assert [row["symbol"] for row in first["candidates"]] == [
+        row["symbol"] for row in second["candidates"]
+    ]
+    assert first["skipped_candidates"] == second["skipped_candidates"]
+    assert first["comparison_n_obs"] == second["comparison_n_obs"]
+    assert first["comparison_as_of"] == second["comparison_as_of"]
+
+
 def test_hedge_rejects_a_stale_requested_candidate_relative_to_book_as_of(
     tmp_path,
 ):

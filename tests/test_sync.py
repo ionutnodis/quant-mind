@@ -460,6 +460,50 @@ async def test_sync_instrument_metadata_atomically_rebuilds_a_corrupt_cache(tmp_
     assert not path.with_suffix(".json.tmp").exists()
 
 
+async def test_corrupt_metadata_rebuild_salvages_valid_records_during_partial_failure(
+    tmp_path,
+):
+    import json
+
+    store, broker, sleeper = BarStore(tmp_path), FakeMetadataBroker(), FakeSleeper()
+    path = tmp_path / "instruments.json"
+    path.write_text(
+        json.dumps(
+            {
+                "UNTOUCHED": {
+                    "con_id": 42,
+                    "currency": "EUR",
+                    "provider": "yfinance",
+                },
+                "FAILED": {
+                    "con_id": 999,
+                    "currency": "GBP",
+                    "provider": "ibkr",
+                },
+                "POISON": 7,
+            }
+        )
+    )
+    failures: dict[str, str] = {}
+
+    written = await sync_instrument_metadata(
+        store,
+        broker,
+        {"SPY": 756733, "FAILED": 999},
+        sleep=sleeper,
+        pace_seconds=0,
+        failures=failures,
+    )
+
+    assert set(written) == {"SPY"}
+    assert "FAILED" in failures
+    rebuilt = store.read_all_instrument_metadata()
+    assert set(rebuilt) == {"UNTOUCHED", "FAILED", "SPY"}
+    assert rebuilt["UNTOUCHED"]["con_id"] == 42
+    assert rebuilt["FAILED"]["currency"] == "GBP"
+    assert rebuilt["SPY"]["con_id"] == 756733
+
+
 async def test_sync_instrument_metadata_merges_extra_tags(tmp_path):
     store, broker, sleeper = BarStore(tmp_path), FakeMetadataBroker(), FakeSleeper()
     await sync_instrument_metadata(

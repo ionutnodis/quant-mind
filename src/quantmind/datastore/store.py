@@ -48,6 +48,7 @@ _INSTRUMENT_METADATA_STRING_FIELDS = frozenset(
     }
 )
 _UCITS_PROFILE_STATUSES = frozenset({"FRESH", "STALE", "MISSING"})
+PORTFOLIO_DISCOVERY_FAILURE_SYMBOL = "__LIVE_PORTFOLIO_DISCOVERY_FAILED__"
 
 
 def _instrument_metadata_value_error(
@@ -352,6 +353,35 @@ class BarStore:
         except (json.JSONDecodeError, UnicodeDecodeError) as error:
             raise ValueError(_INSTRUMENT_METADATA_SHAPE_ERROR) from error
         return _validate_instrument_metadata(payload)
+
+    def read_recoverable_instrument_metadata(self) -> dict[str, dict]:
+        """Return individually valid records from a corrupt metadata master.
+
+        This is intentionally separate from the normal fail-closed reader. It
+        is only used while rebuilding a cache that already failed whole-file
+        validation, so one malformed symbol cannot erase unrelated records
+        when some refreshes also fail.
+        """
+        import json
+
+        path = self._instruments_path()
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+
+        recovered: dict[str, dict] = {}
+        for symbol, fields in payload.items():
+            try:
+                validated = _validate_instrument_metadata({symbol: fields})
+            except ValueError:
+                continue
+            recovered[symbol] = validated[symbol]
+        return recovered
 
     # --- ISIN-addressed UCITS ETF profiles ---
 

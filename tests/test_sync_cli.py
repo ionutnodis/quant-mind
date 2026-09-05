@@ -294,9 +294,9 @@ async def test_failed_holdings_discovery_preserves_requirements_and_keeps_setup_
     ]
     readiness = _market_data_status(store, "SPY")
     assert readiness.status == "incomplete"
-    assert readiness.missing_symbols == [
-        sync_cli.PORTFOLIO_DISCOVERY_FAILURE_SYMBOL
-    ]
+    assert readiness.symbols == 2
+    assert readiness.missing_symbols == []
+    assert readiness.portfolio_discovery_error == "live_portfolio_unavailable"
     assert capsys.readouterr().out.strip().endswith(
         "SYNC_RESULT: partial · live portfolio unavailable"
     )

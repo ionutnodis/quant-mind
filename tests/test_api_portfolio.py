@@ -879,6 +879,44 @@ def test_european_history_is_normalized_before_beta_and_attribution(tmp_path):
     assert body["attribution"]["n_obs"] > 0
 
 
+def test_attribution_is_withheld_when_a_priced_leg_lacks_historical_fx(tmp_path):
+    store = BarStore(tmp_path)
+    bars = _random_bars(seed=13, start=100.0)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today()))
+    store.write_bars(1, "1d", bars, meta)
+    store.write_bars(2, "1d", bars.copy(), meta)
+    store.write_symbol_map({"SPY": 1, "ASML": 2})
+    store.write_instrument_metadata("SPY", {"currency": "USD"})
+    store.write_instrument_metadata("ASML", {"currency": "EUR"})
+    latest_market_date = bars.index[-1].date()
+    sync_ecb_fx(
+        store,
+        EcbFxProvider(
+            fetcher=lambda _url: (
+                "CURRENCY,TIME_PERIOD,OBS_VALUE\n"
+                f"USD,{latest_market_date.isoformat()},1.1000\n"
+            )
+        ),
+        {"USD", "EUR"},
+        today=date.today(),
+        years=1,
+    )
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=1, symbol="SPY", qty=10, currency="USD"),
+            Position(con_id=2, symbol="ASML", qty=10, currency="EUR"),
+        ),
+        as_of=date.today().isoformat(),
+    )
+
+    body = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio").json()
+
+    assert body["totals"]["valuation_status"] == "complete"
+    assert body["attribution"]["available"] is False
+    assert "ASML" in body["attribution"]["reason"]
+    assert "base-currency history" in body["attribution"]["reason"]
+
+
 def test_exposure_loads_fx_for_a_foreign_benchmark_not_held_in_the_book(tmp_path):
     store = BarStore(tmp_path)
     bars = _random_bars(seed=14, start=100.0)
@@ -924,6 +962,77 @@ def test_exposure_loads_fx_for_a_foreign_benchmark_not_held_in_the_book(tmp_path
     assert exposure["underlier"] == "IWDA"
     assert exposure["beta"] == pytest.approx(1.0, abs=1e-6)
     assert exposure["beta_note"] is None
+
+
+def test_exposure_and_attribution_fail_closed_without_benchmark_currency(tmp_path):
+    store = BarStore(tmp_path)
+    bars = _random_bars(seed=15, start=100.0)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today()))
+    store.write_bars(1, "1d", bars, meta)
+    store.write_bars(2, "1d", bars.copy(), meta)
+    store.write_symbol_map({"SPY": 1, "IWDA": 2})
+    store.write_instrument_metadata("IWDA", {"currency": "EUR"})
+    rows = ["CURRENCY,TIME_PERIOD,OBS_VALUE"]
+    for timestamp in bars.index:
+        day = timestamp.date().isoformat()
+        rows.extend([f"USD,{day},1.1000", f"GBP,{day},0.8800"])
+    sync_ecb_fx(
+        store,
+        EcbFxProvider(fetcher=lambda _url: "\n".join(rows)),
+        {"USD", "EUR", "GBP"},
+        today=date.today(),
+        years=5,
+    )
+    portfolio = Portfolio(
+        positions=(Position(con_id=2, symbol="IWDA", qty=10, currency="EUR"),),
+        as_of=date.today().isoformat(),
+    )
+
+    body = _client(
+        store,
+        broker=FakeBroker(portfolio),
+        base_currency="GBP",
+    ).get("/api/portfolio").json()
+
+    exposure = body["exposure"][0]
+    assert exposure["beta"] is None
+    assert "benchmark SPY currency metadata" in exposure["beta_note"]
+    assert body["attribution"]["available"] is False
+    assert "benchmark SPY currency metadata" in body["attribution"]["reason"]
+
+
+def test_exposure_and_attribution_fail_closed_without_benchmark_fx(tmp_path):
+    store = BarStore(tmp_path)
+    bars = _random_bars(seed=16, start=100.0)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof=str(date.today()))
+    store.write_bars(1, "1d", bars, meta)
+    store.write_bars(2, "1d", bars.copy(), meta)
+    store.write_symbol_map({"UKBENCH": 1, "SPY": 2})
+    store.write_instrument_metadata("UKBENCH", {"currency": "GBP"})
+    store.write_instrument_metadata("SPY", {"currency": "USD"})
+    portfolio = Portfolio(
+        positions=(Position(con_id=2, symbol="SPY", qty=10, currency="USD"),),
+        as_of=date.today().isoformat(),
+    )
+    app = create_app(
+        store=store,
+        benchmark="UKBENCH",
+        api_token="testtoken",
+        broker=FakeBroker(portfolio),
+        base_currency="USD",
+    )
+
+    body = TestClient(
+        app,
+        base_url="http://127.0.0.1",
+        headers={"Authorization": "Bearer testtoken"},
+    ).get("/api/portfolio").json()
+
+    exposure = body["exposure"][0]
+    assert exposure["beta"] is None
+    assert "benchmark UKBENCH FX evidence" in exposure["beta_note"]
+    assert body["attribution"]["available"] is False
+    assert "benchmark UKBENCH FX evidence" in body["attribution"]["reason"]
 
 
 def test_unsupported_live_security_type_is_blocked(store):

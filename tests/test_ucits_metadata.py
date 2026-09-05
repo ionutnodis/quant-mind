@@ -393,6 +393,24 @@ def test_justetf_redirect_handler_rejects_untrusted_targets(redirect_url):
         )
 
 
+def test_justetf_redirect_handler_allows_an_https_justetf_target():
+    from urllib.request import Request
+    import quantmind.sources.providers.justetf as justetf
+
+    redirected = justetf._JustEtfRedirectHandler().redirect_request(
+        Request("https://justetf.com/en/etf-profile.html"),
+        None,
+        302,
+        "Found",
+        {},
+        "https://www.justetf.com/en/etf-profile.html?isin=IE00B4L5Y983",
+    )
+
+    assert redirected.full_url == (
+        "https://www.justetf.com/en/etf-profile.html?isin=IE00B4L5Y983"
+    )
+
+
 def test_justetf_validates_the_final_url_before_reading_the_body(monkeypatch):
     import io
     import quantmind.sources.providers.justetf as justetf
@@ -431,6 +449,44 @@ def test_justetf_validates_the_final_url_before_reading_the_body(monkeypatch):
         )
 
     assert response.read_calls == 0
+
+
+def test_justetf_identifies_quantmind_in_its_user_agent(monkeypatch):
+    import io
+    import quantmind.sources.providers.justetf as justetf
+
+    class Response:
+        headers = {}
+
+        def __init__(self):
+            self._body = io.BytesIO(PROFILE_HTML.encode())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, limit):
+            return self._body.read(limit)
+
+        def geturl(self):
+            return "https://www.justetf.com/en/etf-profile.html?isin=IE00B4L5Y983"
+
+    class Opener:
+        def open(self, request, **_kwargs):
+            assert request.get_header("User-agent") == (
+                "QuantMind/0.5.0.0 (+https://github.com/ionutnodis/quant-mind)"
+            )
+            return Response()
+
+    monkeypatch.setattr(justetf, "build_opener", lambda *_handlers: Opener())
+
+    fetched = justetf._default_fetcher(
+        "https://www.justetf.com/en/etf-profile.html?isin=IE00B4L5Y983"
+    )
+
+    assert fetched.html == PROFILE_HTML
 
 
 def test_corrupt_cached_profile_is_replaced_after_a_successful_refetch(tmp_path):

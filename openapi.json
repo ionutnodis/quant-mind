@@ -3063,6 +3063,18 @@
             "title": "Missing Symbols",
             "type": "array"
           },
+          "portfolio_discovery_error": {
+            "anyOf": [
+              {
+                "const": "live_portfolio_unavailable",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Portfolio Discovery Error"
+          },
           "ready_symbols": {
             "title": "Ready Symbols",
             "type": "integer"
@@ -4910,7 +4922,7 @@
               "pin_book",
               "resolve_currency",
               "resolve_instruments",
-              "rebase_option_book",
+              "resolve_option_currency",
               "ready"
             ],
             "title": "Next Action",

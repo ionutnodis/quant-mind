@@ -18,7 +18,7 @@ from quantmind.broker.ib_broker import IbBroker
 from quantmind.config import Settings
 from quantmind.datastore.locking import exclusive_sync_lock
 from quantmind.datastore.options_store import OptionsStore
-from quantmind.datastore.store import BarStore
+from quantmind.datastore.store import BarStore, PORTFOLIO_DISCOVERY_FAILURE_SYMBOL
 from quantmind.fx import EcbFxProvider, sync_ecb_fx
 from quantmind.portfolio import Portfolio
 from quantmind.sources.options_sync import sync_options_chains
@@ -62,7 +62,6 @@ DEFAULT_UNIVERSE = [
 
 # VIX + SPX via IBKR Index contracts (empirically verified working: Task A2).
 INDEX_UNIVERSE = {"VIX": "CBOE", "SPX": "CBOE"}
-PORTFOLIO_DISCOVERY_FAILURE_SYMBOL = "__LIVE_PORTFOLIO_DISCOVERY_FAILED__"
 
 
 def portfolio_sync_targets(portfolio: Portfolio) -> tuple[list[str], list[str]]:

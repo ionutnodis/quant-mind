@@ -24,6 +24,7 @@ const EMPTY_STATUS = {
     series: 0,
     as_of: null,
     age_days: null,
+    portfolio_discovery_error: null,
   },
   macro_data: {
     status: "empty",
@@ -116,6 +117,65 @@ test("shows the exact first action and the state of every setup dependency", asy
     "sm:grid-cols-2",
     "xl:grid-cols-4"
   );
+});
+
+test("explains the recoverable option-currency action without offering a dead-end rebase", async () => {
+  server.use(
+    http.get("/api/setup/status", () =>
+      HttpResponse.json({
+        ...EMPTY_STATUS,
+        overall: "needs_attention",
+        broker: { ...EMPTY_STATUS.broker, status: "connected" },
+        book: {
+          ...EMPTY_STATUS.book,
+          status: "unsupported",
+          snapshot_count: 1,
+          latest_snapshot_id: "abc123def456",
+          valuation_ts: "2026-09-04T13:00:00Z",
+          option_positions: 1,
+          age_days: 0,
+          source: "manual",
+          unsupported_currencies: ["EUR"],
+          reason: "cross_currency_option",
+        },
+        next_action: "resolve_option_currency",
+      })
+    )
+  );
+
+  renderSetup();
+
+  expect(await screen.findByText("Align the option book currency")).toBeInTheDocument();
+  expect(screen.getByText(/Set QM_BASE_CURRENCY/)).toBeInTheDocument();
+  expect(screen.getByText(/multiple currencies is unsupported/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /rebase/i })).not.toBeInTheDocument();
+});
+
+test("explains a failed live portfolio discovery without leaking its cache sentinel", async () => {
+  server.use(
+    http.get("/api/setup/status", () =>
+      HttpResponse.json({
+        ...EMPTY_STATUS,
+        broker: { ...EMPTY_STATUS.broker, status: "connected" },
+        market_data: {
+          ...EMPTY_STATUS.market_data,
+          status: "incomplete",
+          symbols: 1,
+          ready_symbols: 1,
+          as_of: "2026-09-04",
+          portfolio_discovery_error: "live_portfolio_unavailable",
+        },
+        next_action: "sync_market_data",
+      })
+    )
+  );
+
+  renderSetup();
+
+  expect(await screen.findByText("Retry live portfolio discovery")).toBeInTheDocument();
+  expect(screen.getByText(/could not read the IBKR portfolio/)).toBeInTheDocument();
+  expect(screen.getByText(/live IBKR portfolio unavailable/)).toBeInTheDocument();
+  expect(screen.queryByText(/__LIVE_PORTFOLIO_DISCOVERY_FAILED__/)).not.toBeInTheDocument();
 });
 
 test("syncs missing dated FX evidence using the normal sync job", async () => {

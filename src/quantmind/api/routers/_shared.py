@@ -145,10 +145,32 @@ def resolve_symbol_currencies(
 
     asserted = asserted or {}
     metadata = read_instrument_metadata_map(store)
+    try:
+        symbol_map = store.read_symbol_map()
+    except (OSError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            422,
+            detail="symbol map is corrupt; run sync to rebuild it",
+        ) from exc
     resolved: dict[str, str] = {}
     missing: list[str] = []
     for symbol in dict.fromkeys(symbols):
-        master_value = (metadata.get(symbol) or {}).get("currency")
+        master_fields = metadata.get(symbol) or {}
+        master_con_id = master_fields.get("con_id")
+        mapped_con_id = symbol_map.get(symbol)
+        if (
+            master_con_id is not None
+            and mapped_con_id is not None
+            and master_con_id != mapped_con_id
+        ):
+            raise HTTPException(
+                422,
+                detail=(
+                    f"instrument metadata contract identity for {symbol!r} "
+                    "does not match the current symbol map; run sync"
+                ),
+            )
+        master_value = master_fields.get("currency")
         master = str(master_value).strip().upper() if master_value else None
         asserted_value = asserted.get(symbol)
         claim = str(asserted_value).strip().upper() if asserted_value else None

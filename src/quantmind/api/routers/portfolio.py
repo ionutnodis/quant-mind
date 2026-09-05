@@ -1008,6 +1008,7 @@ async def get_portfolio(
     option_chain_cache: dict[str, tuple[pd.DataFrame, OptionsSnapshotMeta] | None] = {}
     close_series: dict[int, pd.Series] = {}
     base_close_series: dict[int, pd.Series] = {}
+    missing_base_history_symbols: set[str] = set()
     last_closes: list[float | None] = []
     fx_rates: list[float | None] = []
     local_market_values: list[float | None] = []
@@ -1059,16 +1060,20 @@ async def get_portfolio(
             else None
         )
         local_history = close_series.get(p.con_id)
-        if local_history is not None:
-            if currency == base_currency:
-                base_close_series[p.con_id] = local_history
-            elif currency is not None and fx_converter is not None:
-                try:
-                    base_close_series[p.con_id] = fx_converter.convert_series(
-                        local_history, currency
-                    )
-                except FxConversionUnavailable:
-                    pass
+        if local_history is None:
+            if p.qty != 0:
+                missing_base_history_symbols.add(p.symbol)
+        elif currency == base_currency:
+            base_close_series[p.con_id] = local_history
+        elif currency is not None and fx_converter is not None:
+            try:
+                base_close_series[p.con_id] = fx_converter.convert_series(
+                    local_history, currency
+                )
+            except FxConversionUnavailable:
+                missing_base_history_symbols.add(p.symbol)
+        else:
+            missing_base_history_symbols.add(p.symbol)
 
     if missing_currencies:
         fx_status = FxEvidenceOut(
@@ -1181,17 +1186,22 @@ async def get_portfolio(
     benchmark_local_series = (
         _close_series(store, symbol_map[benchmark]) if benchmark in symbol_map else None
     )
-    benchmark_base_series = benchmark_local_series
+    benchmark_base_series: pd.Series | None = None
+    benchmark_unavailability_reason: str | None = None
     benchmark_currency = (
         (store.read_instrument_metadata(benchmark) or {}).get("currency")
         if benchmark in symbol_map
         else None
     )
-    if (
-        benchmark_local_series is not None
-        and benchmark_currency
-        and benchmark_currency != base_currency
-    ):
+    if benchmark_local_series is None:
+        benchmark_unavailability_reason = f"benchmark {benchmark} has no cached bars"
+    elif not benchmark_currency:
+        benchmark_unavailability_reason = (
+            f"benchmark {benchmark} currency metadata unavailable"
+        )
+    elif benchmark_currency == base_currency:
+        benchmark_base_series = benchmark_local_series
+    else:
         # The position converter is intentionally scoped to held currencies.
         # A foreign benchmark can be a different currency, so construct an
         # evidence set that explicitly includes it instead of reusing a
@@ -1210,9 +1220,13 @@ async def get_portfolio(
                     benchmark_local_series, benchmark_currency
                 )
             except FxConversionUnavailable:
-                benchmark_base_series = None
+                benchmark_unavailability_reason = (
+                    f"benchmark {benchmark} FX evidence unavailable"
+                )
         else:
-            benchmark_base_series = None
+            benchmark_unavailability_reason = (
+                f"benchmark {benchmark} FX evidence unavailable"
+            )
 
     groups: dict[str, list[tuple[Position, object | None]]] = {}
     for p, leg in zip(portfolio.positions, option_legs):
@@ -1323,7 +1337,8 @@ async def get_portfolio(
             beta_note=(
                 None
                 if underlier_betas.get(u.underlier) is not None
-                else f"insufficient history for beta vs {benchmark} ({_BETA_WINDOW}d window)"
+                else benchmark_unavailability_reason
+                or f"insufficient history for beta vs {benchmark} ({_BETA_WINDOW}d window)"
             ),
         )
         for u in underlyings
@@ -1433,6 +1448,18 @@ async def get_portfolio(
     if has_option_positions:
         attribution = _empty_attribution(
             "historical attribution unavailable for option books without option price history",
+            attribution_days,
+        )
+    elif missing_base_history_symbols:
+        attribution = _empty_attribution(
+            "historical attribution unavailable because base-currency history "
+            f"is missing for {sorted(missing_base_history_symbols)}",
+            attribution_days,
+        )
+    elif benchmark_base_series is None:
+        attribution = _empty_attribution(
+            benchmark_unavailability_reason
+            or f"benchmark {benchmark} evidence unavailable",
             attribution_days,
         )
     else:

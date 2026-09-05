@@ -17,7 +17,11 @@ from fastapi.testclient import TestClient
 from quantmind.api.app import create_app
 from quantmind.api.routers.book import _account_fingerprint, _pin_and_respond
 import quantmind.api.main as api_main
-from quantmind.datastore.store import BarMeta, BarStore
+from quantmind.datastore.store import (
+    BarMeta,
+    BarStore,
+    PORTFOLIO_DISCOVERY_FAILURE_SYMBOL,
+)
 from quantmind.datastore.options_store import OptionsSnapshotMeta, OptionsStore
 from quantmind.fx import EcbFxProvider, sync_ecb_fx
 from quantmind.instruments.metadata import (
@@ -84,6 +88,7 @@ def _write_valid_book(
     source: str = "manual",
     account_fingerprint: str | None = None,
     broker_mode: str | None = None,
+    base_currency: str = "USD",
 ) -> str:
     """Persist the same integrity-checked v2 snapshots production writes."""
     portfolio = Portfolio(
@@ -111,6 +116,7 @@ def _write_valid_book(
         source=source,
         account_fingerprint=account_fingerprint,
         broker_mode=broker_mode,
+        base_currency=base_currency,
     )
     return snapshot.snapshot_id
 
@@ -138,6 +144,7 @@ def test_setup_status_prioritizes_starting_gateway_for_an_empty_install(tmp_path
             "series": 0,
             "as_of": None,
             "age_days": None,
+            "portfolio_discovery_error": None,
         },
         "macro_data": {
             "status": "empty",
@@ -222,6 +229,7 @@ def test_setup_status_reports_ready_after_market_sync_and_book_pin(tmp_path):
         "series": 4,
         "as_of": market_as_of.isoformat(),
         "age_days": market_age_days,
+        "portfolio_discovery_error": None,
     }
     assert body["macro_data"]["status"] == "ready"
     assert body["macro_data"]["ready_series"] == 4
@@ -234,6 +242,32 @@ def test_setup_status_reports_ready_after_market_sync_and_book_pin(tmp_path):
     assert body["book"]["source"] == "manual"
     assert body["book"]["reason"] is None
     assert body["next_action"] == "ready"
+
+
+def test_setup_exposes_a_typed_portfolio_discovery_failure_without_a_fake_symbol(
+    tmp_path,
+):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    store.write_required_symbols(["SPY", PORTFOLIO_DISCOVERY_FAILURE_SYMBOL])
+    store.write_instrument_metadata(
+        "SPY", {"con_id": 1, "currency": "USD", "provider": "ibkr"}
+    )
+
+    body = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+
+    assert body["market_data"]["status"] == "incomplete"
+    assert body["market_data"]["symbols"] == 1
+    assert body["market_data"]["missing_symbols"] == []
+    assert (
+        body["market_data"]["portfolio_discovery_error"]
+        == "live_portfolio_unavailable"
+    )
+    assert PORTFOLIO_DISCOVERY_FAILURE_SYMBOL not in str(body)
+    assert body["next_action"] == "sync_market_data"
 
 
 def test_setup_requires_repin_after_configured_base_currency_changes(tmp_path):
@@ -765,6 +799,73 @@ def test_setup_requires_dated_fx_for_a_mixed_currency_book(tmp_path):
     assert ready["overall"] == "ready"
 
 
+def test_setup_requires_fx_for_a_non_base_benchmark(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    _write_valid_book(
+        store,
+        valuation_ts=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        positions=[
+            {
+                "symbol": "VWRL",
+                "qty": 10,
+                "con_id": 2,
+                "sec_type": "STK",
+                "multiplier": 1,
+                "currency": "GBP",
+                "exchange": "LSE",
+            }
+        ],
+        base_currency="GBP",
+    )
+
+    missing = _client(
+        store,
+        broker=BrokerThatMustNotBeCalled(),
+        base_currency="GBP",
+    ).get("/api/setup/status").json()
+
+    assert missing["fx_data"]["status"] == "missing"
+    assert missing["fx_data"]["required_currencies"] == ["USD"]
+    assert missing["fx_data"]["missing_currencies"] == ["USD"]
+    assert missing["next_action"] == "sync_fx_data"
+    assert missing["overall"] == "needs_attention"
+
+
+def test_setup_resyncs_when_benchmark_currency_metadata_is_missing(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    store.replace_instrument_metadata({})
+    _write_valid_book(
+        store,
+        valuation_ts=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        positions=[
+            {
+                "symbol": "VWRL",
+                "qty": 10,
+                "con_id": 2,
+                "sec_type": "STK",
+                "multiplier": 1,
+                "currency": "GBP",
+                "exchange": "LSE",
+            }
+        ],
+        base_currency="GBP",
+    )
+
+    body = _client(
+        store,
+        broker=BrokerThatMustNotBeCalled(),
+        base_currency="GBP",
+    ).get("/api/setup/status").json()
+
+    assert body["market_data"]["status"] == "ready"
+    assert body["fx_data"]["status"] == "missing"
+    assert body["next_action"] == "sync_market_data"
+
+
 def test_setup_routes_to_fx_sync_when_cached_ecb_evidence_is_stale(tmp_path):
     store = BarStore(tmp_path)
     now = datetime.now(timezone.utc)
@@ -846,7 +947,7 @@ def test_setup_blocks_cross_currency_options_before_analytics(tmp_path):
     assert body["book"]["status"] == "unsupported"
     assert body["book"]["reason"] == "cross_currency_option"
     assert body["book"]["unsupported_currencies"] == ["EUR"]
-    assert body["next_action"] == "rebase_option_book"
+    assert body["next_action"] == "resolve_option_currency"
 
 
 def test_setup_reports_ucits_profile_readiness_without_blocking_core_cockpit(tmp_path):

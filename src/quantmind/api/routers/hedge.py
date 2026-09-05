@@ -351,7 +351,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         es_before = None
 
     if req.candidates is not None:
-        requested = list(dict.fromkeys(req.candidates))
+        requested = sorted(dict.fromkeys(req.candidates))
         overlaps = [symbol for symbol in requested if symbol in unique_book]
         if overlaps:
             detail = "; ".join(
@@ -389,7 +389,6 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
     }
     book_as_of = book_prices.index[-1]
     comparison_index = book_returns.index
-    has_comparable_candidate = False
     for candidate_index, csym in enumerate(candidate_pool):
         if (
             req.candidates is None
@@ -520,7 +519,7 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
         unusable = beta_cand is None or not math.isfinite(beta_cand) or abs(beta_cand) < _MIN_BETA_ABS
 
         if not unusable and book_beta is not None:
-            candidate_comparison_index = comparison_index.intersection(
+            candidate_comparison_index = book_returns.index.intersection(
                 cand_returns.index, sort=False
             ).sort_values()
             if len(candidate_comparison_index) < _MIN_PROTECTION_OBSERVATIONS:
@@ -535,8 +534,6 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                     )
                 )
                 continue
-            comparison_index = candidate_comparison_index
-            has_comparable_candidate = True
 
         prepared_candidates.append(
             _PreparedCandidate(
@@ -548,6 +545,66 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                 corr_stability=corr_stability,
             )
         )
+
+    comparable_candidates = [
+        candidate
+        for candidate in prepared_candidates
+        if not candidate.unusable and book_beta is not None
+    ]
+    if req.candidates is not None and comparable_candidates:
+        for candidate in comparable_candidates:
+            comparison_index = comparison_index.intersection(
+                candidate.returns.index, sort=False
+            ).sort_values()
+        if len(comparison_index) < _MIN_PROTECTION_OBSERVATIONS:
+            names = ", ".join(
+                sorted(candidate.symbol for candidate in comparable_candidates)
+            )
+            raise HTTPException(
+                422,
+                detail=(
+                    "requested hedge candidates unavailable: "
+                    f"{names} collectively share {len(comparison_index)} common "
+                    "comparison observations; need at least "
+                    f"{_MIN_PROTECTION_OBSERVATIONS}"
+                ),
+            )
+        has_comparable_candidate = True
+    elif comparable_candidates:
+        accepted_symbols: set[str] = set()
+        ordered_candidates = sorted(
+            comparable_candidates,
+            key=lambda candidate: (
+                -len(book_returns.index.intersection(candidate.returns.index)),
+                candidate.symbol,
+            ),
+        )
+        for candidate in ordered_candidates:
+            cohort_index = comparison_index.intersection(
+                candidate.returns.index, sort=False
+            ).sort_values()
+            if len(cohort_index) < _MIN_PROTECTION_OBSERVATIONS:
+                skipped_candidates.append(
+                    HedgeCandidateSkipOut(
+                        symbol=candidate.symbol,
+                        reason=(
+                            "incompatible with the common comparison cohort: "
+                            f"{len(cohort_index)} observations; need at least "
+                            f"{_MIN_PROTECTION_OBSERVATIONS}"
+                        ),
+                    )
+                )
+                continue
+            comparison_index = cohort_index
+            accepted_symbols.add(candidate.symbol)
+        prepared_candidates = [
+            candidate
+            for candidate in prepared_candidates
+            if candidate.unusable or candidate.symbol in accepted_symbols
+        ]
+        has_comparable_candidate = bool(accepted_symbols)
+    else:
+        has_comparable_candidate = False
 
     # Protection is a cross-candidate ranking metric, so every beta-usable
     # candidate must use one common book/candidate sample. Candidate-specific
