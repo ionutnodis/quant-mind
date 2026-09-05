@@ -42,3 +42,28 @@ test("World reflows from phone through ultrawide without horizontal scrolling", 
   await expect(page.locator(".world")).toHaveCSS("font-size", "16px");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+test("long event text and saved lens values wrap inside narrow viewports", async ({ page }) => {
+  const title = "W".repeat(300);
+  await page.route("**/api/world", async (route) => {
+    const upstream = await route.fetch();
+    const snapshot = await upstream.json();
+    await route.fulfill({ json: {
+      ...snapshot,
+      profile: { watch_symbols: ["NVDA"], interests: ["I".repeat(100)], regions: ["R".repeat(100)] },
+      items: [{
+        id: "long-text", source_id: "fed", source_name: "Federal Reserve",
+        title, summary: "S".repeat(500), url: "https://example.org/long-text",
+        published_at: "2026-09-05T08:00:00Z", time_kind: "published",
+        topics: [], regions: [], relevance: 15,
+        reasons: ["Interest: " + "I".repeat(100)], matched_symbols: [],
+      }],
+    } });
+  });
+  for (const width of [320, 390, 768]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/world");
+    await expect(page.getByRole("heading", { name: title })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
+});

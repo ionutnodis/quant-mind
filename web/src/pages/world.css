@@ -1,4 +1,4 @@
-.world { width: 100%; min-width: 0; font-size:14px; }
+.world { width: 100%; min-width: 0; font-size:14px; overflow-wrap:anywhere; }
 .world-head { display:flex; justify-content:space-between; gap:24px; align-items:flex-end; padding-block:4px 20px; border-bottom:1px solid var(--color-hairline); }
 .world-head h1 { font-size:clamp(20px,2vw,26px); font-weight:600; line-height:1.15; }
 .world-head p { color:var(--color-muted); margin-top:6px; max-width:68ch; }

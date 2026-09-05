@@ -163,12 +163,15 @@ async def test_blocked_store_call_does_not_block_the_api_event_loop(tmp_path, mo
         return original_states()
 
     monkeypatch.setattr(cache, "states", blocked_states)
-    service = WorldService(cache, sources=SOURCES[:1], clock=lambda: NOW)
+    service = WorldService(
+        cache, sources=SOURCES[:1], clock=lambda: NOW,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=FEED)),
+    )
     refresh = asyncio.create_task(service.refresh())
     started = asyncio.get_running_loop().time()
     await asyncio.sleep(0.02)  # stand-in for an unrelated async API handler
     elapsed = asyncio.get_running_loop().time() - started
-    await refresh
+    assert await refresh == {"updated": 1, "failed": 0, "skipped": 0}
     assert elapsed < 0.15
 
 

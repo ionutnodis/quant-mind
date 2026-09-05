@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timedelta
-import json
 import math
 from pathlib import Path
 import re

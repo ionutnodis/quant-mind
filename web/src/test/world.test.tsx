@@ -33,6 +33,24 @@ function renderWorld() {
   return render(<QueryClientProvider client={client}><World /></QueryClientProvider>);
 }
 
+test("reuses date formatting setup across event rows and filter renders", async () => {
+  server.use(http.get("/api/world", () => HttpResponse.json(response)));
+  const ActualDateTimeFormat = Intl.DateTimeFormat;
+  const formats = vi.spyOn(Intl, "DateTimeFormat").mockImplementation(function (...args) {
+    return new ActualDateTimeFormat(...args);
+  });
+  try {
+    renderWorld();
+    await screen.findByText("Oil supply talks resume");
+    expect(screen.getByText(/^Published/)).toHaveTextContent(/2026/);
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "rate decision" } });
+    expect(screen.getByText("ECB publishes rate decision")).toBeInTheDocument();
+    expect(formats.mock.calls.length).toBeLessThanOrEqual(1);
+  } finally {
+    formats.mockRestore();
+  }
+});
+
 test("filters cached events and keeps explicit relevance reasons", async () => {
   server.use(http.get("/api/world", () => HttpResponse.json(response)));
   renderWorld();
@@ -118,6 +136,26 @@ test("rejects an overlong profile value before saving", async () => {
   expect(screen.getByRole("alert")).toHaveTextContent(/100 characters or fewer/i);
 });
 
+test("a failed profile save keeps the edited lens and cached evidence usable", async () => {
+  server.use(
+    http.get("/api/world", () => HttpResponse.json(response)),
+    http.put("/api/world/profile", () => HttpResponse.json(
+      { detail: "World preferences could not be saved" },
+      { status: 503 },
+    )),
+  );
+  renderWorld();
+  const interests = await screen.findByLabelText(/^interests/i);
+  fireEvent.change(interests, { target: { value: "energy, semiconductors" } });
+  fireEvent.click(screen.getByRole("button", { name: /save lens/i }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    /could not save lens: world preferences could not be saved/i,
+  );
+  expect(interests).toHaveValue("energy, semiconductors");
+  expect(interests).toBeEnabled();
+  expect(screen.getByText("Oil supply talks resume")).toBeInTheDocument();
+});
+
 test("partial refresh reports failures and preserves cached event cards", async () => {
   let reads = 0;
   server.use(
@@ -129,6 +167,24 @@ test("partial refresh reports failures and preserves cached event cards", async 
   fireEvent.click(screen.getByRole("button", { name: /^refresh sources$/i }));
   expect(await screen.findByText(/7 updated.*1 failed.*2 skipped/i)).toBeInTheDocument();
   expect(await screen.findByText("New cached event")).toBeInTheDocument();
+});
+
+test("a failed refresh keeps cached events visible and allows another attempt", async () => {
+  server.use(
+    http.get("/api/world", () => HttpResponse.json(response)),
+    http.post("/api/world/refresh", () => HttpResponse.json(
+      { detail: "Refresh service unavailable" },
+      { status: 503 },
+    )),
+  );
+  renderWorld();
+  await screen.findByText("Oil supply talks resume");
+  fireEvent.click(screen.getByRole("button", { name: /^refresh sources$/i }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    /refresh failed: refresh service unavailable.*cached events remain available/i,
+  );
+  expect(screen.getByText("Oil supply talks resume")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /^refresh sources$/i })).toBeEnabled();
 });
 
 test("a bad pinned reference surfaces the API detail and can be cleared", async () => {

@@ -15,7 +15,8 @@ type WorldResponse = Omit<components["schemas"]["WorldResponse"], "items" | "pro
 type RefreshResult = components["schemas"]["WorldRefreshResult"];
 
 const csv = (value: string, upper = false) => [...new Set(value.split(",").map((v) => v.trim()).filter(Boolean).map((v) => upper ? v.toUpperCase() : v))];
-const dateTime = (value: string | null) => { if (!value) return "Never"; const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? "Invalid time" : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(parsed); };
+const dateFormatter = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+const dateTime = (value: string | null) => { if (!value) return "Never"; const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? "Invalid time" : dateFormatter.format(parsed); };
 const safeUrl = (value: string) => { try { const url = new URL(value); return url.protocol === "http:" || url.protocol === "https:" ? value : null; } catch { return null; } };
 
 function getWorld(bookRef: string | null) {
