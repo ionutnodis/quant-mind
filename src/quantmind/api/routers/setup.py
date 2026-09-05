@@ -28,11 +28,18 @@ from quantmind.instruments.metadata import (
 router = APIRouter()
 
 
-def _business_age_days(observation, today) -> int:
+def _business_age_days(observation, today) -> int | None:
     """Weekday-aware age for exchange data (holiday calendars come later)."""
-    if observation >= today:
-        return 0
+    if observation > today:
+        return None
     return int(np.busday_count(observation.isoformat(), today.isoformat()))
+
+
+def _calendar_age_days(observation, today) -> int | None:
+    """Calendar age, rejecting evidence dated after the evaluation date."""
+    if observation > today:
+        return None
+    return (today - observation).days
 
 
 class ApiReadiness(BaseModel):
@@ -236,7 +243,7 @@ def _market_data_status(store, benchmark: str) -> MarketDataReadiness:
                 continue
         watermarks.append(watermark)
         age = _business_age_days(watermark.date(), today)
-        if age > 3:
+        if age is None or age > 3:
             stale_symbols.append(symbol)
         else:
             ready_symbols.append(symbol)
@@ -290,14 +297,14 @@ def _macro_data_status(store) -> MacroDataReadiness:
             missing_series.append(name)
             continue
         watermarks.append(watermark)
-        age = max(0, (today - watermark.date()).days)
-        if age > max_age:
+        age = _calendar_age_days(watermark.date(), today)
+        if age is None or age > max_age:
             stale_series.append(name)
         else:
             ready_series.append(name)
 
     weakest = min(watermarks).date() if watermarks else None
-    age_days = None if weakest is None else max(0, (today - weakest).days)
+    age_days = None if weakest is None else _calendar_age_days(weakest, today)
     if len(missing_series) == len(_MACRO_MAX_AGE_DAYS):
         status = "empty"
     elif missing_series or corrupt_series:
@@ -339,11 +346,20 @@ def _book_status(store, state, *, snapshots=None) -> BookReadiness:
 
     latest = max(snapshots, key=lambda snapshot: snapshot.valuation_ts)
     try:
-        valuation_date = datetime.fromisoformat(
+        valuation_time = datetime.fromisoformat(
             latest.valuation_ts.replace("Z", "+00:00")
-        ).date()
-        age_days = max(0, (datetime.now(timezone.utc).date() - valuation_date).days)
-    except ValueError:
+        )
+        if valuation_time.tzinfo is None:
+            raise ValueError("valuation timestamp must include a timezone")
+        now = datetime.now(timezone.utc)
+        age_days = (
+            None
+            if valuation_time.astimezone(timezone.utc) > now
+            else _calendar_age_days(
+                valuation_time.astimezone(timezone.utc).date(), now.date()
+            )
+        )
+    except (TypeError, ValueError):
         age_days = None
 
     unknown_currencies = sorted(

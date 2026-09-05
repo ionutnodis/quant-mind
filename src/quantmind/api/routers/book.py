@@ -98,6 +98,12 @@ class CurrentBookOut(BaseModel):
     positions: list[BookPositionOut]
 
 
+class BookConflictOut(BaseModel):
+    """Stable response body for immutable-book identity conflicts."""
+
+    detail: str
+
+
 class ResolvedBookPosition(PositionIn):
     """Internal pinned-book leg with its persisted contract identity/type."""
 
@@ -724,7 +730,16 @@ async def get_current_book(request: Request) -> CurrentBookOut:
     )
 
 
-@router.post("/book/{snapshot_id}/rebase", response_model=BookSnapshotOut)
+@router.post(
+    "/book/{snapshot_id}/rebase",
+    response_model=BookSnapshotOut,
+    responses={
+        409: {
+            "model": BookConflictOut,
+            "description": "Pinned-book identity or immutable snapshot conflict",
+        }
+    },
+)
 def rebase_book(snapshot_id: str, request: Request) -> BookSnapshotOut:
     """Mint an immutable reporting-currency successor without rewriting history."""
     store = request.app.state.store

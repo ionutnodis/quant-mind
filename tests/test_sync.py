@@ -812,7 +812,10 @@ class FakeYFinanceProvider:
 
     def daily_bars(self, symbol):
         self.calls.append(symbol)
-        return _bars("2026-01-05", 300, price0=50.0)
+        first_day = pd.bdate_range(
+            end=pd.Timestamp.now(tz="UTC").date(), periods=300
+        )[0]
+        return _bars(first_day, 300, price0=50.0)
 
     def quote_currency(self, symbol):
         return "EUR" if symbol in {"EZU", "EWU"} else "USD"

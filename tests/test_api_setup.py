@@ -384,6 +384,35 @@ def test_setup_status_requests_a_sync_when_connected_cache_is_stale(tmp_path):
     assert body["next_action"] == "sync_market_data"
 
 
+def test_setup_status_rejects_future_market_evidence(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    future_date = pd.bdate_range(
+        start=now.date() + timedelta(days=1), periods=1
+    )[0].date()
+    future = pd.Timestamp(future_date, tz="UTC").to_pydatetime()
+    store.write_bars(
+        con_id=1,
+        bar_size="1d",
+        bars=_bars(future),
+        meta=BarMeta(
+            bar_type="ADJUSTED_LAST",
+            adjusted_asof=future.date().isoformat(),
+        ),
+    )
+
+    body = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+
+    assert body["market_data"]["status"] == "stale"
+    assert body["market_data"]["ready_symbols"] == 0
+    assert body["market_data"]["stale_symbols"] == ["SPY"]
+    assert body["market_data"]["age_days"] is None
+    assert body["next_action"] == "sync_market_data"
+
+
 def test_setup_status_ignores_a_corrupted_book_snapshot(tmp_path):
     store = BarStore(tmp_path)
     _seed_market(store, datetime.now(timezone.utc))
@@ -699,6 +728,35 @@ def test_setup_status_requires_a_fresh_non_empty_snapshot(tmp_path):
     assert response.json()["next_action"] == "pin_book"
 
 
+def test_setup_status_rejects_a_future_pinned_snapshot_timestamp(tmp_path):
+    store = BarStore(tmp_path)
+    _seed_market(store, datetime.now(timezone.utc))
+    future = datetime.now(timezone.utc) + timedelta(days=1)
+    _write_valid_book(
+        store,
+        valuation_ts=future.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        positions=[
+            {
+                "symbol": "SPY",
+                "qty": 1,
+                "con_id": 1,
+                "sec_type": "STK",
+                "multiplier": 1,
+                "currency": "USD",
+            }
+        ],
+    )
+
+    body = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+
+    assert body["book"]["status"] == "stale"
+    assert body["book"]["reason"] == "invalid_timestamp"
+    assert body["book"]["age_days"] is None
+    assert body["next_action"] == "pin_book"
+
+
 def test_setup_status_rejects_a_snapshot_from_another_live_account(tmp_path):
     store = BarStore(tmp_path)
     _seed_market(store, datetime.now(timezone.utc))
@@ -775,6 +833,26 @@ def test_setup_status_requires_each_macro_series_before_ready(tmp_path):
     assert macro["missing_series"] == ["US2Y"]
     assert macro["ready_series"] == 3
     assert response.json()["next_action"] == "sync_market_data"
+
+
+def test_setup_status_rejects_future_macro_evidence(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    future = now + timedelta(days=1)
+    store.write_series(
+        "US2Y",
+        pd.Series([1.0, 1.1], index=pd.date_range(end=future.date(), periods=2)),
+    )
+
+    body = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+
+    assert body["macro_data"]["status"] == "stale"
+    assert body["macro_data"]["ready_series"] == 3
+    assert body["macro_data"]["stale_series"] == ["US2Y"]
+    assert body["next_action"] == "sync_market_data"
 
 
 def test_setup_status_requires_the_exact_held_option_contract(tmp_path):

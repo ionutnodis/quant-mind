@@ -8,6 +8,7 @@ from datetime import datetime
 from time import sleep as _sleep
 
 from quantmind.instruments.metadata import (
+    MetadataProvenanceV1,
     ProfileFreshness,
     UcitsProfileResolutionV1,
     is_potential_ucits_isin,
@@ -76,11 +77,32 @@ def sync_ucits_profiles(
             resolution = provider.resolve(isin, now=now)
         except Exception as exc:
             reason = f"UCITS provider failed ({type(exc).__name__})"
+            try:
+                persisted = store.read_instrument_metadata(symbol) or {}
+                prior_provenance = MetadataProvenanceV1.model_validate(
+                    persisted.get("ucits_profile_last_successful_provenance"),
+                    strict=False,
+                )
+                resolution = UcitsProfileResolutionV1(
+                    schema_version="ucits_profile_resolution_v1",
+                    isin=isin,
+                    freshness=ProfileFreshness.STALE,
+                    profile=None,
+                    last_successful_provenance=prior_provenance,
+                    reason=reason,
+                )
+            except (KeyError, OSError, TypeError, ValueError):
+                resolution = None
             status = UcitsSyncStatus(
                 symbol=symbol,
                 isin=isin,
-                freshness=ProfileFreshness.MISSING,
+                freshness=(
+                    resolution.freshness
+                    if resolution is not None
+                    else ProfileFreshness.MISSING
+                ),
                 reason=reason,
+                resolution=resolution,
             )
         else:
             reason = resolution.reason

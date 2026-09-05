@@ -300,11 +300,9 @@ def _series_is_stale(series: pd.Series | None, today: date) -> bool:
         observation = pd.Timestamp(series.index[-1]).date()
     except (TypeError, ValueError):
         return True
-    age_days = (
-        0
-        if observation >= today
-        else int(np.busday_count(observation.isoformat(), today.isoformat()))
-    )
+    if observation > today:
+        return True
+    age_days = int(np.busday_count(observation.isoformat(), today.isoformat()))
     return age_days > _MARK_STALE_AFTER_DAYS
 
 
@@ -888,7 +886,7 @@ async def get_portfolio(
 
     valuation_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     pinned_snapshot_id: str | None = None
-    today = date.today()
+    today = datetime.now(timezone.utc).date()
 
     if book_ref is not None:
         pinned = read_book(store, book_ref)

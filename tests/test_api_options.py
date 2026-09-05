@@ -328,6 +328,41 @@ def test_book_greeks_option_leg_pulls_iv_from_cached_chain(client, store):
     assert row["gamma"] == pytest.approx(2 * 100 * expected.gamma, rel=1e-4)
 
 
+@pytest.mark.parametrize("iv", [0.0, -0.1])
+def test_book_greeks_rejects_non_positive_iv_as_unusable(client, store, iv):
+    """Catches invalid cached volatility reaching Black-Scholes as a 500."""
+
+    chain = _chain_df()
+    chain.loc[0, "iv"] = iv
+    OptionsStore(store.root).write_chain(
+        "SPY",
+        chain,
+        OptionsSnapshotMeta(
+            as_of=f"{date.today().isoformat()}T15:30:00Z",
+            spot=452.0,
+            underlier_con_id=1,
+        ),
+    )
+
+    response = client.post(
+        "/api/options/book-greeks",
+        json={
+            "positions": [
+                {
+                    "symbol": "SPY",
+                    "qty": 1,
+                    "strike": 440.0,
+                    "expiry": _option_expiry(),
+                    "right": "C",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 422
+    assert "usable IV" in response.json()["detail"]
+
+
 def test_book_greeks_rejects_a_stale_option_chain(client, store):
     stale_chain_date = str(date.today() - timedelta(days=10))
     _write_spy_chain(store, as_of=stale_chain_date)
@@ -529,6 +564,28 @@ def test_book_greeks_betas_populate_spy_equivalent_notional(client):
     row = r.json()["underlyings"][0]
     assert row["dollar_delta"] == pytest.approx(10 * 380.0)
     assert row["spy_equivalent_notional"] == pytest.approx(10 * 380.0 * 1.1)
+
+
+def test_book_greeks_identifies_base_currency_and_identity_fx(client):
+    """Catches base-denominated Greeks being returned without currency evidence."""
+
+    response = client.post(
+        "/api/options/book-greeks",
+        json={"positions": [{"symbol": "SPY", "qty": 10, "currency": "USD"}]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["base_currency"] == "USD"
+    assert body["fx"] == {
+        "status": "identity",
+        "base_currency": "USD",
+        "source": None,
+        "as_of": None,
+        "fetched_at": None,
+        "missing_currencies": [],
+        "note": "All analytical prices are denominated in USD.",
+    }
 
 
 def test_book_greeks_refuses_cross_currency_aggregation_until_legwise_fx_exists(store):

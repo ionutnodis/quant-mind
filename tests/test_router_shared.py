@@ -12,6 +12,7 @@ behavior-preserving.
 from __future__ import annotations
 
 import math
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -166,6 +167,25 @@ def test_read_close_series_clips_to_years():
     series = read_close_series(_Store(), con_id=1, symbol="X", years=1)
     assert len(series) == 252
     assert series.iloc[-1] == 999.0
+
+
+def test_read_close_series_rejects_future_dated_market_evidence():
+    future = date.today() + timedelta(days=1)
+    bars = pd.DataFrame(
+        {"close": [100.0]},
+        index=pd.DatetimeIndex([future]),
+    )
+
+    class _Store:
+        def read_bars(self, con_id, bar_size):
+            return bars, None
+
+    with pytest.raises(HTTPException) as error:
+        read_close_series(_Store(), con_id=1, symbol="SPY", years=1)
+
+    assert error.value.status_code == 422
+    assert "future-dated" in error.value.detail
+    assert "SPY" in error.value.detail
 
 
 def test_weighted_portfolio_returns_hand_computed():

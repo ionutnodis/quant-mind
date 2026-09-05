@@ -30,6 +30,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
 from quantmind.api.routers._shared import (
+    FxEvidenceOut,
     PositionIn,
     clean,
     collect_currency_assertions,
@@ -239,6 +240,8 @@ class StressGridOut(BaseModel):
 
 
 class BookGreeksResponse(BaseModel):
+    base_currency: str
+    fx: FxEvidenceOut
     underlyings: list[UnderlyingGreeksOut]
     stress_grid: StressGridOut
     risk_free_rate_note: str
@@ -398,7 +401,11 @@ def _leg_to_book_leg(
             ),
         )
     iv = row.iv
-    if iv is None or not np.isfinite(float(iv)):
+    try:
+        usable_iv = float(iv)
+    except (TypeError, ValueError):
+        usable_iv = float("nan")
+    if not np.isfinite(usable_iv) or usable_iv <= 0:
         raise HTTPException(
             422, detail=f"cached quote for {p.symbol} {p.expiry} {p.strike} {p.right} has no usable IV"
         )
@@ -427,7 +434,7 @@ def _leg_to_book_leg(
             strike=p.strike,
             expiry_years=expiry_years,
             is_call=(p.right == "C"),
-            iv=float(iv),
+            iv=usable_iv,
             multiplier=multiplier,
         ),
         _utc_observation_timestamp(row.observed_at),
@@ -438,6 +445,7 @@ def _leg_to_book_leg(
 def book_greeks(request: Request, req: BookGreeksRequest) -> BookGreeksResponse:
     store = request.app.state.store
     options_store = _options_store(request)
+    base_currency = request.app.state.base_currency
 
     use_persisted_contract_ids = False
     if req.positions is not None:
@@ -472,7 +480,7 @@ def book_greeks(request: Request, req: BookGreeksRequest) -> BookGreeksResponse:
         asserted=asserted_currencies,
     )
     non_base_currencies = sorted(
-        {currency for currency in currencies.values() if currency != request.app.state.base_currency}
+        {currency for currency in currencies.values() if currency != base_currency}
     )
     if non_base_currencies:
         raise HTTPException(
@@ -514,6 +522,16 @@ def book_greeks(request: Request, req: BookGreeksRequest) -> BookGreeksResponse:
     grid = aggregate_book_stress_grid(legs)
 
     return BookGreeksResponse(
+        base_currency=base_currency,
+        fx=FxEvidenceOut(
+            status="identity",
+            base_currency=base_currency,
+            source=None,
+            as_of=None,
+            fetched_at=None,
+            missing_currencies=[],
+            note=f"All analytical prices are denominated in {base_currency}.",
+        ),
         underlyings=[
             UnderlyingGreeksOut(
                 underlier=u.underlier,

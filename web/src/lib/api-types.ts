@@ -612,6 +612,14 @@ export interface components {
             /** Date */
             date: string;
         };
+        /**
+         * BookConflictOut
+         * @description Stable response body for immutable-book identity conflicts.
+         */
+        BookConflictOut: {
+            /** Detail */
+            detail: string;
+        };
         /** BookGreeksRequest */
         BookGreeksRequest: {
             /** Betas */
@@ -627,6 +635,9 @@ export interface components {
         BookGreeksResponse: {
             /** As Of */
             as_of: string | null;
+            /** Base Currency */
+            base_currency: string;
+            fx: components["schemas"]["FxEvidenceOut"];
             /** Risk Free Rate Note */
             risk_free_rate_note: string;
             stress_grid: components["schemas"]["StressGridOut"];
@@ -2215,6 +2226,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BookSnapshotOut"];
+                };
+            };
+            /** @description Pinned-book identity or immutable snapshot conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BookConflictOut"];
                 };
             };
             /** @description Validation Error */

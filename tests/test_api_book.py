@@ -237,6 +237,16 @@ def test_rebase_preserves_book_history_and_records_lineage(store):
     ).status_code == 200
 
 
+def test_rebase_openapi_declares_its_runtime_conflict_response(store):
+    operation = _client(store).app.openapi()["paths"]["/api/book/{snapshot_id}/rebase"][
+        "post"
+    ]
+
+    conflict = operation["responses"]["409"]
+    schema = conflict["content"]["application/json"]["schema"]
+    assert schema == {"$ref": "#/components/schemas/BookConflictOut"}
+
+
 def test_pin_unknown_symbol_is_422(store):
     client = _client(store)
     r = client.post("/api/book/pin", json={"positions": [{"symbol": "NOPE", "qty": 1}]})

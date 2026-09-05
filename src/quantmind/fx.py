@@ -36,8 +36,9 @@ from quantmind.sources.http import read_bounded_text
 _ECB_API = "https://data-api.ecb.europa.eu/service/data/EXR"
 _MANIFEST = "fx_manifest.json"
 _ROLLBACK_MANIFEST = "fx_manifest.rollback.json"
-_SCHEMA_VERSION = "ecb_fx_v2"
-_SUPPORTED_SCHEMA_VERSIONS = {"ecb_fx_v1", _SCHEMA_VERSION}
+_SCHEMA_VERSION = "ecb_fx_v3"
+_GENERATION_SCHEMA_VERSIONS = {"ecb_fx_v2", _SCHEMA_VERSION}
+_SUPPORTED_SCHEMA_VERSIONS = {"ecb_fx_v1", *_GENERATION_SCHEMA_VERSIONS}
 _QUOTE_BASIS = "USD_PER_CURRENCY"
 _MAX_ECB_RESPONSE_BYTES = 20 * 1024 * 1024
 
@@ -105,6 +106,41 @@ def _manifest_date(value: object, *, field: str) -> date:
             f"FX provenance manifest has an invalid {field}"
         )
     return parsed
+
+
+def _manifest_timestamp(value: object, *, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise FxConversionUnavailable(
+            f"FX provenance manifest has an invalid {field}"
+        )
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise FxConversionUnavailable(
+            f"FX provenance manifest has an invalid {field}"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise FxConversionUnavailable(
+            f"FX provenance manifest has an invalid {field}"
+        )
+    return parsed.astimezone(timezone.utc)
+
+
+def _series_provenance(manifest: dict, entry: dict) -> dict[str, str]:
+    """Normalize series evidence across the v1/v2 and v3 manifest shapes."""
+
+    if manifest.get("schema_version") == _SCHEMA_VERSION:
+        source_url = entry.get("source_url")
+        fetched_at = entry.get("fetched_at")
+    else:
+        source_url = manifest.get("source_url")
+        fetched_at = manifest.get("fetched_at")
+    if not isinstance(source_url, str) or not source_url.strip():
+        raise FxConversionUnavailable(
+            "FX provenance manifest has an invalid series source URL"
+        )
+    _manifest_timestamp(fetched_at, field="series fetched-at timestamp")
+    return {"source_url": source_url, "fetched_at": str(fetched_at)}
 
 
 def parse_ecb_reference_rates(
@@ -250,7 +286,7 @@ def read_fx_manifest(store) -> dict:
         or not isinstance(series, dict)
     ):
         raise FxConversionUnavailable("FX provenance manifest is unsupported")
-    if schema_version == _SCHEMA_VERSION:
+    if schema_version in _GENERATION_SCHEMA_VERSIONS:
         generation = payload.get("generation")
         if not _valid_generation(generation) or not series:
             raise FxConversionUnavailable(
@@ -275,6 +311,8 @@ def read_fx_manifest(store) -> dict:
             series_dates.append(
                 _manifest_date(entry.get("as_of"), field=f"{currency} as-of date")
             )
+            if schema_version == _SCHEMA_VERSION:
+                _series_provenance(payload, entry)
         manifest_as_of = _manifest_date(payload.get("as_of"), field="as-of date")
         if manifest_as_of != min(series_dates):
             raise FxConversionUnavailable(
@@ -396,12 +434,14 @@ def sync_ecb_fx(
             )
 
     publication_time = fetched_at or _utc_now()
+    _manifest_timestamp(publication_time, field="series fetched-at timestamp")
     try:
         previous_manifest = read_fx_manifest(store)
     except FxConversionUnavailable:
         previous_manifest = None
 
     previous_series: dict[str, pd.Series] = {}
+    previous_provenance: dict[str, dict[str, str]] = {}
     previous_complete = previous_manifest is not None
     if previous_manifest is not None:
         for manifest_currency, entry in previous_manifest["series"].items():
@@ -411,6 +451,9 @@ def sync_ecb_fx(
                     raise ValueError("non-canonical currency")
                 previous_series[currency] = _read_cached_fx_series(
                     store, currency, entry
+                )
+                previous_provenance[currency] = _series_provenance(
+                    previous_manifest, entry
                 )
             except (FxConversionUnavailable, ValueError):
                 previous_complete = False
@@ -457,7 +500,20 @@ def sync_ecb_fx(
         name = _generation_series_name(currency, generation)
         staged_series[name] = values
         last = pd.Timestamp(values.index[-1])
-        series_meta[currency] = {"name": name, "as_of": last.date().isoformat()}
+        provenance = (
+            {"source_url": source_url, "fetched_at": publication_time}
+            if currency in requested
+            else previous_provenance.get(currency)
+        )
+        if provenance is None:
+            raise FxConversionUnavailable(
+                f"cached {currency} FX series has no trustworthy provenance"
+            )
+        series_meta[currency] = {
+            "name": name,
+            "as_of": last.date().isoformat(),
+            **provenance,
+        }
 
     # Publish every immutable data file first. If any write fails, the old
     # manifest remains the sole dataset pointer and readers cannot observe a
@@ -471,8 +527,6 @@ def sync_ecb_fx(
         "schema_version": _SCHEMA_VERSION,
         "quote_basis": _QUOTE_BASIS,
         "provider": provider.name,
-        "source_url": source_url,
-        "fetched_at": publication_time,
         "generation": generation,
         "as_of": as_of,
         "series": series_meta,
@@ -513,6 +567,11 @@ class FxConverter:
     source_url: str
     fetched_at: str
     max_age_days: int = 7
+    _series_provenance: dict[str, dict[str, str]] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
     _used_observation_dates: dict[str, set[pd.Timestamp]] = field(
         default_factory=dict,
         init=False,
@@ -553,6 +612,22 @@ class FxConverter:
             return
         dates = self._used_observation_dates.setdefault(normalized, set())
         dates.update(pd.Timestamp(value).normalize() for value in observation_dates)
+        used_evidence = [
+            (
+                _manifest_timestamp(
+                    self._series_provenance[used_currency]["fetched_at"],
+                    field=f"{used_currency} fetched-at timestamp",
+                ),
+                used_currency,
+                self._series_provenance[used_currency],
+            )
+            for used_currency in self._used_observation_dates
+            if used_currency in self._series_provenance
+        ]
+        if used_evidence:
+            _, _, weakest = min(used_evidence, key=lambda item: (item[0], item[1]))
+            object.__setattr__(self, "source_url", weakest["source_url"])
+            object.__setattr__(self, "fetched_at", weakest["fetched_at"])
 
     @classmethod
     def from_store(
@@ -579,20 +654,33 @@ class FxConverter:
         series_manifest = manifest["series"]
         to_load = (requested | {"USD"}) if base != "USD" else requested
         series: dict[str, pd.Series] = {}
+        series_provenance: dict[str, dict[str, str]] = {}
         for currency in sorted(to_load):
             if currency == "USD" and currency not in series_manifest:
                 # Older-but-valid manifests may omit the mathematical identity.
                 continue
             entry = series_manifest.get(currency)
             series[currency] = _read_cached_fx_series(store, currency, entry)
+            series_provenance[currency] = _series_provenance(manifest, entry)
+
+        has_per_series_provenance = manifest.get("schema_version") == _SCHEMA_VERSION
 
         return cls(
             base_currency=base,
             usd_per_currency=series,
             source=str(manifest["provider"]),
-            source_url=str(manifest.get("source_url") or ""),
-            fetched_at=str(manifest.get("fetched_at") or ""),
+            source_url=(
+                ""
+                if has_per_series_provenance
+                else str(manifest.get("source_url") or "")
+            ),
+            fetched_at=(
+                ""
+                if has_per_series_provenance
+                else str(manifest.get("fetched_at") or "")
+            ),
             max_age_days=max_age_days,
+            _series_provenance=series_provenance,
         )
 
     def _quote(

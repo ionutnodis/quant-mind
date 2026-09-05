@@ -144,6 +144,80 @@ def test_ucits_sync_persists_last_successful_provenance_after_refresh_failure(tm
     }
 
 
+def test_ucits_sync_preserves_last_success_after_unexpected_resolver_exception(
+    tmp_path,
+):
+    store = BarStore(tmp_path)
+    metadata = {
+        "IWDA": {
+            "con_id": 1,
+            "provider": "ibkr",
+            "stock_type": "ETF",
+            "isin": "IE00B4L5Y983",
+        }
+    }
+    store.write_instrument_metadata("IWDA", metadata["IWDA"])
+    sync_ucits_profiles(
+        store,
+        metadata,
+        JustEtfProvider(store, fetcher=lambda _url: PROFILE_HTML),
+        now=datetime(2026, 8, 1, 12, tzinfo=UTC),
+    )
+
+    class UnexpectedFailureProvider:
+        def resolve(self, _isin, *, now):
+            raise RuntimeError("unexpected parser failure")
+
+    result = sync_ucits_profiles(
+        store,
+        metadata,
+        UnexpectedFailureProvider(),
+        now=datetime(2026, 9, 4, 12, tzinfo=UTC),
+    )
+
+    status = result["IWDA"]
+    assert status.freshness.value == "STALE"
+    assert status.resolution is not None
+    assert status.resolution.profile is None
+    listing = store.read_instrument_metadata("IWDA")
+    assert listing["ucits_profile_status"] == "STALE"
+    assert listing["ucits_profile_last_successful_provenance"] == {
+        "source": "justetf",
+        "source_url": "https://www.justetf.com/en/etf-profile.html?isin=IE00B4L5Y983",
+        "fetched_at_utc": "2026-08-01T12:00:00Z",
+    }
+
+
+def test_ucits_sync_handles_unexpected_failure_without_persisted_listing(tmp_path):
+    store = BarStore(tmp_path)
+    metadata = {
+        "IWDA": {
+            "con_id": 1,
+            "provider": "ibkr",
+            "stock_type": "ETF",
+            "isin": "IE00B4L5Y983",
+        }
+    }
+
+    class UnexpectedFailureProvider:
+        def resolve(self, _isin, *, now):
+            raise RuntimeError("unexpected parser failure")
+
+    result = sync_ucits_profiles(
+        store,
+        metadata,
+        UnexpectedFailureProvider(),
+        now=datetime(2026, 9, 4, 12, tzinfo=UTC),
+    )
+
+    status = result["IWDA"]
+    assert status.freshness.value == "MISSING"
+    assert status.resolution is None
+    listing = store.read_instrument_metadata("IWDA")
+    assert listing["ucits_profile_status"] == "MISSING"
+    assert listing["ucits_profile_last_successful_provenance"] is None
+
+
 def test_ucits_sync_paces_profile_candidates(tmp_path):
     store = BarStore(tmp_path)
     metadata = {

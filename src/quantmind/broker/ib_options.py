@@ -32,6 +32,7 @@ class OptionChainParams:
     multiplier: str
     expirations: tuple[str, ...]  # "YYYYMMDD", sorted
     strikes: tuple[float, ...]  # sorted
+    currency: str | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,7 @@ async def fetch_chain_params(ib, symbol: str, con_id: int, sec_type: str = "STK"
         multiplier=chain.multiplier,
         expirations=tuple(sorted(chain.expirations)),
         strikes=tuple(sorted(chain.strikes)),
+        currency=(str(chain.currency) if getattr(chain, "currency", None) else None),
     )
 
 
@@ -193,16 +195,75 @@ def _ticker_to_quote(underlier: str, ticker) -> OptionQuote | None:
     )
 
 
+def _contract_terms(contract) -> tuple[str, str, float, str] | None:
+    symbol = getattr(contract, "symbol", None)
+    expiry = getattr(contract, "lastTradeDateOrContractMonth", None)
+    right = getattr(contract, "right", None)
+    if not isinstance(symbol, str) or not symbol:
+        return None
+    if not isinstance(expiry, str):
+        return None
+    try:
+        datetime.strptime(expiry, "%Y%m%d")
+    except ValueError:
+        return None
+    try:
+        raw_strike = getattr(contract, "strike", None)
+        if isinstance(raw_strike, bool):
+            return None
+        strike = float(raw_strike)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(strike) or strike <= 0:
+        return None
+    if right not in {"C", "P"}:
+        return None
+    return symbol, expiry, strike, right
+
+
 def _contract_identity(contract) -> tuple[int, str, str, float, str] | None:
     con_id = getattr(contract, "conId", None)
     if not isinstance(con_id, int) or isinstance(con_id, bool) or con_id <= 0:
         return None
+    terms = _contract_terms(contract)
+    return (con_id, *terms) if terms is not None else None
+
+
+def _chain_contract_matches(
+    chain: OptionChainParams,
+    requested_terms: set[tuple[str, str, float, str]],
+    contract,
+) -> bool:
+    identity = _contract_identity(contract)
+    if identity is None or identity[1:] not in requested_terms:
+        return False
+    sec_type = getattr(contract, "secType", "")
+    if sec_type and sec_type != "OPT":
+        return False
+    trading_class = getattr(contract, "tradingClass", "")
+    if trading_class and trading_class != chain.trading_class:
+        return False
+    multiplier = getattr(contract, "multiplier", "")
+    try:
+        if multiplier and float(multiplier) != float(chain.multiplier):
+            return False
+    except (TypeError, ValueError):
+        return False
+    currency = getattr(contract, "currency", "")
+    if chain.currency and currency != chain.currency:
+        return False
+    return True
+
+
+def _qualified_contract_identity(contract) -> tuple | None:
+    identity = _contract_identity(contract)
+    if identity is None:
+        return None
     return (
-        con_id,
-        str(getattr(contract, "symbol", "")),
-        str(getattr(contract, "lastTradeDateOrContractMonth", "")),
-        float(getattr(contract, "strike", 0.0)),
-        str(getattr(contract, "right", "")),
+        *identity,
+        str(getattr(contract, "tradingClass", "")),
+        str(getattr(contract, "multiplier", "")),
+        str(getattr(contract, "currency", "")),
     )
 
 
@@ -237,7 +298,16 @@ async def snapshot_option_quotes(
         ib.reqMarketDataType(market_data_type)
 
     contracts = [
-        Option(chain.underlying_symbol, expiry, strike, right, chain.exchange, chain.multiplier)
+        Option(
+            chain.underlying_symbol,
+            expiry,
+            strike,
+            right,
+            chain.exchange,
+            chain.multiplier,
+            chain.currency or "",
+            tradingClass=chain.trading_class,
+        )
         for expiry in expiries
         for strike in strikes
         for right in ("C", "P")
@@ -246,12 +316,32 @@ async def snapshot_option_quotes(
     quotes: list[OptionQuote] = []
     for i in range(0, len(contracts), batch_size):
         batch = contracts[i : i + batch_size]
+        requested_terms = {
+            terms
+            for contract in batch
+            if (terms := _contract_terms(contract)) is not None
+        }
         qualified_raw = await ib.qualifyContractsAsync(*batch)
-        qualified = [c for c in qualified_raw if c is not None and getattr(c, "conId", None)]
+        qualified = [
+            contract
+            for contract in qualified_raw
+            if contract is not None
+            and _chain_contract_matches(chain, requested_terms, contract)
+        ]
         if qualified:
+            qualified_identities = {
+                identity
+                for contract in qualified
+                if (identity := _qualified_contract_identity(contract)) is not None
+            }
             tickers = await ib.reqTickersAsync(*qualified)
             for ticker in tickers:
-                quote = _ticker_to_quote(chain.underlying_symbol, ticker)
+                if (
+                    _qualified_contract_identity(ticker.contract)
+                    not in qualified_identities
+                ):
+                    continue
+                quote = _ticker_to_quote(ticker.contract.symbol, ticker)
                 if quote is not None:
                     quotes.append(quote)
         await sleep(pace_seconds)

@@ -471,6 +471,35 @@ def test_stale_stock_mark_cannot_make_portfolio_valuation_complete(store):
     assert body["exposure"] == []
 
 
+def test_future_stock_mark_cannot_make_portfolio_valuation_complete(store):
+    future_date = pd.bdate_range(
+        start=date.today() + timedelta(days=1), periods=1
+    )[0].date()
+    store.write_bars(
+        con_id=1,
+        bar_size="1d",
+        bars=_flat_bars(100.0, end=future_date),
+        meta=BarMeta(
+            bar_type="ADJUSTED_LAST",
+            adjusted_asof=future_date.isoformat(),
+        ),
+    )
+    portfolio = Portfolio(
+        positions=(
+            Position(con_id=1, symbol="SPY", qty=10, sec_type="STK", multiplier=1.0),
+        ),
+        as_of=date.today().isoformat(),
+    )
+
+    body = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio").json()
+
+    assert body["positions"][0]["last_close"] is None
+    assert body["positions"][0]["market_value"] is None
+    assert body["totals"]["priced_positions"] == 0
+    assert body["totals"]["valuation_status"] == "partial"
+    assert body["exposure"] == []
+
+
 def test_fresh_option_chain_cannot_use_a_stale_underlier_for_greeks(store):
     stale_date = date.today() - timedelta(days=10)
     store.write_bars(
@@ -527,6 +556,67 @@ def test_fresh_option_chain_cannot_use_a_stale_underlier_for_greeks(store):
     assert body["options_sleeve"]["status"] == "unavailable"
     assert "SPY" in body["options_sleeve"]["reason"]
     assert "sync bars" in body["options_sleeve"]["reason"]
+
+
+def test_fresh_option_chain_cannot_use_a_future_underlier_for_greeks(store):
+    future_date = pd.bdate_range(
+        start=date.today() + timedelta(days=1), periods=1
+    )[0].date()
+    store.write_bars(
+        con_id=1,
+        bar_size="1d",
+        bars=_flat_bars(100.0, end=future_date),
+        meta=BarMeta(
+            bar_type="ADJUSTED_LAST",
+            adjusted_asof=future_date.isoformat(),
+        ),
+    )
+    expiry = _expiry_str(45)
+    _write_chain(
+        store,
+        "SPY",
+        [
+            {
+                "expiry": expiry,
+                "strike": 105.0,
+                "right": "C",
+                "con_id": 4011,
+                "bid": 1.0,
+                "ask": 1.2,
+                "iv": 0.25,
+                "delta": 0.5,
+                "multiplier": 100.0,
+            }
+        ],
+        spot=100.0,
+        as_of=str(date.today()),
+    )
+    client = _client(store, broker=None)
+    pinned = client.post(
+        "/api/book/pin",
+        json={
+            "positions": [
+                {
+                    "symbol": "SPY",
+                    "qty": 1,
+                    "strike": 105.0,
+                    "expiry": expiry,
+                    "right": "C",
+                }
+            ]
+        },
+    ).json()
+
+    body = client.get(
+        "/api/portfolio", params={"book_ref": pinned["snapshot_id"]}
+    ).json()
+
+    assert body["options_sleeve"]["available"] is False
+    assert body["options_sleeve"]["status"] == "unavailable"
+    assert body["options_sleeve"]["priced_positions"] == 0
+    assert "SPY" in body["options_sleeve"]["reason"]
+    assert "sync bars" in body["options_sleeve"]["reason"]
+    assert body["exposure"] == []
 
 
 def test_portfolio_corrupt_cached_bars_degrade_to_null_price_fields(store):

@@ -37,7 +37,7 @@ p.multiplier is not None else (100.0 if p.right else 1.0)`.
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal, Sequence, TypeVar
 
 import numpy as np
@@ -128,6 +128,18 @@ def read_close_series(store, con_id: int, symbol: str, years: int) -> pd.Series:
         series = series.iloc[-(years * 252):]
     if series.empty:
         raise HTTPException(422, detail=f"symbol {symbol!r} has no cached history")
+    try:
+        observation_date = pd.Timestamp(series.index[-1]).date()
+    except (TypeError, ValueError):
+        raise HTTPException(
+            422,
+            detail=f"symbol {symbol!r} has an invalid cached observation date",
+        )
+    if observation_date > datetime.now(timezone.utc).date():
+        raise HTTPException(
+            422,
+            detail=f"symbol {symbol!r} has future-dated cached bars; run sync",
+        )
     return series
 
 

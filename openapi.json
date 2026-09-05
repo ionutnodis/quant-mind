@@ -459,6 +459,20 @@
         "title": "BetaPoint",
         "type": "object"
       },
+      "BookConflictOut": {
+        "description": "Stable response body for immutable-book identity conflicts.",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "BookConflictOut",
+        "type": "object"
+      },
       "BookGreeksRequest": {
         "properties": {
           "betas": {
@@ -511,6 +525,13 @@
             ],
             "title": "As Of"
           },
+          "base_currency": {
+            "title": "Base Currency",
+            "type": "string"
+          },
+          "fx": {
+            "$ref": "#/components/schemas/FxEvidenceOut"
+          },
           "risk_free_rate_note": {
             "title": "Risk Free Rate Note",
             "type": "string"
@@ -527,6 +548,8 @@
           }
         },
         "required": [
+          "base_currency",
+          "fx",
           "underlyings",
           "stress_grid",
           "risk_free_rate_note",
@@ -6214,6 +6237,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookConflictOut"
+                }
+              }
+            },
+            "description": "Pinned-book identity or immutable snapshot conflict"
           },
           "422": {
             "content": {

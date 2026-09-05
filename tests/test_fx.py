@@ -130,6 +130,22 @@ def test_ecb_sync_rejects_observations_after_the_requested_end(tmp_path):
     assert store.list_series() == []
 
 
+def test_ecb_sync_rejects_invalid_fetch_timestamp_before_publishing(tmp_path):
+    store = BarStore(tmp_path)
+
+    with pytest.raises(FxConversionUnavailable, match="fetched-at"):
+        sync_ecb_fx(
+            store,
+            EcbFxProvider(fetcher=lambda _url: ECB_CSV),
+            {"USD", "EUR"},
+            today=date(2026, 9, 2),
+            fetched_at="2026-09-02 17:00:00",
+        )
+
+    assert not (tmp_path / "fx_manifest.json").exists()
+    assert store.list_series() == []
+
+
 def test_converter_triangulates_spot_and_date_aligned_price_history():
     idx = pd.to_datetime(["2026-09-01", "2026-09-02"])
     converter = FxConverter(
@@ -261,7 +277,7 @@ def test_ecb_sync_persists_series_and_provenance_manifest(tmp_path):
     assert result.currencies == ("EUR", "GBP", "USD")
     assert result.as_of == "2026-09-02"
     manifest = result.manifest
-    assert manifest["schema_version"] == "ecb_fx_v2"
+    assert manifest["schema_version"] == "ecb_fx_v3"
     assert manifest["quote_basis"] == "USD_PER_CURRENCY"
     assert manifest["provider"] == "ECB"
     assert manifest["series"]["GBP"]["as_of"] == "2026-09-02"
@@ -302,6 +318,76 @@ def test_ecb_subset_refresh_preserves_previously_published_currencies(tmp_path):
     )
     assert converter.rate("EUR", "2026-09-02") == pytest.approx(1.12)
     assert converter.rate("GBP", "2026-09-02") == pytest.approx(1.28)
+
+
+def test_ecb_subset_refresh_preserves_each_series_original_fetch_provenance(tmp_path):
+    store = BarStore(tmp_path)
+    provider = EcbFxProvider(fetcher=lambda _url: ECB_CSV)
+    original = sync_ecb_fx(
+        store,
+        provider,
+        {"USD", "EUR"},
+        today=date(2026, 9, 2),
+        fetched_at="2026-09-02T17:00:00Z",
+    )
+
+    refreshed = sync_ecb_fx(
+        store,
+        provider,
+        {"USD", "GBP"},
+        today=date(2026, 9, 2),
+        fetched_at="2026-09-02T18:00:00Z",
+    )
+
+    assert refreshed.manifest["series"]["EUR"]["fetched_at"] == (
+        "2026-09-02T17:00:00Z"
+    )
+    assert refreshed.manifest["series"]["EUR"]["source_url"] == (
+        original.manifest["series"]["EUR"]["source_url"]
+    )
+    assert refreshed.manifest["series"]["GBP"]["fetched_at"] == (
+        "2026-09-02T18:00:00Z"
+    )
+    assert refreshed.manifest["series"]["GBP"]["source_url"] != (
+        refreshed.manifest["series"]["EUR"]["source_url"]
+    )
+    assert "fetched_at" not in refreshed.manifest
+    assert "source_url" not in refreshed.manifest
+
+
+def test_converter_reports_provenance_for_only_the_currencies_it_used(tmp_path):
+    store = BarStore(tmp_path)
+    provider = EcbFxProvider(fetcher=lambda _url: ECB_CSV)
+    original = sync_ecb_fx(
+        store,
+        provider,
+        {"USD", "EUR"},
+        today=date(2026, 9, 2),
+        fetched_at="2026-09-02T17:00:00Z",
+    )
+    refreshed = sync_ecb_fx(
+        store,
+        provider,
+        {"USD", "GBP"},
+        today=date(2026, 9, 2),
+        fetched_at="2026-09-02T18:00:00Z",
+    )
+    converter = FxConverter.from_store(
+        store, base_currency="USD", currencies={"EUR", "GBP"}
+    )
+
+    assert converter.fetched_at == ""
+    assert converter.source_url == ""
+
+    converter.rate("GBP", "2026-09-02")
+
+    assert converter.fetched_at == "2026-09-02T18:00:00Z"
+    assert converter.source_url == refreshed.manifest["series"]["GBP"]["source_url"]
+
+    converter.rate("EUR", "2026-09-02")
+
+    assert converter.fetched_at == "2026-09-02T17:00:00Z"
+    assert converter.source_url == original.manifest["series"]["EUR"]["source_url"]
 
 
 def test_ecb_sync_retains_only_active_and_one_rollback_generation(tmp_path):
@@ -448,6 +534,63 @@ def test_converter_loads_a_legacy_v1_canonical_manifest(tmp_path):
     )
 
     assert converter.rate("EUR", "2026-09-02") == pytest.approx(1.1)
+
+
+def test_converter_loads_a_legacy_v2_generation_manifest(tmp_path):
+    store = BarStore(tmp_path)
+    generation = "0123456789ab"
+    name = f"FX_USD_PER_EUR__{generation}"
+    store.write_series(
+        name,
+        pd.Series([1.1], index=pd.to_datetime(["2026-09-02"])),
+    )
+    (tmp_path / "fx_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "ecb_fx_v2",
+                "quote_basis": "USD_PER_CURRENCY",
+                "provider": "ECB",
+                "source_url": "https://data-api.ecb.europa.eu/legacy-query",
+                "fetched_at": "2026-09-02T17:00:00Z",
+                "generation": generation,
+                "as_of": "2026-09-02",
+                "series": {"EUR": {"name": name, "as_of": "2026-09-02"}},
+            }
+        )
+    )
+
+    converter = FxConverter.from_store(
+        store, base_currency="USD", currencies={"EUR"}
+    )
+
+    assert converter.rate("EUR", "2026-09-02") == pytest.approx(1.1)
+    assert converter.fetched_at == "2026-09-02T17:00:00Z"
+    assert converter.source_url == "https://data-api.ecb.europa.eu/legacy-query"
+
+
+def test_v3_manifest_rejects_missing_per_series_provenance(tmp_path):
+    store = BarStore(tmp_path)
+    generation = "0123456789ab"
+    (tmp_path / "fx_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "ecb_fx_v3",
+                "quote_basis": "USD_PER_CURRENCY",
+                "provider": "ECB",
+                "generation": generation,
+                "as_of": "2026-09-02",
+                "series": {
+                    "EUR": {
+                        "name": f"FX_USD_PER_EUR__{generation}",
+                        "as_of": "2026-09-02",
+                    }
+                },
+            }
+        )
+    )
+
+    with pytest.raises(FxConversionUnavailable, match="series source URL"):
+        read_fx_manifest(store)
 
 
 @pytest.mark.parametrize(
