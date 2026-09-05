@@ -1,5 +1,44 @@
 # TODOS
 
+## Lot-level base-currency cost and unrealized P&L
+- **What:** Persist tax-lot acquisition timestamps/costs and acquisition-date FX, or ingest broker-reported base-currency unrealized P&L.
+- **Why:** Current FX correctly normalizes today's market value but cannot infer FX P&L on invested principal. Foreign unrealized P&L is therefore intentionally local-currency only.
+- **Done when:** Every foreign lot has auditable base cost evidence and base P&L reconciles to an independent broker statement fixture.
+
+## Issuer-backed UCITS holdings and documents
+- **What:** Add per-issuer adapters for iShares, Vanguard, Amundi, Xtrackers, Invesco, SPDR, and other major European ETF providers to ingest full holdings, KID/KIID links, index methodology, securities-lending facts, distributions, and fees by ISIN.
+- **Why:** justETF supplies a useful share-class overview, but look-through factor risk and overlap analysis require rights-cleared issuer evidence at constituent level.
+- **Pros:** Enables ETF-through-stock exposure, concentration/overlap diagnostics, and issuer-verified strategy facts across European books.
+- **Cons:** Each issuer publishes different file formats and terms; parsers need golden fixtures, bounded downloads, schema versioning, and independent licensing review.
+- **Depends on:** The shipped ISIN identity layer and an explicit source-terms decision per issuer.
+
+## Snapshot-frozen FX evidence
+- **What:** Freeze the exact dated FX observations used by every immutable `book_ref`, rather than resolving a historical snapshot through the latest compatible local cache.
+- **Why:** Current conversion is no-look-ahead and provenance-backed, but complete replay should remain identical even after a later FX resync or cache repair.
+- **Pros:** Fully reproducible historical portfolio, factor, scenario, and hedge results.
+- **Cons:** Adds snapshot payload/storage and migration rules for existing 0.4 books.
+- **Depends on:** 0.5 mixed-currency acceptance against a real European IBKR portfolio.
+
+## Portfolio-level factor risk decomposition
+- **What:** Add a `book_ref`-scoped factor model that aggregates normalized holding returns and option delta exposure, then reports book factor loadings, factor/specific variance, marginal and component risk, concentration, and effective independent bets.
+- **Why:** The current Risk screen is intentionally single-symbol. A portfolio manager still needs one reconciled view of which common drivers dominate the whole book without mistaking 50–500 line items for the same number of independent bets.
+- **Done when:** A pinned mixed-currency book has reproducible factor contributions that sum to total modeled variance, stable covariance/PCA diagnostics, explicit estimation uncertainty, and fixtures reconciling the decomposition to independent calculations.
+- **Depends on:** Snapshot-frozen FX evidence, portfolio/options identity acceptance, and a documented production factor universe.
+
+## Cross-currency option Greeks and stress P&L
+- **What:** Convert each monetary option Greek and scenario P&L leg into the analysis base currency at the valuation timestamp, while leaving dimensionless delta separate.
+- **Why:** The current release correctly refuses aggregate non-base option risk rather than adding unlike currencies.
+- **Pros:** Makes concentrated European/US option overlays usable in one book-risk view.
+- **Cons:** Requires explicit unit contracts for vega/theta, option-underlier currency identity, and snapshot-frozen FX.
+- **Depends on:** Snapshot-frozen FX evidence and real mixed-currency option fixtures.
+
+## European exchange calendars and listing aliases
+- **What:** Add exchange-specific holidays/session calendars and durable alias resolution across LSE, Xetra, Euronext, SIX, Borsa Italiana, and Nordic listings.
+- **Why:** Weekday-only freshness and symbol matching are insufficient around European holidays and multi-listing UCITS share classes.
+- **Pros:** More accurate freshness, alignment, and broker/vendor reconciliation.
+- **Cons:** Calendar/version maintenance and exchange-specific symbol rules.
+- **Depends on:** More than one live European portfolio and exchange coverage fixtures.
+
 ## Unified options-aware ES (M3)
 - **What:** Replace the two-view M1 risk report (returns-based ES + separate options stress grid) with one total-book distribution: simulate joint spot/vol paths and reprice option legs on each path.
 - **Why:** M1's two views are honest but not additive; a single distribution is the only true "portfolio ES" for a book with an options overlay.

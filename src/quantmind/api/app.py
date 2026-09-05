@@ -108,8 +108,10 @@ def create_app(
     api_token: str = "",
     broker=None,
     allowed_origins: tuple[str, ...] | None = None,
+    base_currency: str = "USD",
+    ucits_metadata_enabled: bool = False,
 ) -> FastAPI:
-    app = FastAPI(title="QuantMind API", version="0.4.0.0")
+    app = FastAPI(title="QuantMind API", version="0.5.0.0")
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_error(_request: Request, error: RequestValidationError):
@@ -123,6 +125,8 @@ def create_app(
     # Shared state for domain routers (routers/*.py): read via request.app.state
     app.state.store = store
     app.state.benchmark = benchmark
+    app.state.base_currency = base_currency
+    app.state.ucits_metadata_enabled = ucits_metadata_enabled
     app.state.broker = broker
     app.state.broker_connection_status = "connected" if broker is not None else "unavailable"
     app.state.broker_connection_error = None

@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from quantmind.api.app import create_app
+from quantmind.core.snapshot import BookSnapshot
 from quantmind.datastore.store import BarMeta, BarStore
 from quantmind.portfolio import Portfolio, Position
 
@@ -46,14 +47,58 @@ def store(tmp_path) -> BarStore:
     s.write_bars(con_id=1, bar_size="1d", bars=_bars(seed=1), meta=meta)  # SPY
     s.write_bars(con_id=2, bar_size="1d", bars=_bars(seed=2), meta=meta)  # QQQ
     s.write_symbol_map({"SPY": 1, "QQQ": 2})
-    s.write_instrument_metadata("SPY", {"currency": "USD", "exchange": "ARCA"})
-    s.write_instrument_metadata("QQQ", {"currency": "USD", "exchange": "NASDAQ"})
+    s.write_instrument_metadata(
+        "SPY", {"con_id": 1, "currency": "USD", "exchange": "ARCA"}
+    )
+    s.write_instrument_metadata(
+        "QQQ", {"con_id": 2, "currency": "USD", "exchange": "NASDAQ"}
+    )
     return s
 
 
-def _client(store: BarStore, broker=None) -> TestClient:
-    app = create_app(store=store, benchmark="SPY", api_token="testtoken", broker=broker)
+def _client(store: BarStore, broker=None, *, base_currency: str = "USD") -> TestClient:
+    app = create_app(
+        store=store,
+        benchmark="SPY",
+        api_token="testtoken",
+        broker=broker,
+        base_currency=base_currency,
+    )
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
+
+
+def _legacy_snapshot_id(
+    *, valuation_ts: str, base_currency: str, positions: list[dict]
+) -> str:
+    portfolio = Portfolio(
+        positions=tuple(
+            Position(
+                con_id=int(item["con_id"]),
+                symbol=item["symbol"],
+                qty=item["qty"],
+                sec_type=item["sec_type"],
+                multiplier=item["multiplier"],
+            )
+            for item in positions
+        ),
+        as_of=valuation_ts,
+    )
+    ordered = sorted(positions, key=lambda item: int(item["con_id"]))
+    option_identity = [
+        (item.get("strike"), item.get("expiry"), item.get("right"))
+        for item in ordered
+    ]
+    extra = (
+        "|".join(f"{strike}:{expiry}:{right}" for strike, expiry, right in option_identity)
+        if any(any(value is not None for value in identity) for identity in option_identity)
+        else ""
+    )
+    return BookSnapshot.create(
+        portfolio,
+        valuation_ts=valuation_ts,
+        base_currency=base_currency,
+        extra=extra,
+    ).snapshot_id
 
 
 def test_pin_explicit_positions_persists_and_echoes(store):
@@ -73,6 +118,135 @@ def test_pin_explicit_positions_persists_and_echoes(store):
     assert pos["multiplier"] == 1.0
 
 
+@pytest.mark.parametrize(
+    ("method", "path_template", "payload"),
+    [
+        ("get", "/api/portfolio?book_ref={book_ref}", None),
+        (
+            "post",
+            "/api/whatif",
+            {
+                "book_ref": "{book_ref}",
+                "years": 1,
+                "mc": {"horizon": 5, "n_paths": 100, "seed": 1},
+            },
+        ),
+        (
+            "post",
+            "/api/hedge",
+            {
+                "book_ref": "{book_ref}",
+                "objective": {"kind": "beta_target", "value": 0},
+                "candidates": ["QQQ"],
+                "years": 1,
+            },
+        ),
+        (
+            "post",
+            "/api/leverage",
+            {"book_ref": "{book_ref}", "drawdown_budget": 0.25, "years": 1},
+        ),
+        (
+            "post",
+            "/api/options/book-greeks",
+            {"book_ref": "{book_ref}", "betas": {}},
+        ),
+        ("post", "/api/book/{book_ref}/rebase", None),
+    ],
+)
+def test_pinned_book_analysis_rejects_a_repointed_symbol_identity(
+    store, method, path_template, payload
+):
+    client = _client(store)
+    pinned = client.post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 10}]}
+    ).json()
+    book_ref = pinned["snapshot_id"]
+    store.write_bars(
+        con_id=99,
+        bar_size="1d",
+        bars=_bars(seed=99),
+        meta=BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24"),
+    )
+    store.write_symbol_map({"SPY": 99, "QQQ": 2})
+    path = path_template.format(book_ref=book_ref)
+    body = (
+        {
+            key: value.format(book_ref=book_ref)
+            if isinstance(value, str)
+            else value
+            for key, value in payload.items()
+        }
+        if payload is not None
+        else None
+    )
+
+    response = getattr(client, method)(path, json=body) if body is not None else getattr(client, method)(path)
+
+    assert response.status_code == 409, response.text
+    assert "instrument identity changed" in response.json()["detail"]
+    assert "re-pin" in response.json()["detail"]
+
+
+def test_pinned_book_analysis_names_a_corrupt_symbol_map(store):
+    client = _client(store)
+    pinned = client.post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 10}]}
+    ).json()
+    (store.root / "symbols.json").write_text("not-json")
+
+    response = client.get(
+        "/api/portfolio", params={"book_ref": pinned["snapshot_id"]}
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == (
+        "symbol map is corrupt; run sync to rebuild it"
+    )
+
+
+def test_pin_uses_the_configured_investor_base_currency(store):
+    body = _client(store, base_currency="GBP").post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 10}]}
+    ).json()
+
+    assert body["base_currency"] == "GBP"
+
+
+def test_rebase_preserves_book_history_and_records_lineage(store):
+    usd_client = _client(store, base_currency="USD")
+    original = usd_client.post(
+        "/api/book/pin",
+        json={"positions": [{"symbol": "SPY", "qty": 10}]},
+    ).json()
+
+    response = _client(store, base_currency="GBP").post(
+        f"/api/book/{original['snapshot_id']}/rebase"
+    )
+
+    assert response.status_code == 200, response.text
+    rebased = response.json()
+    assert rebased["snapshot_id"] != original["snapshot_id"]
+    assert rebased["base_currency"] == "GBP"
+    assert rebased["valuation_ts"] == original["valuation_ts"]
+    assert rebased["positions"] == original["positions"]
+    assert rebased["source"] == original["source"]
+    assert rebased["rebased_from"] == original["snapshot_id"]
+    assert _client(store, base_currency="USD").get(
+        f"/api/book/{original['snapshot_id']}"
+    ).status_code == 200
+
+
+def test_rebase_openapi_declares_its_runtime_conflict_response(store):
+    operation = _client(store).app.openapi()["paths"]["/api/book/{snapshot_id}/rebase"][
+        "post"
+    ]
+
+    conflict = operation["responses"]["409"]
+    schema = conflict["content"]["application/json"]["schema"]
+    assert schema == {"$ref": "#/components/schemas/BookConflictOut"}
+
+
 def test_pin_unknown_symbol_is_422(store):
     client = _client(store)
     r = client.post("/api/book/pin", json={"positions": [{"symbol": "NOPE", "qty": 1}]})
@@ -88,6 +262,54 @@ def test_manual_pin_rejects_currency_that_conflicts_with_instrument_master(store
 
     assert response.status_code == 422
     assert "currency" in response.json()["detail"]
+
+
+def test_manual_pin_reports_corrupt_instrument_metadata_as_a_named_422(store):
+    (store.root / "instruments.json").write_text('{"SPY": 7}')
+    client = TestClient(
+        create_app(
+            store=store,
+            benchmark="SPY",
+            api_token="testtoken",
+            base_currency="USD",
+        ),
+        base_url="http://127.0.0.1",
+        headers={"Authorization": "Bearer testtoken"},
+        raise_server_exceptions=False,
+    )
+
+    response = client.post(
+        "/api/book/pin",
+        json={"positions": [{"symbol": "SPY", "qty": 1}]},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "instrument metadata cache is corrupt; run sync to rebuild it"
+    )
+    assert not (store.root / "books").exists()
+
+
+def test_manual_pin_rejects_metadata_bound_to_a_different_contract(store):
+    store.write_symbol_map({"SPY": 99, "QQQ": 2})
+    store.write_instrument_metadata(
+        "SPY",
+        {
+            "con_id": 1,
+            "currency": "USD",
+            "exchange": "ARCA",
+            "long_name": "Old listing",
+        },
+    )
+
+    response = _client(store).post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 1}]}
+    )
+
+    assert response.status_code == 422
+    assert "metadata contract identity" in response.json()["detail"]
+    assert "SPY" in response.json()["detail"]
+    assert not (store.root / "books").exists()
 
 
 def test_manual_pin_without_authoritative_currency_cannot_enter_analysis(tmp_path):
@@ -226,6 +448,7 @@ def test_pin_current_book_with_broker_persists_a_resolvable_snapshot(store):
 
 
 def test_broker_instrument_identity_survives_preview_pin_and_read(store):
+    store.write_symbol_map({**store.read_symbol_map(), "ASML": 987654})
     portfolio = Portfolio(
         positions=(
             Position(
@@ -259,24 +482,30 @@ def test_broker_instrument_identity_survives_preview_pin_and_read(store):
 
 
 def test_legacy_book_without_instrument_identity_remains_readable(store):
-    snapshot_id = "abcdef012345"
+    valuation_ts = "2026-09-04T12:00:00Z"
+    positions = [
+        {
+            "symbol": "SPY",
+            "qty": 10,
+            "con_id": 1,
+            "sec_type": "STK",
+            "multiplier": 1,
+        }
+    ]
+    snapshot_id = _legacy_snapshot_id(
+        valuation_ts=valuation_ts,
+        base_currency="USD",
+        positions=positions,
+    )
     books = store.root / "books"
     books.mkdir()
     (books / f"{snapshot_id}.json").write_text(
         json.dumps(
             {
                 "snapshot_id": snapshot_id,
-                "valuation_ts": "2026-09-04T12:00:00Z",
+                "valuation_ts": valuation_ts,
                 "base_currency": "USD",
-                "positions": [
-                    {
-                        "symbol": "SPY",
-                        "qty": 10,
-                        "con_id": 1,
-                        "sec_type": "STK",
-                        "multiplier": 1,
-                    }
-                ],
+                "positions": positions,
             }
         )
     )
@@ -412,6 +641,23 @@ def test_v2_snapshot_rejects_valid_json_content_tampering(store):
     assert "corrupted" in response.json()["detail"]
 
 
+def test_v2_snapshot_cannot_bypass_integrity_by_removing_version_marker(store):
+    client = _client(store)
+    pinned = client.post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 10}]}
+    ).json()
+    path = store.root / "books" / f"{pinned['snapshot_id']}.json"
+    payload = json.loads(path.read_text())
+    payload["positions"][0]["qty"] = 999
+    payload.pop("identity_version")
+    path.write_text(json.dumps(payload))
+
+    response = client.get(f"/api/book/{pinned['snapshot_id']}")
+
+    assert response.status_code == 422
+    assert "corrupted" in response.json()["detail"]
+
+
 def test_book_ref_with_invalid_format_is_422_not_500(store):
     client = _client(store)
     r = client.get("/api/book/does-not-exist")
@@ -517,26 +763,32 @@ def test_persisted_option_leg_without_right_is_refused(store):
     from quantmind.api.routers.book import _books_dir, read_book_positions
     from fastapi import HTTPException
 
-    snapshot_id = "abcdef012345"
+    valuation_ts = "2026-09-04T12:00:00Z"
+    positions = [
+        {
+            "symbol": "SPY",
+            "qty": 1,
+            "con_id": 1,
+            "sec_type": "OPT",
+            "multiplier": 100,
+            "strike": 700,
+            "expiry": "20261218",
+            "right": None,
+            "currency": "USD",
+        }
+    ]
+    snapshot_id = _legacy_snapshot_id(
+        valuation_ts=valuation_ts,
+        base_currency="USD",
+        positions=positions,
+    )
     (_books_dir(store) / f"{snapshot_id}.json").write_text(
         json.dumps(
             {
                 "snapshot_id": snapshot_id,
-                "valuation_ts": "2026-09-04T12:00:00Z",
+                "valuation_ts": valuation_ts,
                 "base_currency": "USD",
-                "positions": [
-                    {
-                        "symbol": "SPY",
-                        "qty": 1,
-                        "con_id": 1,
-                        "sec_type": "OPT",
-                        "multiplier": 100,
-                        "strike": 700,
-                        "expiry": "20261218",
-                        "right": None,
-                        "currency": "USD",
-                    }
-                ],
+                "positions": positions,
             }
         )
     )
@@ -552,23 +804,29 @@ def test_resolved_non_stock_contract_type_is_preserved_and_refused(store, sec_ty
     from quantmind.api.routers._shared import refuse_unsupported_contract_legs
     from quantmind.api.routers.book import _books_dir, read_book_positions
 
-    snapshot_id = "abcdef012345"
+    valuation_ts = "2026-09-04T12:00:00Z"
+    positions = [
+        {
+            "symbol": "SPY",
+            "qty": 1,
+            "con_id": 1,
+            "sec_type": sec_type,
+            "multiplier": 1,
+            "currency": "USD",
+        }
+    ]
+    snapshot_id = _legacy_snapshot_id(
+        valuation_ts=valuation_ts,
+        base_currency="USD",
+        positions=positions,
+    )
     (_books_dir(store) / f"{snapshot_id}.json").write_text(
         json.dumps(
             {
                 "snapshot_id": snapshot_id,
-                "valuation_ts": "2026-09-04T12:00:00Z",
+                "valuation_ts": valuation_ts,
                 "base_currency": "USD",
-                "positions": [
-                    {
-                        "symbol": "SPY",
-                        "qty": 1,
-                        "con_id": 1,
-                        "sec_type": sec_type,
-                        "multiplier": 1,
-                        "currency": "USD",
-                    }
-                ],
+                "positions": positions,
             }
         )
     )

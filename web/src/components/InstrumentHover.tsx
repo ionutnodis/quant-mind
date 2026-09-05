@@ -5,31 +5,14 @@
 // "you". No Radix/shadcn dependency here: web/package.json isn't owned by
 // this task, so the tooltip/sheet are plain positioned divs styled to match
 // Panel chrome, not a new library.
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useCallback, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { request } from "../lib/api";
+import type { components } from "../lib/api-types";
+import { ariaIdToken } from "../lib/aria";
 import { InstrumentSheet } from "./InstrumentSheet";
 
-export interface InstrumentSummary {
-  symbol: string;
-  con_id: number;
-  long_name: string | null;
-  exchange: string | null;
-  currency: string | null;
-  sec_type: string | null;
-  industry: string | null;
-  region: string | null;
-  provider: string | null;
-  last_close: number | null;
-  high_52w: number | null;
-  low_52w: number | null;
-  pct_from_52w_high: number | null;
-  pct_from_52w_low: number | null;
-  ann_vol: number | null;
-  beta: number | null;
-  beta_benchmark: string;
-  as_of: string | null;
-}
+export type InstrumentSummary = components["schemas"]["InstrumentResponse"];
 
 export function getInstrument(symbol: string): Promise<InstrumentSummary> {
   return request<InstrumentSummary>(`/api/instruments/${encodeURIComponent(symbol)}`);
@@ -56,6 +39,10 @@ export function InstrumentHover({
 }) {
   const [hovered, setHovered] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const closeSheet = useCallback(() => setSheetOpen(false), []);
+  const tooltipId = `instrument-tooltip-${ariaIdToken(symbol)}`;
+  const tooltipOpen = hovered && !sheetOpen;
   const { data, isLoading } = useQuery({
     queryKey: ["instrument", symbol],
     queryFn: () => getInstrument(symbol),
@@ -71,22 +58,43 @@ export function InstrumentHover({
       onMouseLeave={() => setHovered(false)}
     >
       <button
+        ref={triggerRef}
         type="button"
         data-testid={`instrument-trigger-${symbol}`}
-        onClick={() => setSheetOpen(true)}
+        aria-describedby={tooltipOpen ? tooltipId : undefined}
+        onFocus={() => setHovered(true)}
+        onBlur={() => setHovered(false)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            setHovered(false);
+          }
+        }}
+        onClick={() => {
+          setHovered(false);
+          setSheetOpen(true);
+        }}
         className="cursor-pointer decoration-dotted underline decoration-hairline underline-offset-2 hover:decoration-market text-inherit"
       >
         {children}
       </button>
 
-      {hovered && !sheetOpen && (
+      {tooltipOpen && (
         <div
+          id={tooltipId}
           data-testid={`instrument-hover-${symbol}`}
           role="tooltip"
           className="absolute z-20 top-full left-0 mt-1 w-56 bg-surface border border-hairline p-2.5 text-[11px] shadow-lg"
         >
           {isLoading || !data ? (
-            <p className="text-muted">Loading {symbol}…</p>
+            <p
+              role="status"
+              aria-live="polite"
+              aria-label={`Loading ${symbol} instrument`}
+              className="text-muted"
+            >
+              Loading {symbol}…
+            </p>
           ) : (
             <>
               <div className="flex items-baseline justify-between">
@@ -97,7 +105,7 @@ export function InstrumentHover({
                 {data.long_name ?? "No metadata cached yet"}
               </p>
               <p className="text-muted text-[10px]">
-                {data.exchange ?? "—"} · {data.currency ?? "—"}
+                {data.primary_exchange ?? data.exchange ?? "—"} · {data.currency ?? "—"}
               </p>
               <div className="grid grid-cols-3 gap-x-2 mt-1.5 pt-1.5 border-t border-hairline">
                 <div>
@@ -123,7 +131,13 @@ export function InstrumentHover({
         </div>
       )}
 
-      {sheetOpen && <InstrumentSheet symbol={symbol} onClose={() => setSheetOpen(false)} />}
+      {sheetOpen && (
+        <InstrumentSheet
+          symbol={symbol}
+          onClose={closeSheet}
+          returnFocusRef={triggerRef}
+        />
+      )}
     </span>
   );
 }

@@ -17,6 +17,16 @@ from fastapi.testclient import TestClient
 
 from quantmind.api.app import create_app
 from quantmind.datastore.store import BarMeta, BarStore
+from quantmind.fx import EcbFxProvider, sync_ecb_fx
+
+
+def _write_metadata(store: BarStore, symbol: str, fields: dict) -> None:
+    payload = dict(fields)
+    if "con_id" not in payload:
+        con_id = store.read_symbol_map().get(symbol)
+        if con_id is not None:
+            payload["con_id"] = con_id
+    store.write_instrument_metadata(symbol, payload)
 
 
 def _bars(n=300, seed=1):
@@ -40,7 +50,7 @@ def client(tmp_path):
     store.write_bars(con_id=2, bar_size="1d", bars=spy_bars.copy(), meta=meta)
     store.write_symbol_map({"SPY": 1, "QQQ": 2})
     for symbol in ("SPY", "QQQ"):
-        store.write_instrument_metadata(symbol, {"currency": "USD", "exchange": "SMART"})
+        _write_metadata(store, symbol, {"currency": "USD", "exchange": "SMART"})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     return TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 
@@ -69,6 +79,107 @@ def test_whatif_two_symbol_book_beta_is_near_one(client):
     assert weights["SPY"]["weight"] == pytest.approx(0.6)
     assert weights["QQQ"]["weight"] == pytest.approx(0.4)
     assert body["as_of"] and body["as_of"].endswith("Z")
+
+
+def test_whatif_weights_use_the_reported_common_as_of_mark(tmp_path):
+    store = BarStore(tmp_path)
+    spy_bars = _bars(seed=9)
+    qqq_bars = spy_bars.iloc[:-1].copy()
+    # A newer SPY-only observation must not leak into weights for a result
+    # whose reported as-of is the prior common trading date.
+    spy_bars.loc[spy_bars.index[-1], "close"] *= 10
+    for column in ("open", "high", "low"):
+        spy_bars.loc[spy_bars.index[-1], column] = spy_bars.loc[
+            spy_bars.index[-1], "close"
+        ]
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(1, "1d", spy_bars, meta)
+    store.write_bars(2, "1d", qqq_bars, meta)
+    store.write_symbol_map({"SPY": 1, "QQQ": 2})
+    for symbol in ("SPY", "QQQ"):
+        _write_metadata(store, symbol, {"currency": "USD"})
+    app = create_app(store=store, benchmark="SPY", api_token="testtoken")
+    c = TestClient(
+        app,
+        base_url="http://127.0.0.1",
+        headers={"Authorization": "Bearer testtoken"},
+    )
+
+    response = c.post(
+        "/api/whatif",
+        json=_payload(
+            positions=[
+                {"symbol": "SPY", "qty": 1},
+                {"symbol": "QQQ", "qty": 1},
+            ]
+        ),
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    weights = {row["symbol"]: row for row in body["weights"]}
+    expected_as_of = qqq_bars.index[-1]
+    assert body["as_of"] == f"{expected_as_of.isoformat()}Z"
+    assert weights["SPY"]["price"] == pytest.approx(
+        float(spy_bars.loc[expected_as_of, "close"])
+    )
+    assert weights["QQQ"]["price"] == pytest.approx(
+        float(qqq_bars.loc[expected_as_of, "close"])
+    )
+    assert weights["SPY"]["weight"] == pytest.approx(0.5)
+    assert weights["QQQ"]["weight"] == pytest.approx(0.5)
+
+
+def test_whatif_uses_dated_base_currency_prices_for_european_book(tmp_path):
+    store = BarStore(tmp_path)
+    bars = _bars(seed=1)
+    meta = BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24")
+    store.write_bars(1, "1d", bars, meta)
+    store.write_bars(2, "1d", bars.copy(), meta)
+    store.write_symbol_map({"SPY": 1, "IWDA": 2})
+    _write_metadata(store, "SPY", {"currency": "USD", "exchange": "ARCA"})
+    _write_metadata(store, "IWDA", {"currency": "EUR", "exchange": "AEB"})
+    rows = ["CURRENCY,TIME_PERIOD,OBS_VALUE"]
+    for timestamp in bars.index:
+        day = timestamp.date().isoformat()
+        rows.extend([f"USD,{day},1.1000", f"GBP,{day},0.8800"])
+    sync_ecb_fx(
+        store,
+        EcbFxProvider(fetcher=lambda _url: "\n".join(rows)),
+        {"USD", "EUR", "GBP"},
+        today=bars.index[-1].date(),
+        years=5,
+        fetched_at="2026-07-24T17:00:00Z",
+    )
+    app = create_app(
+        store=store,
+        benchmark="SPY",
+        api_token="testtoken",
+        base_currency="GBP",
+    )
+    c = TestClient(
+        app,
+        base_url="http://127.0.0.1",
+        headers={"Authorization": "Bearer testtoken"},
+    )
+
+    response = c.post(
+        "/api/whatif",
+        json={
+            "positions": [{"symbol": "IWDA", "qty": 1}, {"symbol": "SPY", "qty": 1}],
+            "years": 1,
+            "mc": {"horizon": 5, "n_paths": 100, "seed": 1},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["fx"]["base_currency"] == "GBP"
+    weights = {item["symbol"]: item for item in body["weights"]}
+    # EUR local 100 -> GBP 88; USD local 100 -> GBP 80.
+    assert weights["IWDA"]["price"] / weights["SPY"]["price"] == pytest.approx(1.1)
+    assert weights["IWDA"]["weight"] == pytest.approx(88 / 168)
+    assert body["beta"] == pytest.approx(1.0, abs=1e-6)
 
 
 def test_whatif_unknown_symbol_is_422_naming_it(client):
@@ -169,6 +280,8 @@ def test_whatif_nonfinite_last_close_is_422_naming_the_symbol(tmp_path):
     bad_bars.loc[bad_bars.index[-1], "close"] = np.nan
     store.write_bars(con_id=2, bar_size="1d", bars=bad_bars, meta=meta)
     store.write_symbol_map({"SPY": 1, "QQQ": 2})
+    _write_metadata(store, "SPY", {"currency": "USD"})
+    _write_metadata(store, "QQQ", {"currency": "USD"})
     app = create_app(store=store, benchmark="SPY", api_token="testtoken")
     c = TestClient(app, base_url="http://127.0.0.1", headers={"Authorization": "Bearer testtoken"})
 

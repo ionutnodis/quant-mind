@@ -55,6 +55,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/book/{snapshot_id}/rebase": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rebase Book
+         * @description Mint an immutable reporting-currency successor without rewriting history.
+         */
+        post: operations["rebase_book_api_book__snapshot_id__rebase_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/brief": {
         parameters: {
             query?: never;
@@ -481,14 +501,24 @@ export interface components {
         AccountOut: {
             /** Buying Power */
             buying_power: number | null;
+            /** Buying Power Base */
+            buying_power_base: number | null;
             /** Currency */
             currency: string;
             /** Gross Position Value */
             gross_position_value: number | null;
+            /** Gross Position Value Base */
+            gross_position_value_base: number | null;
             /** Net Liquidation */
             net_liquidation: number | null;
+            /** Net Liquidation Base */
+            net_liquidation_base: number | null;
+            /** Source Currency */
+            source_currency: string;
             /** Total Cash Value */
             total_cash_value: number | null;
+            /** Total Cash Value Base */
+            total_cash_value_base: number | null;
         };
         /** ApiReadiness */
         ApiReadiness: {
@@ -582,6 +612,14 @@ export interface components {
             /** Date */
             date: string;
         };
+        /**
+         * BookConflictOut
+         * @description Stable response body for immutable-book identity conflicts.
+         */
+        BookConflictOut: {
+            /** Detail */
+            detail: string;
+        };
         /** BookGreeksRequest */
         BookGreeksRequest: {
             /** Betas */
@@ -597,6 +635,9 @@ export interface components {
         BookGreeksResponse: {
             /** As Of */
             as_of: string | null;
+            /** Base Currency */
+            base_currency: string;
+            fx: components["schemas"]["FxEvidenceOut"];
             /** Risk Free Rate Note */
             risk_free_rate_note: string;
             stress_grid: components["schemas"]["StressGridOut"];
@@ -644,7 +685,7 @@ export interface components {
             /** Option Positions */
             option_positions: number;
             /** Reason */
-            reason: ("empty_book" | "stale_snapshot" | "invalid_timestamp" | "legacy_scope" | "account_mismatch" | "mode_mismatch" | "unsupported_currency" | "unsupported_security_type") | null;
+            reason: ("empty_book" | "stale_snapshot" | "invalid_timestamp" | "legacy_scope" | "base_currency_mismatch" | "instrument_identity_mismatch" | "cross_currency_option" | "account_mismatch" | "mode_mismatch" | "unsupported_currency" | "unsupported_security_type") | null;
             /** Snapshot Count */
             snapshot_count: number;
             /** Source */
@@ -671,6 +712,8 @@ export interface components {
             broker_mode?: ("paper" | "live" | "custom") | null;
             /** Positions */
             positions: components["schemas"]["BookPositionOut"][];
+            /** Rebased From */
+            rebased_from?: string | null;
             /** Snapshot Id */
             snapshot_id: string;
             /**
@@ -826,6 +869,11 @@ export interface components {
             valuation_ts: string;
         };
         /**
+         * DistributionPolicy
+         * @enum {string}
+         */
+        DistributionPolicy: "ACCUMULATING" | "DISTRIBUTING" | "UNKNOWN";
+        /**
          * ExpiryBucketsOut
          * @description Requirement 5: option legs bucketed by days-to-expiry. Only legs that
          *     resolved to a priceable BookLeg (matching cached-chain IV) are bucketed —
@@ -930,6 +978,47 @@ export interface components {
                 [key: string]: number;
             };
         };
+        /** FxDataReadiness */
+        FxDataReadiness: {
+            /** As Of */
+            as_of: string | null;
+            /** Base Currency */
+            base_currency: string;
+            /** Missing Currencies */
+            missing_currencies: string[];
+            /** Provider */
+            provider: string | null;
+            /** Required Currencies */
+            required_currencies: string[];
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "not_required" | "missing" | "stale" | "ready";
+        };
+        /**
+         * FxEvidenceOut
+         * @description Shared public evidence shape for every base-currency analysis.
+         */
+        FxEvidenceOut: {
+            /** As Of */
+            as_of: string | null;
+            /** Base Currency */
+            base_currency: string;
+            /** Fetched At */
+            fetched_at: string | null;
+            /** Missing Currencies */
+            missing_currencies: string[];
+            /** Note */
+            note: string;
+            /** Source */
+            source: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "identity" | "converted" | "incomplete";
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -958,6 +1047,13 @@ export interface components {
             /** Unusable */
             unusable: boolean;
         };
+        /** HedgeCandidateSkipOut */
+        HedgeCandidateSkipOut: {
+            /** Reason */
+            reason: string;
+            /** Symbol */
+            symbol: string;
+        };
         /** HedgeRequest */
         HedgeRequest: {
             /** Book */
@@ -985,11 +1081,23 @@ export interface components {
             book_value: number | null;
             /** Candidates */
             candidates: components["schemas"]["HedgeCandidateOut"][];
+            /** Comparison As Of */
+            comparison_as_of?: string | null;
+            /** Comparison Book Beta */
+            comparison_book_beta?: number | null;
+            /**
+             * Comparison N Obs
+             * @default 0
+             */
+            comparison_n_obs: number;
             /** Es Before */
             es_before: number | null;
+            fx: components["schemas"]["FxEvidenceOut"];
             /** N Candidates Evaluated */
             n_candidates_evaluated: number;
             objective: components["schemas"]["Objective"];
+            /** Skipped Candidates */
+            skipped_candidates: components["schemas"]["HedgeCandidateSkipOut"][];
         };
         /** Histogram */
         Histogram: {
@@ -1018,8 +1126,14 @@ export interface components {
             high_52w: number | null;
             /** Industry */
             industry: string | null;
+            /** Isin */
+            isin: string | null;
+            /** Issuer Id */
+            issuer_id: string | null;
             /** Last Close */
             last_close: number | null;
+            /** Local Symbol */
+            local_symbol: string | null;
             /** Long Name */
             long_name: string | null;
             /** Low 52W */
@@ -1028,14 +1142,51 @@ export interface components {
             pct_from_52w_high: number | null;
             /** Pct From 52W Low */
             pct_from_52w_low: number | null;
+            /** Primary Exchange */
+            primary_exchange: string | null;
             /** Provider */
             provider: string | null;
             /** Region */
             region: string | null;
+            risk: components["schemas"]["InstrumentRiskReadiness"];
+            /** Risk Base Currency */
+            risk_base_currency: string;
+            /** Risk Fx As Of */
+            risk_fx_as_of: string | null;
+            /** Risk Fx Source */
+            risk_fx_source: string | null;
             /** Sec Type */
             sec_type: string | null;
+            /** Stock Type */
+            stock_type: string | null;
             /** Symbol */
             symbol: string;
+            /** Trading Class */
+            trading_class: string | null;
+            ucits_profile: components["schemas"]["UcitsEtfProfileV1"] | null;
+            ucits_profile_last_successful_provenance: components["schemas"]["MetadataProvenanceV1"] | null;
+            /** Ucits Profile Reason */
+            ucits_profile_reason: string | null;
+            ucits_profile_status: components["schemas"]["ProfileFreshness"] | null;
+            /** Valid Exchanges */
+            valid_exchanges: string[];
+        };
+        /** InstrumentRiskReadiness */
+        InstrumentRiskReadiness: {
+            /** Base Currency */
+            base_currency: string;
+            /** Benchmark */
+            benchmark: string;
+            fx: components["schemas"]["FxEvidenceOut"];
+            /** Note */
+            note: string;
+            /** Reason */
+            reason: ("fx_unavailable" | "missing_benchmark" | "insufficient_history") | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ready" | "partial" | "unavailable";
         };
         /** LabApplyRequest */
         LabApplyRequest: {
@@ -1105,6 +1256,7 @@ export interface components {
             diversification_ratio: number | null;
             /** Drawdown Budget */
             drawdown_budget: number;
+            fx: components["schemas"]["FxEvidenceOut"];
             /** Gross */
             gross: number | null;
             /** Leverage Headroom */
@@ -1163,6 +1315,8 @@ export interface components {
             corrupt_symbols: string[];
             /** Missing Symbols */
             missing_symbols: string[];
+            /** Portfolio Discovery Error */
+            portfolio_discovery_error?: "live_portfolio_unavailable" | null;
             /** Ready Symbols */
             ready_symbols: number;
             /** Series */
@@ -1176,6 +1330,21 @@ export interface components {
             status: "empty" | "incomplete" | "stale" | "ready";
             /** Symbols */
             symbols: number;
+        };
+        /** MetadataProvenanceV1 */
+        MetadataProvenanceV1: {
+            /**
+             * Fetched At Utc
+             * Format: date-time
+             */
+            fetched_at_utc: string;
+            /**
+             * Source
+             * @constant
+             */
+            source: "justetf";
+            /** Source Url */
+            source_url: string;
         };
         /** MonteCarloOut */
         MonteCarloOut: {
@@ -1225,6 +1394,7 @@ export interface components {
         MonteCarloResponse: {
             /** Es 975 */
             es_975: number | null;
+            fx: components["schemas"]["FxEvidenceOut"];
             histogram: components["schemas"]["Histogram"];
             /** Horizon */
             horizon: number;
@@ -1289,14 +1459,20 @@ export interface components {
             ask: number | null;
             /** Bid */
             bid: number | null;
+            /** Con Id */
+            con_id: number | null;
             /** Delta */
             delta: number | null;
             /** Expiry */
             expiry: string;
             /** Iv */
             iv: number | null;
+            /** Market Data Type */
+            market_data_type: number | null;
             /** Multiplier */
             multiplier: number;
+            /** Observed At */
+            observed_at: string | null;
             /** Right */
             right: string;
             /** Strike */
@@ -1384,6 +1560,9 @@ export interface components {
             expiry_buckets: components["schemas"]["ExpiryBucketsOut"];
             /** Exposure */
             exposure: components["schemas"]["UnderlyingExposureOut"][];
+            fx: components["schemas"]["FxEvidenceOut"];
+            /** Market Data As Of */
+            market_data_as_of: string | null;
             options_sleeve: components["schemas"]["OptionsSleeveOut"];
             /** Positions */
             positions: components["schemas"]["PositionOut"][];
@@ -1422,23 +1601,46 @@ export interface components {
             avg_cost?: number | null;
             /** Con Id */
             con_id: number;
+            /** Currency */
+            currency: string | null;
+            /** Exchange */
+            exchange: string | null;
+            /** Expiry */
+            expiry: string | null;
+            /** Fx Rate To Base */
+            fx_rate_to_base: number | null;
             /** Last Close */
             last_close: number | null;
+            /** Local Market Value */
+            local_market_value: number | null;
+            /** Mark As Of */
+            mark_as_of: string | null;
             /** Market Value */
             market_value: number | null;
             /** Multiplier */
             multiplier: number;
             /** Qty */
             qty: number;
+            /** Right */
+            right: ("C" | "P") | null;
             /** Sec Type */
             sec_type: string;
+            /** Strike */
+            strike: number | null;
             /** Symbol */
             symbol: string;
             /** Unrealized Pnl */
             unrealized_pnl?: number | null;
+            /** Unrealized Pnl Local */
+            unrealized_pnl_local?: number | null;
             /** Weight */
             weight: number | null;
         };
+        /**
+         * ProfileFreshness
+         * @enum {string}
+         */
+        ProfileFreshness: "FRESH" | "STALE" | "MISSING";
         /** R2Step */
         R2Step: {
             /** Factor Added */
@@ -1472,6 +1674,7 @@ export interface components {
             /** Factors */
             factors: string[];
             fit_line: components["schemas"]["FitLine"];
+            fx: components["schemas"]["FxEvidenceOut"];
             /** Hac Lags */
             hac_lags: number;
             /** Horizon Note */
@@ -1528,6 +1731,7 @@ export interface components {
             drag_note: string;
             /** Es 975 */
             es_975: number | null;
+            fx: components["schemas"]["FxEvidenceOut"];
             /** Mean Arith Annual */
             mean_arith_annual: number | null;
             /** N Obs */
@@ -1617,19 +1821,21 @@ export interface components {
             api: components["schemas"]["ApiReadiness"];
             book: components["schemas"]["BookReadiness"];
             broker: components["schemas"]["BrokerReadiness"];
+            fx_data: components["schemas"]["FxDataReadiness"];
             macro_data: components["schemas"]["MacroDataReadiness"];
             market_data: components["schemas"]["MarketDataReadiness"];
             /**
              * Next Action
              * @enum {string}
              */
-            next_action: "configure_account" | "start_gateway" | "wait_for_gateway" | "sync_market_data" | "sync_option_data" | "pin_book" | "resolve_currency" | "resolve_instruments" | "ready";
+            next_action: "configure_account" | "start_gateway" | "wait_for_gateway" | "sync_market_data" | "sync_option_data" | "sync_fx_data" | "pin_book" | "resolve_currency" | "resolve_instruments" | "resolve_option_currency" | "ready";
             options_data: components["schemas"]["OptionsDataReadiness"];
             /**
              * Overall
              * @enum {string}
              */
             overall: "needs_attention" | "ready";
+            ucits_data: components["schemas"]["UcitsDataReadiness"];
         };
         /** ShareRow */
         ShareRow: {
@@ -1751,6 +1957,46 @@ export interface components {
              */
             valuation_status: "empty" | "partial" | "complete";
         };
+        /** UcitsDataReadiness */
+        UcitsDataReadiness: {
+            /** Missing Symbols */
+            missing_symbols: string[];
+            /** Ready Profiles */
+            ready_profiles: number;
+            /** Stale Symbols */
+            stale_symbols: string[];
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "not_required" | "incomplete" | "stale" | "ready";
+            /** Total Etfs */
+            total_etfs: number;
+        };
+        /** UcitsEtfProfileV1 */
+        UcitsEtfProfileV1: {
+            /** Benchmark Name */
+            benchmark_name: string | null;
+            distribution_policy: components["schemas"]["DistributionPolicy"];
+            /** Domicile */
+            domicile: string | null;
+            /** Fund Name */
+            fund_name: string | null;
+            /** Isin */
+            isin: string;
+            /** Issuer */
+            issuer: string | null;
+            provenance: components["schemas"]["MetadataProvenanceV1"];
+            /** Replication Method */
+            replication_method: string | null;
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "ucits_etf_profile_v1";
+            /** Ter Pct */
+            ter_pct: string | null;
+        };
         /**
          * UnderlyingExposureOut
          * @description Delta-adjusted exposure (Task B1 requirement 2 — "the number he
@@ -1763,8 +2009,12 @@ export interface components {
             beta: number | null;
             /** Beta Note */
             beta_note: string | null;
+            /** Currency */
+            currency?: string | null;
             /** Dollar Delta */
             dollar_delta: number | null;
+            /** Fx Rate To Base */
+            fx_rate_to_base?: number | null;
             /** Net Delta */
             net_delta: number | null;
             /** Spot */
@@ -1843,6 +2093,7 @@ export interface components {
             beta: number | null;
             /** Es 975 */
             es_975: number | null;
+            fx: components["schemas"]["FxEvidenceOut"];
             mc: components["schemas"]["MonteCarloOut"];
             /** N Obs */
             n_obs: number;
@@ -1944,6 +2195,46 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BookSnapshotOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rebase_book_api_book__snapshot_id__rebase_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                snapshot_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BookSnapshotOut"];
+                };
+            };
+            /** @description Pinned-book identity or immutable snapshot conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BookConflictOut"];
                 };
             };
             /** @description Validation Error */

@@ -8,16 +8,18 @@ without any IB object at all.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from quantmind.broker.ib_options import (
     OptionChainParams,
+    _contract_identity,
     fetch_chain_params,
     select_monthly_expiries,
     select_strikes_near_spot,
+    snapshot_held_option_quotes,
     snapshot_option_quotes,
 )
 
@@ -51,14 +53,21 @@ def test_select_strikes_near_spot_empty_when_none_in_band():
 # --- fetch_chain_params (fakes) ---
 
 
-def _fake_option_chain(exchange="SMART", trading_class="SPY", multiplier="100"):
+def _fake_option_chain(
+    exchange="SMART",
+    trading_class="SPY",
+    multiplier="100",
+    underlying_con_id=756733,
+    currency=None,
+):
     return SimpleNamespace(
         exchange=exchange,
-        underlyingConId=756733,
+        underlyingConId=underlying_con_id,
         tradingClass=trading_class,
         multiplier=multiplier,
         expirations=["20260918", "20260821"],
         strikes=[440.0, 450.0, 460.0],
+        currency=currency,
     )
 
 
@@ -88,16 +97,63 @@ async def test_fetch_chain_params_falls_back_to_first_when_no_smart():
     assert params.exchange == "CBOE"
 
 
+async def test_fetch_chain_params_preserves_currency_when_broker_provides_it():
+    """Catches dropping an available chain-currency identity field."""
+
+    ib = _FakeIbChainParams(
+        [_fake_option_chain(currency="EUR", underlying_con_id=123456)]
+    )
+
+    params = await fetch_chain_params(ib, "EXSA", 123456)
+
+    assert getattr(params, "currency", None) == "EUR"
+
+
 async def test_fetch_chain_params_raises_when_no_chains_returned():
     ib = _FakeIbChainParams([])
     with pytest.raises(LookupError):
         await fetch_chain_params(ib, "SPY", 756733)
 
 
+@pytest.mark.parametrize("returned_con_id", [None, 0, -1, 999999])
+async def test_fetch_chain_params_rejects_missing_or_conflicting_underlier_identity(
+    returned_con_id,
+):
+    ib = _FakeIbChainParams(
+        [_fake_option_chain(underlying_con_id=returned_con_id)]
+    )
+
+    with pytest.raises(LookupError, match="underlyingConId"):
+        await fetch_chain_params(ib, "SPY", 756733)
+
+
+async def test_fetch_chain_params_rejects_conflicting_identity_across_venues():
+    ib = _FakeIbChainParams(
+        [
+            _fake_option_chain(exchange="SMART", underlying_con_id=756733),
+            _fake_option_chain(exchange="CBOE", underlying_con_id=999999),
+        ]
+    )
+
+    with pytest.raises(LookupError, match="conflicting"):
+        await fetch_chain_params(ib, "SPY", 756733)
+
+
 # --- snapshot_option_quotes (fakes, pacing) ---
 
 
-def _fake_contract(symbol, expiry, strike, right, con_id, multiplier="100"):
+def _fake_contract(
+    symbol,
+    expiry,
+    strike,
+    right,
+    con_id,
+    multiplier="100",
+    *,
+    trading_class="",
+    currency="",
+    exchange="SMART",
+):
     return SimpleNamespace(
         symbol=symbol,
         lastTradeDateOrContractMonth=expiry,
@@ -105,6 +161,10 @@ def _fake_contract(symbol, expiry, strike, right, con_id, multiplier="100"):
         right=right,
         conId=con_id,
         multiplier=multiplier,
+        tradingClass=trading_class,
+        currency=currency,
+        exchange=exchange,
+        secType="OPT",
     )
 
 
@@ -112,7 +172,17 @@ def _fake_greeks(iv, delta):
     return SimpleNamespace(impliedVol=iv, delta=delta, gamma=0.01, vega=0.2, theta=-0.05, undPrice=450.0)
 
 
-def _fake_ticker(contract, bid, ask, iv=0.2, delta=0.5):
+def _fake_ticker(
+    contract,
+    bid,
+    ask,
+    iv=0.2,
+    delta=0.5,
+    *,
+    market_data_type=1,
+    observed_at=None,
+):
+    observed_at = observed_at or datetime(2026, 7, 24, 20, tzinfo=timezone.utc)
     return SimpleNamespace(
         contract=contract,
         bid=bid,
@@ -122,6 +192,12 @@ def _fake_ticker(contract, bid, ask, iv=0.2, delta=0.5):
         bidGreeks=None,
         askGreeks=None,
         impliedVolatility=iv,
+        time=observed_at,
+        marketDataType=market_data_type,
+        lastTimestamp=observed_at if market_data_type == 2 else None,
+        delayedLastTimestamp=(
+            observed_at if market_data_type in {3, 4} else None
+        ),
     )
 
 
@@ -152,7 +228,17 @@ class _FakeIbSnapshot:
         for c in contracts:
             self._next_con_id += 1
             out.append(
-                _fake_contract(c.symbol, c.lastTradeDateOrContractMonth, c.strike, c.right, self._next_con_id)
+                _fake_contract(
+                    c.symbol,
+                    c.lastTradeDateOrContractMonth,
+                    c.strike,
+                    c.right,
+                    self._next_con_id,
+                    multiplier=c.multiplier,
+                    trading_class=c.tradingClass,
+                    currency=c.currency,
+                    exchange=c.exchange,
+                )
             )
         return out
 
@@ -161,15 +247,22 @@ class _FakeIbSnapshot:
         return [_fake_ticker(c, bid=1.0, ask=1.2) for c in contracts]
 
 
-def _params(expirations=("20260918",), strikes=(440.0, 450.0)):
+def _params(
+    expirations=("20260918",),
+    strikes=(440.0, 450.0),
+    *,
+    currency=None,
+    multiplier="100",
+):
     return OptionChainParams(
         underlying_symbol="SPY",
         underlying_con_id=756733,
         trading_class="SPY",
         exchange="SMART",
-        multiplier="100",
+        multiplier=multiplier,
         expirations=expirations,
         strikes=strikes,
+        currency=currency,
     )
 
 
@@ -220,16 +313,398 @@ async def test_snapshot_option_quotes_skips_unresolvable_contracts_without_raisi
             for c in contracts[1:]:
                 self._next_con_id += 1
                 out.append(
-                    _fake_contract(c.symbol, c.lastTradeDateOrContractMonth, c.strike, c.right, self._next_con_id)
+                    _fake_contract(
+                        c.symbol,
+                        c.lastTradeDateOrContractMonth,
+                        c.strike,
+                        c.right,
+                        self._next_con_id,
+                        multiplier=c.multiplier,
+                        trading_class=c.tradingClass,
+                        currency=c.currency,
+                        exchange=c.exchange,
+                    )
                 )
             return out
 
     ib = _PartialFailIb()
-    chain = _params(expirations=("20260918",), strikes=(440.0,))
+    chain = _params(
+        expirations=("20260918",), strikes=(440.0,), currency="USD"
+    )
     quotes = await snapshot_option_quotes(
         ib, chain, expiries=chain.expirations, strikes=chain.strikes, sleep=_FakeSleeper(), pace_seconds=0.1, batch_size=50
     )
     assert len(quotes) == 1  # the 2 contracts requested (C,P) minus 1 unresolvable
+
+
+async def test_snapshot_option_quotes_rejects_qualified_wrong_symbol_substitution():
+    """Catches accepting an IB-qualified option for another underlier."""
+
+    class _WrongSymbolIb(_FakeIbSnapshot):
+        async def qualifyContractsAsync(self, *contracts):
+            self.qualify_batches.append(len(contracts))
+            requested = contracts[0]
+            return [
+                _fake_contract(
+                    "QQQ",
+                    requested.lastTradeDateOrContractMonth,
+                    requested.strike,
+                    requested.right,
+                    9001,
+                    trading_class="QQQ",
+                    currency="USD",
+                )
+            ]
+
+    ib = _WrongSymbolIb()
+    chain = _params(expirations=("20260918",), strikes=(440.0,))
+
+    quotes = await snapshot_option_quotes(
+        ib,
+        chain,
+        expiries=chain.expirations,
+        strikes=chain.strikes[:1],
+        sleep=_FakeSleeper(),
+    )
+
+    assert quotes == []
+    assert ib.ticker_batches == []
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [("tradingClass", "QQQ"), ("multiplier", "10")],
+)
+async def test_snapshot_option_quotes_rejects_qualified_chain_identity_mismatch(
+    field,
+    wrong_value,
+):
+    """Catches accepting a contract whose listed terms disagree with the chain."""
+
+    class _WrongChainIdentityIb(_FakeIbSnapshot):
+        async def qualifyContractsAsync(self, *contracts):
+            self.qualify_batches.append(len(contracts))
+            requested = contracts[0]
+            qualified = _fake_contract(
+                requested.symbol,
+                requested.lastTradeDateOrContractMonth,
+                requested.strike,
+                requested.right,
+                9001,
+                trading_class="SPY",
+                currency="USD",
+            )
+            setattr(qualified, field, wrong_value)
+            return [qualified]
+
+    ib = _WrongChainIdentityIb()
+    chain = _params(expirations=("20260918",), strikes=(440.0,))
+
+    quotes = await snapshot_option_quotes(
+        ib,
+        chain,
+        expiries=chain.expirations,
+        strikes=chain.strikes[:1],
+        sleep=_FakeSleeper(),
+    )
+
+    assert quotes == []
+    assert ib.ticker_batches == []
+
+
+async def test_snapshot_option_quotes_rejects_qualified_currency_mismatch_when_known():
+    """Catches accepting the wrong contract currency when the chain provides it."""
+
+    class _WrongCurrencyIb(_FakeIbSnapshot):
+        async def qualifyContractsAsync(self, *contracts):
+            self.qualify_batches.append(len(contracts))
+            requested = contracts[0]
+            return [
+                _fake_contract(
+                    requested.symbol,
+                    requested.lastTradeDateOrContractMonth,
+                    requested.strike,
+                    requested.right,
+                    9001,
+                    trading_class="SPY",
+                    currency="EUR",
+                )
+            ]
+
+    ib = _WrongCurrencyIb()
+    chain = _params(
+        expirations=("20260918",), strikes=(440.0,), currency="USD"
+    )
+
+    quotes = await snapshot_option_quotes(
+        ib,
+        chain,
+        expiries=chain.expirations,
+        strikes=chain.strikes[:1],
+        sleep=_FakeSleeper(),
+    )
+
+    assert quotes == []
+    assert ib.ticker_batches == []
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["secType", "tradingClass", "multiplier", "currency"],
+)
+async def test_snapshot_option_quotes_rejects_blank_required_contract_identity(
+    missing_field,
+):
+    """Catches unverifiable qualification fields being treated as exact matches."""
+
+    class _BlankIdentityIb(_FakeIbSnapshot):
+        async def qualifyContractsAsync(self, *contracts):
+            self.qualify_batches.append(len(contracts))
+            requested = contracts[0]
+            qualified = _fake_contract(
+                requested.symbol,
+                requested.lastTradeDateOrContractMonth,
+                requested.strike,
+                requested.right,
+                9001,
+                multiplier="10",
+                trading_class="SPY",
+                currency="USD",
+            )
+            setattr(qualified, missing_field, "")
+            return [qualified]
+
+    ib = _BlankIdentityIb()
+    chain = _params(
+        expirations=("20260918",),
+        strikes=(440.0,),
+        currency="USD",
+        multiplier="10",
+    )
+
+    quotes = await snapshot_option_quotes(
+        ib,
+        chain,
+        expiries=chain.expirations,
+        strikes=chain.strikes[:1],
+        sleep=_FakeSleeper(),
+    )
+
+    assert quotes == []
+    assert ib.ticker_batches == []
+
+
+async def test_snapshot_option_quotes_rejects_ticker_contract_substitution():
+    """Catches binding ticker evidence to terms other than the qualified request."""
+
+    class _TickerSubstitutionIb(_FakeIbSnapshot):
+        async def qualifyContractsAsync(self, *contracts):
+            self.qualify_batches.append(len(contracts))
+            requested = contracts[0]
+            return [
+                _fake_contract(
+                    requested.symbol,
+                    requested.lastTradeDateOrContractMonth,
+                    requested.strike,
+                    requested.right,
+                    9001,
+                    trading_class="SPY",
+                    currency="USD",
+                )
+            ]
+
+        async def reqTickersAsync(self, *contracts):
+            self.ticker_batches.append(len(contracts))
+            qualified = contracts[0]
+            substituted = _fake_contract(
+                "QQQ",
+                qualified.lastTradeDateOrContractMonth,
+                qualified.strike,
+                qualified.right,
+                qualified.conId,
+                trading_class="SPY",
+                currency="USD",
+            )
+            return [_fake_ticker(substituted, bid=1.0, ask=1.2)]
+
+    chain = _params(expirations=("20260918",), strikes=(440.0,))
+
+    quotes = await snapshot_option_quotes(
+        _TickerSubstitutionIb(),
+        chain,
+        expiries=chain.expirations,
+        strikes=chain.strikes[:1],
+        sleep=_FakeSleeper(),
+    )
+
+    assert quotes == []
+
+
+async def test_snapshot_option_quotes_rejects_ticker_security_type_substitution():
+    """Catches a stock ticker being accepted as evidence for an option."""
+
+    class _TickerSecurityTypeSubstitutionIb(_FakeIbSnapshot):
+        async def qualifyContractsAsync(self, *contracts):
+            self.qualify_batches.append(len(contracts))
+            requested = contracts[0]
+            return [
+                _fake_contract(
+                    requested.symbol,
+                    requested.lastTradeDateOrContractMonth,
+                    requested.strike,
+                    requested.right,
+                    9001,
+                    trading_class="SPY",
+                    currency="USD",
+                )
+            ]
+
+        async def reqTickersAsync(self, *contracts):
+            self.ticker_batches.append(len(contracts))
+            substituted = _fake_contract(
+                contracts[0].symbol,
+                contracts[0].lastTradeDateOrContractMonth,
+                contracts[0].strike,
+                contracts[0].right,
+                contracts[0].conId,
+                trading_class=contracts[0].tradingClass,
+                currency=contracts[0].currency,
+            )
+            substituted.secType = "STK"
+            return [_fake_ticker(substituted, bid=1.0, ask=1.2)]
+
+    chain = _params(expirations=("20260918",), strikes=(440.0,))
+
+    quotes = await snapshot_option_quotes(
+        _TickerSecurityTypeSubstitutionIb(),
+        chain,
+        expiries=chain.expirations,
+        strikes=chain.strikes[:1],
+        sleep=_FakeSleeper(),
+    )
+
+    assert quotes == []
+
+
+async def test_snapshot_option_quotes_rejects_blank_chain_trading_class():
+    """Catches two blank trading classes being treated as an exact match."""
+
+    ib = _FakeIbSnapshot()
+    chain = OptionChainParams(
+        underlying_symbol="SPY",
+        underlying_con_id=756733,
+        trading_class="",
+        exchange="SMART",
+        multiplier="100",
+        expirations=("20260918",),
+        strikes=(440.0,),
+    )
+
+    quotes = await snapshot_option_quotes(
+        ib,
+        chain,
+        expiries=chain.expirations,
+        strikes=chain.strikes,
+        sleep=_FakeSleeper(),
+    )
+
+    assert quotes == []
+    assert ib.ticker_batches == []
+
+
+async def test_snapshot_option_quotes_keeps_exact_qualified_and_ticker_identity():
+    """Catches an over-strict identity guard dropping a valid sampled contract."""
+
+    class _ExactIdentityIb(_FakeIbSnapshot):
+        async def qualifyContractsAsync(self, *contracts):
+            self.qualify_batches.append(len(contracts))
+            requested = contracts[0]
+            return [
+                _fake_contract(
+                    requested.symbol,
+                    requested.lastTradeDateOrContractMonth,
+                    requested.strike,
+                    requested.right,
+                    9001,
+                    trading_class="SPY",
+                    currency="USD",
+                )
+            ]
+
+    chain = _params(
+        expirations=("20260918",), strikes=(440.0,), currency="USD"
+    )
+
+    quotes = await snapshot_option_quotes(
+        _ExactIdentityIb(),
+        chain,
+        expiries=chain.expirations,
+        strikes=chain.strikes[:1],
+        sleep=_FakeSleeper(),
+    )
+
+    assert [(quote.underlier, quote.con_id) for quote in quotes] == [("SPY", 9001)]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("symbol", ""),
+        ("lastTradeDateOrContractMonth", "not-a-date"),
+        ("strike", "not-a-number"),
+        ("strike", True),
+        ("strike", float("nan")),
+        ("right", "X"),
+    ],
+)
+def test_contract_identity_returns_none_for_malformed_terms(field, value):
+    """Catches malformed broker terms escaping as an exception or valid identity."""
+
+    contract = _fake_contract("SPY", "20260918", 440.0, "C", 9001)
+    setattr(contract, field, value)
+
+    assert _contract_identity(contract) is None
+
+
+async def test_snapshot_option_quotes_drops_malformed_contract_without_aborting_batch():
+    """Catches one malformed qualification aborting other valid contracts."""
+
+    class _MalformedThenValidIb(_FakeIbSnapshot):
+        async def qualifyContractsAsync(self, *contracts):
+            self.qualify_batches.append(len(contracts))
+            first, second = contracts
+            return [
+                _fake_contract(
+                    first.symbol,
+                    first.lastTradeDateOrContractMonth,
+                    "not-a-number",
+                    first.right,
+                    9001,
+                    trading_class="SPY",
+                    currency="USD",
+                ),
+                _fake_contract(
+                    second.symbol,
+                    second.lastTradeDateOrContractMonth,
+                    second.strike,
+                    second.right,
+                    9002,
+                    trading_class="SPY",
+                    currency="USD",
+                ),
+            ]
+
+    chain = _params(expirations=("20260918",), strikes=(440.0,))
+
+    quotes = await snapshot_option_quotes(
+        _MalformedThenValidIb(),
+        chain,
+        expiries=chain.expirations,
+        strikes=chain.strikes,
+        sleep=_FakeSleeper(),
+    )
+
+    assert [(quote.right, quote.con_id) for quote in quotes] == [("P", 9002)]
 
 
 async def test_snapshot_option_quotes_treats_sentinel_bid_ask_as_missing():
@@ -268,3 +743,146 @@ async def test_snapshot_market_data_type_is_overridable():
         ib, chain, expiries=chain.expirations, strikes=chain.strikes, sleep=sleeper, market_data_type=1
     )
     assert ib.market_data_types == [1]
+
+
+async def test_snapshot_delayed_frozen_quote_preserves_market_time_and_type():
+    observed_at = datetime(2026, 7, 23, 20, 15, tzinfo=timezone.utc)
+
+    class _DelayedFrozenIb(_FakeIbSnapshot):
+        async def reqTickersAsync(self, *contracts):
+            self.ticker_batches.append(len(contracts))
+            return [
+                _fake_ticker(
+                    contract,
+                    bid=1.0,
+                    ask=1.2,
+                    market_data_type=4,
+                    observed_at=observed_at,
+                )
+                for contract in contracts
+            ]
+
+    chain = _params(expirations=("20260918",), strikes=(440.0,))
+    quotes = await snapshot_option_quotes(
+        _DelayedFrozenIb(),
+        chain,
+        expiries=chain.expirations,
+        strikes=chain.strikes,
+        sleep=_FakeSleeper(),
+    )
+
+    assert {quote.market_data_type for quote in quotes} == {4}
+    assert {quote.observed_at for quote in quotes} == {
+        "2026-07-23T20:15:00Z"
+    }
+
+
+async def test_snapshot_drops_delayed_frozen_quote_without_market_timestamp():
+    class _UnstampedDelayedFrozenIb(_FakeIbSnapshot):
+        async def reqTickersAsync(self, *contracts):
+            self.ticker_batches.append(len(contracts))
+            tickers = [
+                _fake_ticker(
+                    contract,
+                    bid=1.0,
+                    ask=1.2,
+                    market_data_type=4,
+                )
+                for contract in contracts
+            ]
+            for ticker in tickers:
+                ticker.delayedLastTimestamp = None
+            return tickers
+
+    chain = _params(expirations=("20260918",), strikes=(440.0,))
+
+    quotes = await snapshot_option_quotes(
+        _UnstampedDelayedFrozenIb(),
+        chain,
+        expiries=chain.expirations,
+        strikes=chain.strikes,
+        sleep=_FakeSleeper(),
+    )
+
+    assert quotes == []
+
+
+async def test_snapshot_held_option_rejects_qualified_contract_substitution():
+    class _SubstitutingIb(_FakeIbSnapshot):
+        async def qualifyContractsAsync(self, *contracts):
+            self.qualify_batches.append(len(contracts))
+            requested = contracts[0]
+            return [
+                _fake_contract(
+                    requested.symbol,
+                    requested.lastTradeDateOrContractMonth,
+                    requested.strike,
+                    requested.right,
+                    con_id=999999,
+                )
+            ]
+
+    position = SimpleNamespace(
+        con_id=123456,
+        symbol="SPY",
+        qty=1,
+        sec_type="OPT",
+        multiplier=100,
+        strike=440.0,
+        expiry="20260918",
+        right="C",
+        exchange="SMART",
+        currency="USD",
+    )
+    ib = _SubstitutingIb()
+
+    quotes = await snapshot_held_option_quotes(
+        ib,
+        [position],
+        sleep=_FakeSleeper(),
+        pace_seconds=0.1,
+    )
+
+    assert quotes == []
+    assert ib.ticker_batches == []
+
+
+async def test_snapshot_held_option_rejects_ticker_contract_substitution():
+    class _TickerSubstitutingIb(_FakeIbSnapshot):
+        async def qualifyContractsAsync(self, *contracts):
+            self.qualify_batches.append(len(contracts))
+            return list(contracts)
+
+        async def reqTickersAsync(self, *contracts):
+            self.ticker_batches.append(len(contracts))
+            requested = contracts[0]
+            substituted = _fake_contract(
+                requested.symbol,
+                requested.lastTradeDateOrContractMonth,
+                requested.strike,
+                requested.right,
+                con_id=999999,
+            )
+            return [_fake_ticker(substituted, bid=1.0, ask=1.2)]
+
+    position = SimpleNamespace(
+        con_id=123456,
+        symbol="SPY",
+        qty=1,
+        sec_type="OPT",
+        multiplier=100,
+        strike=440.0,
+        expiry="20260918",
+        right="C",
+        exchange="SMART",
+        currency="USD",
+    )
+
+    quotes = await snapshot_held_option_quotes(
+        _TickerSubstitutingIb(),
+        [position],
+        sleep=_FakeSleeper(),
+        pace_seconds=0.1,
+    )
+
+    assert quotes == []

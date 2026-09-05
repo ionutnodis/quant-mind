@@ -8,15 +8,29 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
+import numpy as np
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from quantmind.api.app import create_app
-from quantmind.api.routers.book import _account_fingerprint
+from quantmind.api.routers.book import _account_fingerprint, _pin_and_respond
 import quantmind.api.main as api_main
-from quantmind.datastore.store import BarMeta, BarStore
+from quantmind.datastore.store import (
+    BarMeta,
+    BarStore,
+    PORTFOLIO_DISCOVERY_FAILURE_SYMBOL,
+)
 from quantmind.datastore.options_store import OptionsSnapshotMeta, OptionsStore
+from quantmind.fx import EcbFxProvider, sync_ecb_fx
+from quantmind.instruments.metadata import (
+    DistributionPolicy,
+    MetadataProvenanceV1,
+    UcitsEtfProfileV1,
+)
+from quantmind.portfolio import Portfolio, Position
 
 
 class BrokerThatMustNotBeCalled:
@@ -39,14 +53,28 @@ def _bars(end: datetime) -> pd.DataFrame:
     )
 
 
-def _client(store: BarStore, broker=None) -> TestClient:
-    app = create_app(store=store, benchmark="SPY", broker=broker)
+def _client(
+    store: BarStore,
+    broker=None,
+    *,
+    base_currency: str = "USD",
+    ucits_metadata_enabled: bool = False,
+) -> TestClient:
+    app = create_app(
+        store=store,
+        benchmark="SPY",
+        broker=broker,
+        base_currency=base_currency,
+        ucits_metadata_enabled=ucits_metadata_enabled,
+    )
     return TestClient(app, base_url="http://127.0.0.1")
 
 
 def _seed_market(store: BarStore, end: datetime) -> None:
     store.write_symbol_map({"SPY": 1})
-    store.write_instrument_metadata("SPY", {"currency": "USD", "exchange": "ARCA"})
+    store.write_instrument_metadata(
+        "SPY", {"con_id": 1, "currency": "USD", "exchange": "ARCA"}
+    )
     store.write_bars(
         con_id=1,
         bar_size="1d",
@@ -60,13 +88,82 @@ def _seed_market(store: BarStore, end: datetime) -> None:
         )
 
 
+def _seed_mapped_instrument(
+    store: BarStore,
+    *,
+    symbol: str,
+    con_id: int,
+    currency: str,
+    exchange: str,
+    end: datetime,
+) -> None:
+    store.write_symbol_map({**store.read_symbol_map(), symbol: con_id})
+    store.write_instrument_metadata(
+        symbol,
+        {
+            "con_id": con_id,
+            "currency": currency,
+            "exchange": exchange,
+        },
+    )
+    store.write_bars(
+        con_id=con_id,
+        bar_size="1d",
+        bars=_bars(end),
+        meta=BarMeta(
+            bar_type="ADJUSTED_LAST", adjusted_asof=end.date().isoformat()
+        ),
+    )
+
+
+def _write_valid_book(
+    store: BarStore,
+    *,
+    valuation_ts: str,
+    positions: list[dict],
+    source: str = "manual",
+    account_fingerprint: str | None = None,
+    broker_mode: str | None = None,
+    base_currency: str = "USD",
+) -> str:
+    """Persist the same integrity-checked v2 snapshots production writes."""
+    portfolio = Portfolio(
+        positions=tuple(
+            Position(
+                con_id=int(item["con_id"]),
+                symbol=item["symbol"],
+                qty=item["qty"],
+                sec_type=item["sec_type"],
+                multiplier=item["multiplier"],
+                strike=item.get("strike"),
+                expiry=item.get("expiry"),
+                right=item.get("right"),
+                currency=item.get("currency"),
+                exchange=item.get("exchange"),
+            )
+            for item in positions
+        ),
+        as_of=valuation_ts,
+    )
+    snapshot = _pin_and_respond(
+        store,
+        portfolio,
+        valuation_ts,
+        source=source,
+        account_fingerprint=account_fingerprint,
+        broker_mode=broker_mode,
+        base_currency=base_currency,
+    )
+    return snapshot.snapshot_id
+
+
 def test_setup_status_prioritizes_starting_gateway_for_an_empty_install(tmp_path):
     response = _client(BarStore(tmp_path)).get("/api/setup/status")
 
     assert response.status_code == 200
     assert response.json() == {
         "overall": "needs_attention",
-        "api": {"status": "ready", "version": "0.4.0.0"},
+        "api": {"status": "ready", "version": "0.5.0.0"},
         "broker": {
             "status": "unavailable",
             "provider": "IBKR",
@@ -83,6 +180,7 @@ def test_setup_status_prioritizes_starting_gateway_for_an_empty_install(tmp_path
             "series": 0,
             "as_of": None,
             "age_days": None,
+            "portfolio_discovery_error": None,
         },
         "macro_data": {
             "status": "empty",
@@ -102,6 +200,21 @@ def test_setup_status_prioritizes_starting_gateway_for_an_empty_install(tmp_path
             "stale_chains": [],
             "chain_as_of": None,
             "chain_age_days": None,
+        },
+        "fx_data": {
+            "status": "not_required",
+            "base_currency": "USD",
+            "required_currencies": [],
+            "missing_currencies": [],
+            "provider": None,
+            "as_of": None,
+        },
+        "ucits_data": {
+            "status": "not_required",
+            "total_etfs": 0,
+            "ready_profiles": 0,
+            "missing_symbols": [],
+            "stale_symbols": [],
         },
         "book": {
             "status": "not_pinned",
@@ -125,6 +238,10 @@ def test_setup_status_reports_ready_after_market_sync_and_book_pin(tmp_path):
     store = BarStore(tmp_path)
     now = datetime.now(timezone.utc)
     _seed_market(store, now)
+    market_as_of = _bars(now).index[-1].date()
+    market_age_days = int(
+        np.busday_count(market_as_of.isoformat(), now.date().isoformat())
+    )
     client = _client(store, broker=BrokerThatMustNotBeCalled())
     pinned = client.post(
         "/api/book/pin",
@@ -146,8 +263,9 @@ def test_setup_status_reports_ready_after_market_sync_and_book_pin(tmp_path):
         "stale_symbols": [],
         "corrupt_symbols": [],
         "series": 4,
-        "as_of": now.date().isoformat(),
-        "age_days": 0,
+        "as_of": market_as_of.isoformat(),
+        "age_days": market_age_days,
+        "portfolio_discovery_error": None,
     }
     assert body["macro_data"]["status"] == "ready"
     assert body["macro_data"]["ready_series"] == 4
@@ -162,6 +280,95 @@ def test_setup_status_reports_ready_after_market_sync_and_book_pin(tmp_path):
     assert body["next_action"] == "ready"
 
 
+def test_setup_exposes_a_typed_portfolio_discovery_failure_without_a_fake_symbol(
+    tmp_path,
+):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    store.write_required_symbols(["SPY", PORTFOLIO_DISCOVERY_FAILURE_SYMBOL])
+    store.write_instrument_metadata(
+        "SPY", {"con_id": 1, "currency": "USD", "provider": "ibkr"}
+    )
+
+    body = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+
+    assert body["market_data"]["status"] == "incomplete"
+    assert body["market_data"]["symbols"] == 1
+    assert body["market_data"]["missing_symbols"] == []
+    assert (
+        body["market_data"]["portfolio_discovery_error"]
+        == "live_portfolio_unavailable"
+    )
+    assert PORTFOLIO_DISCOVERY_FAILURE_SYMBOL not in str(body)
+    assert body["next_action"] == "sync_market_data"
+
+
+def test_setup_requires_repin_after_configured_base_currency_changes(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    assert _client(store).post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 10}]}
+    ).status_code == 200
+
+    body = _client(
+        store, broker=BrokerThatMustNotBeCalled(), base_currency="GBP"
+    ).get("/api/setup/status").json()
+
+    assert body["book"]["status"] == "stale"
+    assert body["book"]["reason"] == "base_currency_mismatch"
+    assert body["fx_data"]["base_currency"] == "GBP"
+    assert body["next_action"] == "pin_book"
+
+
+def test_setup_requires_repin_after_a_symbol_changes_contract_identity(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    assert _client(store).post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 10}]}
+    ).status_code == 200
+    store.write_bars(
+        con_id=99,
+        bar_size="1d",
+        bars=_bars(now),
+        meta=BarMeta(
+            bar_type="ADJUSTED_LAST", adjusted_asof=now.date().isoformat()
+        ),
+    )
+    store.write_symbol_map({"SPY": 99})
+
+    body = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+
+    assert body["market_data"]["status"] == "ready"
+    assert body["book"]["status"] == "stale"
+    assert body["book"]["reason"] == "instrument_identity_mismatch"
+    assert body["next_action"] == "pin_book"
+
+
+def test_setup_requires_repin_when_a_pinned_symbol_mapping_is_removed(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    assert _client(store).post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 10}]}
+    ).status_code == 200
+    store.write_symbol_map({})
+
+    body = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+
+    assert body["book"]["status"] == "stale"
+    assert body["book"]["reason"] == "instrument_identity_mismatch"
+    assert body["next_action"] == "sync_market_data"
+
+
 def test_setup_status_requests_a_sync_when_connected_cache_is_stale(tmp_path):
     store = BarStore(tmp_path)
     _seed_market(store, datetime.now(timezone.utc) - timedelta(days=10))
@@ -174,6 +381,35 @@ def test_setup_status_requests_a_sync_when_connected_cache_is_stale(tmp_path):
     body = response.json()
     assert body["market_data"]["status"] == "stale"
     assert body["market_data"]["age_days"] >= 7
+    assert body["next_action"] == "sync_market_data"
+
+
+def test_setup_status_rejects_future_market_evidence(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    future_date = pd.bdate_range(
+        start=now.date() + timedelta(days=1), periods=1
+    )[0].date()
+    future = pd.Timestamp(future_date, tz="UTC").to_pydatetime()
+    store.write_bars(
+        con_id=1,
+        bar_size="1d",
+        bars=_bars(future),
+        meta=BarMeta(
+            bar_type="ADJUSTED_LAST",
+            adjusted_asof=future.date().isoformat(),
+        ),
+    )
+
+    body = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+
+    assert body["market_data"]["status"] == "stale"
+    assert body["market_data"]["ready_symbols"] == 0
+    assert body["market_data"]["stale_symbols"] == ["SPY"]
+    assert body["market_data"]["age_days"] is None
     assert body["next_action"] == "sync_market_data"
 
 
@@ -200,6 +436,25 @@ def test_setup_status_ignores_a_corrupted_book_snapshot(tmp_path):
     assert response.status_code == 200
     assert response.json()["book"]["status"] == "not_pinned"
     assert response.json()["next_action"] == "pin_book"
+
+
+def test_setup_reports_corrupt_instrument_metadata_without_500(tmp_path):
+    store = BarStore(tmp_path)
+    _seed_market(store, datetime.now(timezone.utc))
+    (tmp_path / "instruments.json").write_text("not json")
+
+    response = _client(store, ucits_metadata_enabled=True).get("/api/setup/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["market_data"]["status"] == "ready"
+    assert body["ucits_data"] == {
+        "status": "incomplete",
+        "total_etfs": 0,
+        "ready_profiles": 0,
+        "missing_symbols": ["INSTRUMENT_METADATA"],
+        "stale_symbols": [],
+    }
 
 
 def test_broker_mode_covers_gateway_and_tws_default_ports():
@@ -263,33 +518,35 @@ def test_setup_status_waits_while_the_broker_is_connecting(tmp_path):
 def test_setup_status_selects_the_newest_valid_snapshot(tmp_path):
     store = BarStore(tmp_path)
     _seed_market(store, datetime.now(timezone.utc))
-    books = tmp_path / "books"
-    books.mkdir()
-    for snapshot_id, valuation_ts, sec_type in [
-        ("aaaaaaaaaaaa", "2026-09-03T12:00:00Z", "STK"),
-        ("bbbbbbbbbbbb", "2026-09-04T12:00:00Z", "OPT"),
-    ]:
-        (books / f"{snapshot_id}.json").write_text(
-            json.dumps(
-                {
-                    "snapshot_id": snapshot_id,
-                    "valuation_ts": valuation_ts,
-                    "base_currency": "USD",
-                    "positions": [
-                        {
-                            "symbol": "SPY",
-                            "qty": 1,
-                            "con_id": 1,
-                            "sec_type": sec_type,
-                            "multiplier": 100 if sec_type == "OPT" else 1,
-                            "strike": 700 if sec_type == "OPT" else None,
-                            "expiry": "20261218" if sec_type == "OPT" else None,
-                            "right": "C" if sec_type == "OPT" else None,
-                        }
-                    ],
-                }
-            )
-        )
+    older_id = _write_valid_book(
+        store,
+        valuation_ts="2026-09-03T12:00:00Z",
+        positions=[
+            {
+                "symbol": "SPY",
+                "qty": 1,
+                "con_id": 1,
+                "sec_type": "STK",
+                "multiplier": 1,
+            }
+        ],
+    )
+    newest_id = _write_valid_book(
+        store,
+        valuation_ts="2026-09-04T12:00:00Z",
+        positions=[
+            {
+                "symbol": "SPY",
+                "qty": 1,
+                "con_id": 1,
+                "sec_type": "OPT",
+                "multiplier": 100,
+                "strike": 700,
+                "expiry": "20261218",
+                "right": "C",
+            }
+        ],
+    )
 
     response = _client(store, broker=BrokerThatMustNotBeCalled()).get(
         "/api/setup/status"
@@ -298,7 +555,8 @@ def test_setup_status_selects_the_newest_valid_snapshot(tmp_path):
     assert response.status_code == 200
     book = response.json()["book"]
     assert book["snapshot_count"] == 2
-    assert book["latest_snapshot_id"] == "bbbbbbbbbbbb"
+    assert older_id != newest_id
+    assert book["latest_snapshot_id"] == newest_id
     assert book["valuation_ts"] == "2026-09-04T12:00:00Z"
     assert book["option_positions"] == 1
 
@@ -347,6 +605,9 @@ def test_setup_status_requires_configured_benchmark_even_when_unmapped(tmp_path)
     now = datetime.now(timezone.utc)
     store.write_symbol_map({"QQQ": 2})
     store.write_required_symbols(["QQQ"])
+    store.write_instrument_metadata(
+        "QQQ", {"con_id": 2, "currency": "USD", "provider": "ibkr"}
+    )
     store.write_bars(
         con_id=2,
         bar_size="1d",
@@ -363,11 +624,44 @@ def test_setup_status_requires_configured_benchmark_even_when_unmapped(tmp_path)
     assert market["missing_symbols"] == ["SPY"]
 
 
+def test_setup_required_universe_needs_matching_currency_metadata(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    store.write_symbol_map({"SPY": 1})
+    store.write_required_symbols(["SPY"])
+    store.write_bars(
+        con_id=1,
+        bar_size="1d",
+        bars=_bars(now),
+        meta=BarMeta(
+            bar_type="ADJUSTED_LAST", adjusted_asof=now.date().isoformat()
+        ),
+    )
+
+    missing = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+    assert missing["market_data"]["status"] == "incomplete"
+    assert missing["market_data"]["missing_symbols"] == ["SPY"]
+
+    store.write_instrument_metadata(
+        "SPY", {"con_id": 999, "currency": "USD", "provider": "ibkr"}
+    )
+    mismatched = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+    assert mismatched["market_data"]["corrupt_symbols"] == ["SPY"]
+    assert mismatched["next_action"] == "sync_market_data"
+
+
 def test_setup_status_ignores_orphaned_symbol_map_entries_after_sync_manifest(tmp_path):
     store = BarStore(tmp_path)
     now = datetime.now(timezone.utc)
     store.write_symbol_map({"SPY": 1, "OLD_HOLDING": 99})
     store.write_required_symbols(["SPY"])
+    store.write_instrument_metadata(
+        "SPY", {"con_id": 1, "currency": "USD", "provider": "ibkr"}
+    )
     store.write_bars(
         con_id=1,
         bar_size="1d",
@@ -410,27 +704,19 @@ def test_setup_status_uses_the_oldest_required_market_watermark(tmp_path):
 def test_setup_status_requires_a_fresh_non_empty_snapshot(tmp_path):
     store = BarStore(tmp_path)
     _seed_market(store, datetime.now(timezone.utc))
-    books = tmp_path / "books"
-    books.mkdir()
-    (books / "aaaaaaaaaaaa.json").write_text(
-        json.dumps(
+    _write_valid_book(
+        store,
+        valuation_ts="2020-01-01T00:00:00Z",
+        positions=[
             {
-                "snapshot_id": "aaaaaaaaaaaa",
-                "valuation_ts": "2020-01-01T00:00:00Z",
-                "base_currency": "USD",
-                "source": "manual",
-                "positions": [
-                    {
-                        "symbol": "SPY",
-                        "qty": 1,
-                        "con_id": 1,
-                        "sec_type": "STK",
-                        "multiplier": 1,
-                        "currency": "USD",
-                    }
-                ],
+                "symbol": "SPY",
+                "qty": 1,
+                "con_id": 1,
+                "sec_type": "STK",
+                "multiplier": 1,
+                "currency": "USD",
             }
-        )
+        ],
     )
 
     response = _client(store, broker=BrokerThatMustNotBeCalled()).get(
@@ -442,33 +728,55 @@ def test_setup_status_requires_a_fresh_non_empty_snapshot(tmp_path):
     assert response.json()["next_action"] == "pin_book"
 
 
+def test_setup_status_rejects_a_future_pinned_snapshot_timestamp(tmp_path):
+    store = BarStore(tmp_path)
+    _seed_market(store, datetime.now(timezone.utc))
+    future = datetime.now(timezone.utc) + timedelta(days=1)
+    _write_valid_book(
+        store,
+        valuation_ts=future.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        positions=[
+            {
+                "symbol": "SPY",
+                "qty": 1,
+                "con_id": 1,
+                "sec_type": "STK",
+                "multiplier": 1,
+                "currency": "USD",
+            }
+        ],
+    )
+
+    body = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+
+    assert body["book"]["status"] == "stale"
+    assert body["book"]["reason"] == "invalid_timestamp"
+    assert body["book"]["age_days"] is None
+    assert body["next_action"] == "pin_book"
+
+
 def test_setup_status_rejects_a_snapshot_from_another_live_account(tmp_path):
     store = BarStore(tmp_path)
     _seed_market(store, datetime.now(timezone.utc))
-    books = tmp_path / "books"
-    books.mkdir()
     valuation_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    (books / "aaaaaaaaaaaa.json").write_text(
-        json.dumps(
+    _write_valid_book(
+        store,
+        valuation_ts=valuation_ts,
+        source="live_ibkr",
+        account_fingerprint=_account_fingerprint("U-OLD"),
+        broker_mode="paper",
+        positions=[
             {
-                "snapshot_id": "aaaaaaaaaaaa",
-                "valuation_ts": valuation_ts,
-                "base_currency": "USD",
-                "source": "live_ibkr",
-                "account_fingerprint": _account_fingerprint("U-OLD"),
-                "broker_mode": "paper",
-                "positions": [
-                    {
-                        "symbol": "SPY",
-                        "qty": 1,
-                        "con_id": 1,
-                        "sec_type": "STK",
-                        "multiplier": 1,
-                        "currency": "USD",
-                    }
-                ],
+                "symbol": "SPY",
+                "qty": 1,
+                "con_id": 1,
+                "sec_type": "STK",
+                "multiplier": 1,
+                "currency": "USD",
             }
-        )
+        ],
     )
     app = create_app(store=store, benchmark="SPY", broker=BrokerThatMustNotBeCalled())
     app.state.broker_account_id = "U-NEW"
@@ -483,28 +791,20 @@ def test_setup_status_rejects_a_snapshot_from_another_live_account(tmp_path):
 def test_setup_status_blocks_unsupported_security_types(tmp_path):
     store = BarStore(tmp_path)
     _seed_market(store, datetime.now(timezone.utc))
-    books = tmp_path / "books"
-    books.mkdir()
     valuation_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    (books / "aaaaaaaaaaaa.json").write_text(
-        json.dumps(
+    _write_valid_book(
+        store,
+        valuation_ts=valuation_ts,
+        positions=[
             {
-                "snapshot_id": "aaaaaaaaaaaa",
-                "valuation_ts": valuation_ts,
-                "base_currency": "USD",
-                "source": "manual",
-                "positions": [
-                    {
-                        "symbol": "ES",
-                        "qty": 1,
-                        "con_id": 99,
-                        "sec_type": "FUT",
-                        "multiplier": 50,
-                        "currency": "USD",
-                    }
-                ],
+                "symbol": "ES",
+                "qty": 1,
+                "con_id": 99,
+                "sec_type": "FUT",
+                "multiplier": 50,
+                "currency": "USD",
             }
-        )
+        ],
     )
 
     response = _client(store, broker=BrokerThatMustNotBeCalled()).get(
@@ -533,6 +833,26 @@ def test_setup_status_requires_each_macro_series_before_ready(tmp_path):
     assert macro["missing_series"] == ["US2Y"]
     assert macro["ready_series"] == 3
     assert response.json()["next_action"] == "sync_market_data"
+
+
+def test_setup_status_rejects_future_macro_evidence(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    future = now + timedelta(days=1)
+    store.write_series(
+        "US2Y",
+        pd.Series([1.0, 1.1], index=pd.date_range(end=future.date(), periods=2)),
+    )
+
+    body = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+
+    assert body["macro_data"]["status"] == "stale"
+    assert body["macro_data"]["ready_series"] == 3
+    assert body["macro_data"]["stale_series"] == ["US2Y"]
+    assert body["next_action"] == "sync_market_data"
 
 
 def test_setup_status_requires_the_exact_held_option_contract(tmp_path):
@@ -575,10 +895,16 @@ def test_setup_status_requires_the_exact_held_option_contract(tmp_path):
                     "iv": 0.35,
                     "delta": 0.4,
                     "multiplier": 100.0,
+                    "observed_at": now.isoformat().replace("+00:00", "Z"),
+                    "market_data_type": 1,
                 }
             ]
         ),
-        OptionsSnapshotMeta(as_of=now.date().isoformat(), spot=104.0),
+        OptionsSnapshotMeta(
+            as_of=now.isoformat().replace("+00:00", "Z"),
+            spot=104.0,
+            underlier_con_id=1,
+        ),
     )
 
     ready = client.get("/api/setup/status").json()
@@ -586,39 +912,422 @@ def test_setup_status_requires_the_exact_held_option_contract(tmp_path):
     assert ready["options_data"]["priced_positions"] == 1
     assert ready["overall"] == "ready"
 
+    OptionsStore(tmp_path).write_chain(
+        "SPY",
+        pd.DataFrame(
+            [
+                {
+                    "expiry": "20261218",
+                    "strike": 700.0,
+                    "right": "C",
+                    "con_id": 999,
+                    "bid": 2.0,
+                    "ask": 2.2,
+                    "iv": 0.35,
+                    "delta": 0.4,
+                    "multiplier": 100.0,
+                    "observed_at": now.isoformat().replace("+00:00", "Z"),
+                    "market_data_type": 1,
+                }
+            ]
+        ),
+        OptionsSnapshotMeta(
+            as_of=now.isoformat().replace("+00:00", "Z"),
+            spot=104.0,
+            underlier_con_id=99,
+        ),
+    )
 
-def test_setup_blocks_a_non_usd_book_instead_of_summing_local_prices(tmp_path):
+    remapped = client.get("/api/setup/status").json()
+    assert remapped["options_data"]["status"] == "missing"
+    assert remapped["options_data"]["chain_as_of"] is None
+    assert remapped["options_data"]["chain_age_days"] is None
+    assert remapped["next_action"] == "sync_option_data"
+
+
+def test_setup_requires_dated_fx_for_a_mixed_currency_book(tmp_path):
     store = BarStore(tmp_path)
-    _seed_market(store, datetime.now(timezone.utc))
-    books = tmp_path / "books"
-    books.mkdir()
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    _seed_mapped_instrument(
+        store,
+        symbol="ASML",
+        con_id=2,
+        currency="EUR",
+        exchange="AEB",
+        end=now,
+    )
     valuation_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    (books / "aaaaaaaaaaaa.json").write_text(
-        json.dumps(
+    _write_valid_book(
+        store,
+        valuation_ts=valuation_ts,
+        positions=[
             {
-                "snapshot_id": "aaaaaaaaaaaa",
-                "valuation_ts": valuation_ts,
-                "base_currency": "USD",
-                "source": "manual",
-                "positions": [
-                    {
-                        "symbol": "ASML",
-                        "qty": 10,
-                        "con_id": 1,
-                        "sec_type": "STK",
-                        "multiplier": 1,
-                        "currency": "EUR",
-                        "exchange": "AEB",
-                    }
-                ],
+                "symbol": "ASML",
+                "qty": 10,
+                "con_id": 2,
+                "sec_type": "STK",
+                "multiplier": 1,
+                "currency": "EUR",
+                "exchange": "AEB",
             }
-        )
+        ],
     )
 
     response = _client(store, broker=BrokerThatMustNotBeCalled()).get(
         "/api/setup/status"
     )
 
-    assert response.json()["book"]["status"] == "unsupported"
-    assert response.json()["book"]["unsupported_currencies"] == ["EUR"]
-    assert response.json()["next_action"] == "resolve_currency"
+    body = response.json()
+    assert body["book"]["status"] == "ready"
+    assert body["book"]["unsupported_currencies"] == []
+    assert body["fx_data"]["status"] == "missing"
+    assert body["fx_data"]["required_currencies"] == ["EUR"]
+    assert body["next_action"] == "sync_fx_data"
+
+    today = datetime.now(timezone.utc).date()
+    sync_ecb_fx(
+        store,
+        EcbFxProvider(
+            fetcher=lambda _url: (
+                "CURRENCY,TIME_PERIOD,OBS_VALUE\n"
+                f"USD,{today.isoformat()},1.10\n"
+            )
+        ),
+        {"USD", "EUR"},
+        today=today,
+        years=1,
+    )
+    ready = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+    assert ready["fx_data"]["status"] == "ready"
+    assert ready["overall"] == "ready"
+
+
+def test_setup_requires_fx_for_a_non_base_benchmark(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    _seed_mapped_instrument(
+        store,
+        symbol="VWRL",
+        con_id=2,
+        currency="GBP",
+        exchange="LSE",
+        end=now,
+    )
+    _write_valid_book(
+        store,
+        valuation_ts=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        positions=[
+            {
+                "symbol": "VWRL",
+                "qty": 10,
+                "con_id": 2,
+                "sec_type": "STK",
+                "multiplier": 1,
+                "currency": "GBP",
+                "exchange": "LSE",
+            }
+        ],
+        base_currency="GBP",
+    )
+
+    missing = _client(
+        store,
+        broker=BrokerThatMustNotBeCalled(),
+        base_currency="GBP",
+    ).get("/api/setup/status").json()
+
+    assert missing["fx_data"]["status"] == "missing"
+    assert missing["fx_data"]["required_currencies"] == ["USD"]
+    assert missing["fx_data"]["missing_currencies"] == ["USD"]
+    assert missing["next_action"] == "sync_fx_data"
+    assert missing["overall"] == "needs_attention"
+
+
+def test_setup_resyncs_when_benchmark_currency_metadata_is_missing(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    _seed_mapped_instrument(
+        store,
+        symbol="VWRL",
+        con_id=2,
+        currency="GBP",
+        exchange="LSE",
+        end=now,
+    )
+    store.replace_instrument_metadata({})
+    _write_valid_book(
+        store,
+        valuation_ts=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        positions=[
+            {
+                "symbol": "VWRL",
+                "qty": 10,
+                "con_id": 2,
+                "sec_type": "STK",
+                "multiplier": 1,
+                "currency": "GBP",
+                "exchange": "LSE",
+            }
+        ],
+        base_currency="GBP",
+    )
+
+    body = _client(
+        store,
+        broker=BrokerThatMustNotBeCalled(),
+        base_currency="GBP",
+    ).get("/api/setup/status").json()
+
+    assert body["market_data"]["status"] == "ready"
+    assert body["fx_data"]["status"] == "missing"
+    assert body["next_action"] == "sync_market_data"
+
+
+def test_setup_routes_to_fx_sync_when_cached_ecb_evidence_is_stale(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    _seed_mapped_instrument(
+        store,
+        symbol="ASML",
+        con_id=2,
+        currency="EUR",
+        exchange="AEB",
+        end=now,
+    )
+    _write_valid_book(
+        store,
+        valuation_ts=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        positions=[
+            {
+                "symbol": "ASML",
+                "qty": 10,
+                "con_id": 2,
+                "sec_type": "STK",
+                "multiplier": 1,
+                "currency": "EUR",
+                "exchange": "AEB",
+            }
+        ],
+    )
+    old_day = now.date() - timedelta(days=8)
+    sync_ecb_fx(
+        store,
+        EcbFxProvider(
+            fetcher=lambda _url: (
+                "CURRENCY,TIME_PERIOD,OBS_VALUE\n"
+                f"USD,{old_day.isoformat()},1.10\n"
+            )
+        ),
+        {"USD", "EUR"},
+        today=old_day,
+        years=1,
+        fetched_at=f"{old_day.isoformat()}T17:00:00Z",
+    )
+
+    body = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+
+    assert body["fx_data"] == {
+        "status": "stale",
+        "base_currency": "USD",
+        "required_currencies": ["EUR"],
+        "missing_currencies": ["EUR"],
+        "provider": "ECB",
+        "as_of": old_day.isoformat(),
+    }
+    assert body["next_action"] == "sync_fx_data"
+    assert body["overall"] == "needs_attention"
+
+
+def test_setup_blocks_cross_currency_options_before_analytics(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    _write_valid_book(
+        store,
+        valuation_ts=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        positions=[
+            {
+                "symbol": "ASML",
+                "qty": 1,
+                "con_id": 1,
+                "sec_type": "OPT",
+                "multiplier": 100,
+                "strike": 100,
+                "expiry": "20261218",
+                "right": "C",
+                "currency": "EUR",
+                "exchange": "AEB",
+            }
+        ],
+    )
+
+    body = _client(store, broker=BrokerThatMustNotBeCalled()).get(
+        "/api/setup/status"
+    ).json()
+
+    assert body["overall"] == "needs_attention"
+    assert body["book"]["status"] == "unsupported"
+    assert body["book"]["reason"] == "cross_currency_option"
+    assert body["book"]["unsupported_currencies"] == ["EUR"]
+    assert body["next_action"] == "resolve_option_currency"
+
+
+def test_setup_reports_ucits_profile_readiness_without_blocking_core_cockpit(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    store.write_instrument_metadata(
+        "IWDA",
+        {
+            "provider": "ibkr",
+            "currency": "EUR",
+            "stock_type": "ETF",
+            "isin": "IE00B4L5Y983",
+            "ucits_profile_isin": "IE00B4L5Y983",
+            "ucits_profile_status": "MISSING",
+            "ucits_profile_reason": "not synced",
+        },
+    )
+    client = _client(
+        store,
+        broker=BrokerThatMustNotBeCalled(),
+        ucits_metadata_enabled=True,
+    )
+    assert client.post(
+        "/api/book/pin", json={"positions": [{"symbol": "SPY", "qty": 1}]}
+    ).status_code == 200
+
+    missing = client.get("/api/setup/status").json()
+    assert missing["ucits_data"]["status"] == "incomplete"
+    assert missing["ucits_data"]["missing_symbols"] == ["IWDA"]
+    assert missing["overall"] == "ready"
+
+
+def test_setup_does_not_require_ucits_profiles_when_enrichment_is_disabled(tmp_path):
+    store = BarStore(tmp_path)
+    store.write_instrument_metadata(
+        "IWDA",
+        {
+            "provider": "ibkr",
+            "currency": "EUR",
+            "stock_type": "ETF",
+            "isin": "IE00B4L5Y983",
+            "ucits_profile_status": "MISSING",
+        },
+    )
+
+    ucits = _client(store).get("/api/setup/status").json()["ucits_data"]
+
+    assert ucits == {
+        "status": "not_required",
+        "total_etfs": 0,
+        "ready_profiles": 0,
+        "missing_symbols": [],
+        "stale_symbols": [],
+    }
+
+
+@pytest.mark.parametrize("corrupt_profile", [False, True])
+def test_setup_treats_a_fresh_ucits_marker_without_a_valid_profile_as_missing(
+    tmp_path, corrupt_profile
+):
+    store = BarStore(tmp_path)
+    store.write_instrument_metadata(
+        "IWDA",
+        {
+            "stock_type": "ETF",
+            "isin": "IE00B4L5Y983",
+            "ucits_profile_isin": "IE00B4L5Y983",
+            "ucits_profile_status": "FRESH",
+        },
+    )
+    if corrupt_profile:
+        profile = tmp_path / "ucits_profiles" / "IE00B4L5Y983.json"
+        profile.parent.mkdir(parents=True)
+        profile.write_text("not-json")
+
+    ucits = _client(store, ucits_metadata_enabled=True).get(
+        "/api/setup/status"
+    ).json()["ucits_data"]
+
+    assert ucits["status"] == "incomplete"
+    assert ucits["ready_profiles"] == 0
+    assert ucits["missing_symbols"] == ["IWDA"]
+
+
+def test_setup_reclassifies_an_expired_ucits_profile_as_stale(tmp_path):
+    store = BarStore(tmp_path)
+    store.write_instrument_metadata(
+        "IWDA",
+        {
+            "stock_type": "ETF",
+            "isin": "IE00B4L5Y983",
+            "ucits_profile_isin": "IE00B4L5Y983",
+            "ucits_profile_status": "FRESH",
+        },
+    )
+    store.write_ucits_profile(
+        UcitsEtfProfileV1(
+            schema_version="ucits_etf_profile_v1",
+            isin="IE00B4L5Y983",
+            fund_name="iShares Core MSCI World UCITS ETF USD (Acc)",
+            issuer="iShares",
+            domicile="Ireland",
+            ter_pct=Decimal("0.20"),
+            distribution_policy=DistributionPolicy.ACCUMULATING,
+            replication_method="Physical",
+            benchmark_name="MSCI World",
+            provenance=MetadataProvenanceV1(
+                source="justetf",
+                source_url="https://www.justetf.com/en/etf-profile.html?isin=IE00B4L5Y983",
+                fetched_at_utc=datetime.now(timezone.utc) - timedelta(days=31),
+            ),
+        )
+    )
+
+    ucits = _client(store, ucits_metadata_enabled=True).get(
+        "/api/setup/status"
+    ).json()["ucits_data"]
+
+    assert ucits["status"] == "stale"
+    assert ucits["ready_profiles"] == 0
+    assert ucits["stale_symbols"] == ["IWDA"]
+
+
+def test_setup_does_not_classify_a_us_etf_as_a_ucits_profile_gap(tmp_path):
+    store = BarStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_market(store, now)
+    store.write_instrument_metadata(
+        "SPY",
+        {
+            "provider": "ibkr",
+            "currency": "USD",
+            "stock_type": "ETF",
+            "isin": "US78462F1030",
+        },
+    )
+
+    status = _client(
+        store,
+        broker=BrokerThatMustNotBeCalled(),
+        ucits_metadata_enabled=True,
+    ).get(
+        "/api/setup/status"
+    ).json()
+
+    assert status["ucits_data"] == {
+        "status": "not_required",
+        "total_etfs": 0,
+        "ready_profiles": 0,
+        "missing_symbols": [],
+        "stale_symbols": [],
+    }

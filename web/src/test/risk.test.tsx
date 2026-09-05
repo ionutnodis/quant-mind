@@ -74,6 +74,15 @@ const RISK_SPY = {
   drag_approx: 0.016562,
   drag_note: "equity sleeve, per-symbol; drag = mean - CAGR ~= 1/2 sigma^2",
   as_of: "2026-07-24T00:00:00Z",
+  fx: {
+    status: "converted",
+    base_currency: "USD",
+    source: "ECB",
+    as_of: "2026-07-22",
+    fetched_at: "2026-07-22T17:00:00Z",
+    missing_currencies: [],
+    note: "Prices are normalized to USD with dated ECB evidence.",
+  },
 };
 
 const REGRESSION_SINGLE = {
@@ -109,6 +118,15 @@ const REGRESSION_SINGLE = {
   alpha_note: "excess-return Jensen alpha vs SPY, rf=US3M/252",
   as_of: "2026-07-24T00:00:00Z",
   horizon_note: "daily returns; alpha/attribution figures shown daily and annualized (x252); n_obs is the full 5y cache",
+  fx: {
+    status: "converted",
+    base_currency: "USD",
+    source: "ECB",
+    as_of: "2026-07-23",
+    fetched_at: "2026-07-23T17:00:00Z",
+    missing_currencies: [],
+    note: "Prices are normalized to USD with dated ECB evidence.",
+  },
 };
 
 const REGRESSION_MULTI = {
@@ -139,6 +157,16 @@ const MC_SPY = {
   p50: 0.01,
   p95: 0.12,
   es_975: 0.095,
+  n_nonfinite: 0,
+  fx: {
+    status: "converted",
+    base_currency: "USD",
+    source: "ECB",
+    as_of: "2026-07-24",
+    fetched_at: "2026-07-24T17:00:00Z",
+    missing_currencies: [],
+    note: "Prices are normalized to USD with dated ECB evidence.",
+  },
 };
 
 function mockHappyPath(regressionHandler?: (url: URL) => object) {
@@ -165,11 +193,31 @@ test("renders symbol picker, factor builder, and single-factor regression stats 
   const primary = screen.getByRole("combobox", { name: /primary factor/i }) as HTMLSelectElement;
   await waitFor(() => expect(primary.value).toBe("SPY"));
 
-  expect(screen.getByText(/symbol lens now/i)).toBeInTheDocument();
+  expect(screen.getByText(/currently analyses one symbol at a time/i)).toBeInTheDocument();
+  expect(screen.getByText(/does not use the pinned book/i)).toBeInTheDocument();
   expect(screen.getAllByText(/^1\.000$/).length).toBeGreaterThan(0); // slope / beta
   expect(screen.getAllByText(/0\.980/).length).toBeGreaterThan(0); // R^2 (single + all-factor)
   expect(screen.getByText(/98\.00%/)).toBeInTheDocument(); // variance share for SPY
   expect(screen.getByText(/2\.00%/)).toBeInTheDocument(); // idiosyncratic share
+});
+
+test("surfaces separate FX evidence for risk, regression, and Monte Carlo results", async () => {
+  mockHappyPath();
+  server.use(http.post("/api/risk/montecarlo", () => HttpResponse.json(MC_SPY)));
+  renderRisk();
+
+  expect(await screen.findByTestId("risk-fx-evidence")).toHaveTextContent(
+    "FX base USD · source ECB · as of 2026-07-22",
+  );
+  expect(await screen.findByTestId("regression-fx-evidence")).toHaveTextContent(
+    "FX base USD · source ECB · as of 2026-07-23",
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: /run monte carlo/i }));
+
+  expect(await screen.findByTestId("monte-carlo-fx-evidence")).toHaveTextContent(
+    "FX base USD · source ECB · as of 2026-07-24",
+  );
 });
 
 test("keeps Risk authoring controls in breakpoint-gated regions with neutral actions", async () => {
@@ -226,6 +274,23 @@ test("horizon risk panel shows the historical sqrt-t ES immediately, then MC-boo
   expect(await screen.findByTestId("fan-chart")).toBeInTheDocument();
   await waitFor(() => expect(screen.getByText(/12\.00%/)).toBeInTheDocument()); // p95
   expect(screen.getByText(/9\.50%/)).toBeInTheDocument(); // MC bootstrap ES
+});
+
+test("Monte Carlo reports excluded non-finite paths and the effective sample", async () => {
+  mockHappyPath();
+  server.use(
+    http.post("/api/risk/montecarlo", () =>
+      HttpResponse.json({ ...MC_SPY, n_nonfinite: 7 })
+    )
+  );
+  renderRisk();
+  await screen.findByTestId("regression-scatter");
+
+  fireEvent.click(screen.getByRole("button", { name: /run monte carlo/i }));
+
+  const warning = await screen.findByRole("status", { name: /monte carlo sample warning/i });
+  expect(warning).toHaveTextContent("7 non-finite paths were excluded");
+  expect(warning).toHaveTextContent("9,993 of 10,000 requested paths");
 });
 
 test("Monte Carlo 422 surfaces the server's detail message near the controls, not a bare status", async () => {

@@ -26,17 +26,25 @@ const NEXT_ACTION: Record<SetupStatus["next_action"], { title: string; body: str
     title: "Sync the held option contracts",
     body: "Load fresh quotes and implied volatility for every held option, including weeklies, LEAPS, and far strikes.",
   },
+  sync_fx_data: {
+    title: "Sync dated FX evidence",
+    body: "Load official ECB reference rates so European positions can be normalized into the analysis base currency without look-ahead.",
+  },
   pin_book: {
     title: "Pin the current IBKR book",
-    body: "Create an immutable portfolio reference so Risk, What-If, and Hedge Lab analyse the same positions.",
+    body: "Create an immutable portfolio reference so Portfolio, What-If, and Hedge Lab analyse the same positions.",
   },
   resolve_currency: {
-    title: "FX normalization required",
-    body: "This alpha refuses to combine local-currency prices as though they were USD. Use a USD-only book for the first acceptance pass; dated FX normalization is the next portfolio capability.",
+    title: "Resolve unknown currencies",
+    body: "One or more contracts have no trustworthy currency identity. Refresh IBKR contract metadata before combining their market values.",
   },
   resolve_instruments: {
     title: "Unsupported instruments are present",
     body: "This release analyses stocks, ETFs, and equity options only. Split futures, bonds, CFDs, cash, and other unsupported contracts out of the acceptance book before continuing.",
+  },
+  resolve_option_currency: {
+    title: "Align the option book currency",
+    body: "Cross-currency option Greeks and stress P&L are not normalized yet. Set QM_BASE_CURRENCY to the single option currency and restart, or remove/split foreign option legs before pinning a new book. A book with options in multiple currencies is unsupported in this release.",
   },
   ready: {
     title: "The workbench is ready",
@@ -80,12 +88,12 @@ function StatusCard({
   };
   return (
     <section aria-label={ariaLabel} className="border border-hairline bg-surface p-3 min-w-0">
-      <div className="text-[12px] uppercase tracking-[0.14em] text-muted md:text-[10px]">{label}</div>
-      <div className={`num mt-2 flex items-center gap-2 text-base ${presentation.tone}`}>
+      <div className="text-[12px] uppercase tracking-[0.14em] text-muted">{label}</div>
+      <div className={`num mt-2 flex items-center gap-2 text-[14px] ${presentation.tone}`}>
         <span data-testid="status-glyph" aria-hidden="true">{presentation.glyph}</span>
         <span>{statusLabel(status)}</span>
       </div>
-      <p className="mt-1 text-[13px] leading-relaxed text-muted break-words md:text-[11px]">{detail}</p>
+      <p className="mt-1 break-words text-[14px] leading-relaxed text-muted">{detail}</p>
     </section>
   );
 }
@@ -113,20 +121,30 @@ export function Setup() {
 
   if (isLoading) {
     return (
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
-        <Skeleton className="h-28" />
-        <Skeleton className="h-28" />
-        <Skeleton className="h-28" />
-        <Skeleton className="h-28" />
-        <Skeleton className="h-28" />
-        <Skeleton className="h-28" />
+      <div className="mx-auto grid w-full max-w-[1800px] grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {Array.from({ length: 8 }, (_, index) => <Skeleton key={index} className="h-28" />)}
       </div>
     );
   }
   if (error || !data) return <p className="text-down">Setup unavailable: {String(error)}</p>;
 
   const action =
-    data.next_action === "pin_book" && data.book.status === "stale"
+    data.next_action === "sync_market_data" && data.market_data.portfolio_discovery_error
+      ? {
+          title: "Retry live portfolio discovery",
+          body: "The last sync could not read the IBKR portfolio, so QuantMind preserved the previous required universe and withheld readiness. Confirm the selected account and Gateway session, then sync market data again.",
+        }
+      : data.next_action === "pin_book" && data.book.reason === "base_currency_mismatch"
+      ? {
+          title: "Re-pin the book in the analysis currency",
+          body: `The latest snapshot was pinned in a different base currency. Pin the current book again to create an immutable ${data.fx_data.base_currency} reference before analysis.`,
+        }
+      : data.next_action === "pin_book" && data.book.reason === "instrument_identity_mismatch"
+      ? {
+          title: "Re-pin the book after the instrument update",
+          body: "At least one symbol now resolves to a different contract than the pinned snapshot. Review the instrument mapping, then pin the current book again before analysis.",
+        }
+      : data.next_action === "pin_book" && data.book.status === "stale"
       ? {
           title: "Refresh the pinned book",
           body: "The latest snapshot is empty, out of date, or belongs to a different broker scope. Pin the current IBKR book before analysis.",
@@ -136,7 +154,7 @@ export function Setup() {
     .filter(Boolean)
     .join(" · ");
   const marketDetail = data.market_data.as_of
-    ? `${data.market_data.ready_symbols ?? data.market_data.symbols}/${data.market_data.symbols} symbols ready · ${data.market_data.series} macro series · weakest as of ${data.market_data.as_of}${(data.market_data.missing_symbols ?? []).length ? ` · missing ${data.market_data.missing_symbols.join(", ")}` : ""}${(data.market_data.stale_symbols ?? []).length ? ` · stale ${data.market_data.stale_symbols.join(", ")}` : ""}${(data.market_data.corrupt_symbols ?? []).length ? ` · corrupt ${data.market_data.corrupt_symbols.join(", ")}` : ""}`
+    ? `${data.market_data.ready_symbols ?? data.market_data.symbols}/${data.market_data.symbols} symbols ready · ${data.market_data.series} macro series · weakest as of ${data.market_data.as_of}${data.market_data.portfolio_discovery_error ? " · live IBKR portfolio unavailable" : ""}${(data.market_data.missing_symbols ?? []).length ? ` · missing ${data.market_data.missing_symbols.join(", ")}` : ""}${(data.market_data.stale_symbols ?? []).length ? ` · stale ${data.market_data.stale_symbols.join(", ")}` : ""}${(data.market_data.corrupt_symbols ?? []).length ? ` · corrupt ${data.market_data.corrupt_symbols.join(", ")}` : ""}`
     : "No adjusted daily bars are cached yet.";
   const bookDetail = data.book.latest_snapshot_id
     ? `${data.book.snapshot_count} snapshot${data.book.snapshot_count === 1 ? "" : "s"} · ${data.book.option_positions} option position${data.book.option_positions === 1 ? "" : "s"} · latest ${data.book.latest_snapshot_id}${(data.book.unsupported_currencies ?? []).length ? ` · unsupported currencies ${data.book.unsupported_currencies.join(", ")}` : ""}${(data.book.unsupported_security_types ?? []).length ? ` · unsupported instruments ${data.book.unsupported_security_types.join(", ")}` : ""}${data.book.reason ? ` · ${data.book.reason.replaceAll("_", " ")}` : ""}`
@@ -147,6 +165,12 @@ export function Setup() {
   const optionsDetail = data.options_data.total_positions === 0
     ? "No held option positions require chain evidence."
     : `${data.options_data.priced_positions}/${data.options_data.total_positions} held contracts priced${data.options_data.chain_as_of ? ` · weakest chain ${data.options_data.chain_as_of}` : ""}${data.options_data.missing_contracts.length ? ` · missing ${data.options_data.missing_contracts.join(", ")}` : ""}${data.options_data.stale_chains.length ? ` · stale ${data.options_data.stale_chains.join(", ")}` : ""}`;
+  const fxDetail = data.fx_data.required_currencies.length === 0
+    ? `No conversion required · analysis base ${data.fx_data.base_currency}`
+    : `${data.fx_data.required_currencies.join(", ")} → ${data.fx_data.base_currency}${data.fx_data.provider ? ` · ${data.fx_data.provider}` : ""}${data.fx_data.as_of ? ` · as of ${data.fx_data.as_of}` : ""}${data.fx_data.missing_currencies.length ? ` · missing ${data.fx_data.missing_currencies.join(", ")}` : ""}`;
+  const ucitsDetail = data.ucits_data.total_etfs === 0
+    ? "No cached ETF listings require profile enrichment."
+    : `${data.ucits_data.ready_profiles}/${data.ucits_data.total_etfs} ETF profiles ready${data.ucits_data.missing_symbols.length ? ` · missing ${data.ucits_data.missing_symbols.join(", ")}` : ""}${data.ucits_data.stale_symbols.length ? ` · stale ${data.ucits_data.stale_symbols.join(", ")}` : ""}`;
   const activeBookRef = data.overall === "ready"
     ? pinnedBook?.snapshot_id ?? data.book.latest_snapshot_id
     : null;
@@ -155,18 +179,18 @@ export function Setup() {
     : data.book.option_positions;
 
   return (
-    <div className="w-full space-y-4">
+    <div className="mx-auto w-full max-w-[1800px] space-y-4">
       <header className="flex flex-col gap-2 border-b border-hairline pb-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <div className="text-[12px] uppercase tracking-[0.18em] text-muted md:text-[10px]">First run</div>
+          <div className="text-[12px] uppercase tracking-[0.18em] text-muted">First run</div>
           <h1 className="mt-1 text-2xl font-medium">Finish local setup</h1>
-          <p className="mt-1 max-w-[68ch] text-base text-muted md:text-[12px]">
+          <p className="mt-1 max-w-[68ch] text-[15px] leading-relaxed text-muted">
             QuantMind stays read-only. These checks confirm the evidence chain before analysis.
           </p>
         </div>
         <span
           data-testid="overall-status"
-          className={`num text-[13px] md:text-[11px] ${data.overall === "ready" ? "text-up" : "text-warning"}`}
+          className={`num text-[14px] ${data.overall === "ready" ? "text-up" : "text-warning"}`}
         >
           {data.overall === "ready" ? "● READY" : "▲ ACTION REQUIRED"} · v{data.api.version}
         </span>
@@ -174,17 +198,24 @@ export function Setup() {
 
       <Panel title="Next action" note={`${data.next_action.replaceAll("_", " ")}`}>
         <h2 className="text-lg font-medium">{action.title}</h2>
-        <p className="mt-1 max-w-[70ch] text-base leading-relaxed text-muted md:text-[12px]">{action.body}</p>
-        {(["sync_market_data", "sync_option_data", "pin_book"] as string[]).includes(data.next_action) && (
-          <p className="companion-only mt-3 text-[13px] leading-relaxed text-market">
+        <p className="mt-1 max-w-[70ch] text-[15px] leading-relaxed text-muted">{action.body}</p>
+        {(["sync_market_data", "sync_option_data", "sync_fx_data", "pin_book"] as string[]).includes(data.next_action) && (
+          <p className="companion-only mt-3 text-[14px] leading-relaxed text-market">
             Open QuantMind on a screen at least 768 × 600 to run setup actions.
           </p>
         )}
-        {(data.next_action === "sync_market_data" || data.next_action === "sync_option_data") && (
-          <div className="authoring-only mt-3">
+        {(data.next_action === "sync_market_data" || data.next_action === "sync_option_data" || data.next_action === "sync_fx_data") && (
+          <div className="authoring-only mt-3 [&_button]:text-[14px] [&_[role=alert]]:text-[14px] [&_[role=status]]:text-[14px]">
             <SyncButton
-              label={data.next_action === "sync_option_data" ? "Sync option data" : "Sync market data"}
+              label={
+                data.next_action === "sync_option_data"
+                  ? "Sync option data"
+                  : data.next_action === "sync_fx_data"
+                    ? "Sync FX data"
+                    : "Sync market data"
+              }
               onCompleted={setSyncResult}
+              showResult={false}
             />
           </div>
         )}
@@ -194,26 +225,32 @@ export function Setup() {
               type="button"
               onClick={() => pinBook.mutate()}
               disabled={pinBook.isPending}
-              className="qm-target num border border-hairline px-3 py-1.5 text-[11px] text-ink hover:border-market hover:bg-elevated disabled:cursor-not-allowed disabled:opacity-50"
+              className="qm-target num border border-hairline px-3 py-1.5 text-[14px] text-ink hover:border-market hover:bg-elevated disabled:cursor-not-allowed disabled:opacity-50"
             >
               {pinBook.isPending ? "Pinning…" : "Pin current book"}
             </button>
             {pinBook.error && (
-              <span className="text-[11px] text-down">{String(pinBook.error)}</span>
+              <span role="alert" className="text-[14px] text-down">{String(pinBook.error)}</span>
             )}
           </div>
         )}
-        {syncResult && (
-          <p className={`mt-3 whitespace-pre-line text-[11px] ${syncResult.includes("SYNC_RESULT: partial") ? "text-warning" : "text-up"}`}>
-            {syncResult}
-          </p>
-        )}
+        <p
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className={`mt-3 whitespace-pre-line text-[14px] ${syncResult?.includes("SYNC_RESULT: partial") ? "text-warning" : "text-up"}`}
+        >
+          {syncResult ?? ""}
+        </p>
         {pinnedBook && (
-          <p className="num mt-3 text-[11px] text-up">Book pinned · {pinnedBook.snapshot_id}</p>
+          <p className="num mt-3 text-[14px] text-up">Book pinned · {pinnedBook.snapshot_id}</p>
         )}
       </Panel>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+      <div
+        data-testid="setup-readiness-grid"
+        className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4"
+      >
         <StatusCard
           ariaLabel="API status"
           label="Local API"
@@ -245,6 +282,18 @@ export function Setup() {
           detail={optionsDetail}
         />
         <StatusCard
+          ariaLabel="FX evidence status"
+          label="Dated FX"
+          status={data.fx_data.status}
+          detail={fxDetail}
+        />
+        <StatusCard
+          ariaLabel="European ETF sourced-profile status"
+          label="European ETF profiles"
+          status={data.ucits_data.status}
+          detail={ucitsDetail}
+        />
+        <StatusCard
           ariaLabel="Current book status"
           label="Current book"
           status={data.book.status}
@@ -255,7 +304,7 @@ export function Setup() {
       {activeBookRef && (
         <Panel title="Begin analysis" note={`book ${activeBookRef}`}>
           {activeOptionPositions > 0 && (
-            <p className="mb-3 max-w-[76ch] text-[13px] leading-relaxed text-warning md:text-[11px]">
+            <p className="mb-3 max-w-[76ch] text-[14px] leading-relaxed text-warning">
               {activeOptionPositions} option position{activeOptionPositions === 1 ? " is" : "s are"} preserved in this snapshot. Portfolio can price the cached options sleeve; What-If and Hedge Lab remain equity-only and are withheld for this book.
             </p>
           )}
@@ -269,7 +318,7 @@ export function Setup() {
               <a
                 key={path}
                 href={`${path}?book_ref=${activeBookRef}`}
-                className="qm-target num border border-hairline px-3 py-1.5 text-[13px] text-ink hover:border-muted md:text-[11px]"
+                className="qm-target num border border-hairline px-3 py-1.5 text-[14px] text-ink hover:border-muted"
               >
                 {label}
               </a>
@@ -279,14 +328,14 @@ export function Setup() {
                 type="button"
                 onClick={() => pinBook.mutate()}
                 disabled={pinBook.isPending}
-                className="authoring-only qm-target num min-w-0 items-center border border-hairline px-3 py-1.5 text-[11px] text-muted hover:border-market hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                className="authoring-only qm-target num min-w-0 items-center border border-hairline px-3 py-1.5 text-[14px] text-muted hover:border-market hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {pinBook.isPending ? "Refreshing…" : "Refresh current book"}
               </button>
             )}
           </div>
           {pinBook.error && (
-            <p className="mt-3 text-[11px] text-down">{String(pinBook.error)}</p>
+            <p role="alert" className="mt-3 text-[14px] text-down">{String(pinBook.error)}</p>
           )}
         </Panel>
       )}

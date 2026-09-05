@@ -6,6 +6,8 @@ symbols -> 422, a mapped-but-unsynced symbol degrades into `missing`.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -87,6 +89,55 @@ def test_mapped_symbol_without_bars_is_skipped_not_500(store):
     body = r.json()
     assert "UNSYNCED" not in body["symbols"]
     assert "UNSYNCED" in body["missing"]
+
+
+def test_future_dated_rotation_symbol_is_missing_not_ranked(store):
+    future = pd.bdate_range(
+        start=datetime.now(UTC).date() + timedelta(days=1), periods=1
+    )[0].date()
+    bars, meta = store.read_bars(con_id=1, bar_size="1d")
+    bars.index = pd.bdate_range(end=future, periods=len(bars))
+    store.write_bars(
+        con_id=1,
+        bar_size="1d",
+        bars=bars,
+        meta=BarMeta(
+            bar_type=meta.bar_type, adjusted_asof=future.isoformat()
+        ),
+    )
+
+    response = _client(store).post(
+        "/api/rotation",
+        json={"universe": "custom", "symbols": ["A", "B"]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["symbols"] == ["B"]
+    assert body["missing"] == ["A"]
+    assert body["as_of"] == "2026-07-24T00:00:00Z"
+
+
+def test_rotation_as_of_is_last_common_matrix_observation(store):
+    bars, meta = store.read_bars(con_id=1, bar_size="1d")
+    older_bars = bars.loc[:"2026-07-22"]
+    store.write_bars(
+        con_id=1,
+        bar_size="1d",
+        bars=older_bars,
+        meta=BarMeta(
+            bar_type=meta.bar_type,
+            adjusted_asof="2026-07-22",
+        ),
+    )
+
+    response = _client(store).post(
+        "/api/rotation",
+        json={"universe": "custom", "symbols": ["A", "B"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["as_of"] == "2026-07-22T00:00:00Z"
 
 
 def test_custom_universe_returns_clustered_matrix_and_returns(store):
@@ -329,6 +380,36 @@ def test_rotation_crisis_returns_normal_and_crisis_matrices(tmp_path):
     assert "range-restriction" in body["caveat"].lower()
 
 
+def test_rotation_crisis_as_of_is_last_common_constituent_and_benchmark_observation(tmp_path):
+    store = _crisis_store(tmp_path)
+    for con_id, end in ((1, "2026-07-17"), (2, "2026-07-22")):
+        bars, meta = store.read_bars(con_id=con_id, bar_size="1d")
+        older_bars = bars.loc[:end]
+        store.write_bars(
+            con_id=con_id,
+            bar_size="1d",
+            bars=older_bars,
+            meta=BarMeta(
+                bar_type=meta.bar_type,
+                adjusted_asof=end,
+            ),
+        )
+
+    response = _client(store).post(
+        "/api/rotation/crisis",
+        json={
+            "universe": "custom",
+            "symbols": ["A", "B"],
+            "tail": 0.2,
+            "min_tail": 10,
+            "years": 5,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["as_of"] == "2026-07-17T00:00:00Z"
+
+
 def test_rotation_crisis_min_tail_guard_is_422(tmp_path):
     client = _client(_crisis_store(tmp_path))
     r = client.post(
@@ -343,3 +424,35 @@ def test_rotation_crisis_needs_two_instruments(tmp_path):
     client = _client(_crisis_store(tmp_path))
     r = client.post("/api/rotation/crisis", json={"universe": "custom", "symbols": ["A"]})
     assert r.status_code == 422
+
+
+def test_rotation_crisis_rejects_a_future_dated_benchmark(tmp_path):
+    store = _crisis_store(tmp_path)
+    bars, meta = store.read_bars(con_id=1, bar_size="1d")
+    future = pd.bdate_range(
+        start=datetime.now(UTC).date() + timedelta(days=1), periods=1
+    )[0].date()
+    future_row = bars.iloc[[-1]].copy()
+    future_row.index = pd.DatetimeIndex([future])
+    store.write_bars(
+        con_id=1,
+        bar_size="1d",
+        bars=pd.concat([bars, future_row]),
+        meta=BarMeta(
+            bar_type=meta.bar_type, adjusted_asof=future.isoformat()
+        ),
+    )
+
+    response = _client(store).post(
+        "/api/rotation/crisis",
+        json={
+            "universe": "custom",
+            "symbols": ["A", "B"],
+            "tail": 0.2,
+            "min_tail": 10,
+            "years": 5,
+        },
+    )
+
+    assert response.status_code == 422
+    assert "benchmark" in response.json()["detail"]

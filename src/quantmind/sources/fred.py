@@ -12,7 +12,10 @@ import urllib.request
 
 import pandas as pd
 
+from quantmind.sources.http import read_bounded_text
+
 _CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+_MAX_FRED_RESPONSE_BYTES = 5 * 1024 * 1024
 
 # series id -> scale factor to $bn. H.4.1 series (WALCL, WTREGEN) are $mn;
 # RRPONTSYD (temporary OMO release) is $bn. Getting these wrong once produced a
@@ -37,7 +40,9 @@ def fetch_series(series_id: str, timeout: float = 15.0) -> pd.Series:  # pragma:
     ctx = ssl.create_default_context(cafile=certifi.where())
     url = _CSV_URL.format(series_id=series_id)
     with urllib.request.urlopen(url, timeout=timeout, context=ctx) as resp:
-        return parse_fred_csv(resp.read().decode())
+        return parse_fred_csv(
+            read_bounded_text(resp, max_bytes=_MAX_FRED_RESPONSE_BYTES)
+        )
 
 
 def net_liquidity(walcl: pd.Series, tga: pd.Series, rrp: pd.Series) -> pd.Series:

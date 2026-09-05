@@ -30,9 +30,11 @@ function compactResult(result: string | null | undefined): string | null {
 export function SyncButton({
   label = "Sync now",
   onCompleted,
+  showResult = true,
 }: {
   label?: string;
   onCompleted?: (result: string | null) => void;
+  showResult?: boolean;
 }) {
   const queryClient = useQueryClient();
   const [submitting, setSubmitting] = useState(false);
@@ -130,7 +132,10 @@ export function SyncButton({
   }
 
   return (
-    <span className="inline-flex min-w-0 flex-wrap items-center gap-2">
+    <span
+      className="inline-flex min-w-0 flex-wrap items-center gap-2"
+      aria-busy={running}
+    >
       <button
         type="button"
         data-testid="sync-now"
@@ -140,14 +145,14 @@ export function SyncButton({
       >
         {running ? "Syncing…" : label}
       </button>
-      {status?.state === "done" && result && (
-        <span className={`whitespace-pre-line text-[11px] ${partial ? "text-warning" : "text-up"}`}>{result}</span>
+      {showResult && status?.state === "done" && result && (
+        <span role="status" aria-live="polite" className={`whitespace-pre-line text-[11px] ${partial ? "text-warning" : "text-up"}`}>{result}</span>
       )}
       {status?.state === "error" && (
-        <span className="text-[11px] text-down">{status.error ?? "sync failed"}</span>
+        <span role="alert" className="text-[11px] text-down">{status.error ?? "sync failed"}</span>
       )}
       {status?.state === "cancelled" && (
-        <span className="text-[11px] text-warning">Sync cancelled</span>
+        <span role="status" aria-live="polite" className="text-[11px] text-warning">Sync cancelled</span>
       )}
     </span>
   );

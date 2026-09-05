@@ -29,13 +29,21 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
-from quantmind.api.routers._shared import PositionIn, clean, iso
+from quantmind.api.routers._shared import (
+    FxEvidenceOut,
+    PositionIn,
+    clean,
+    collect_currency_assertions,
+    iso,
+    resolve_symbol_currencies,
+)
 from quantmind.api.routers.book import (
     read_book,
     read_book_positions,
     validate_pinned_book_scope,
+    validate_pinned_instrument_identities,
 )
-from quantmind.datastore.options_store import OptionsStore
+from quantmind.datastore.options_store import OptionsStore, option_chain_freshness
 from quantmind.exposure.book_greeks import (
     BookLeg,
     aggregate_book_stress_grid,
@@ -68,11 +76,14 @@ class OptionQuoteOut(BaseModel):
     expiry: str
     strike: float
     right: str
+    con_id: int | None
     bid: float | None
     ask: float | None
     iv: float | None
     delta: float | None
     multiplier: float
+    observed_at: str | None
+    market_data_type: int | None
 
 
 class SmilePoint(BaseModel):
@@ -109,8 +120,16 @@ def _build_smile(df: pd.DataFrame) -> list[ExpirySmile]:
     for expiry, expiry_df in df.groupby("expiry"):
         points: list[SmilePoint] = []
         for strike, strike_df in expiry_df.groupby("strike"):
-            ivs = [v for v in strike_df["iv"].tolist() if v is not None and pd.notna(v)]
-            iv = float(np.mean(ivs)) if ivs else None
+            ambiguous = any(
+                len(right_df) > 1
+                for _, right_df in strike_df.groupby("right", dropna=False)
+            )
+            ivs = [
+                value
+                for value in strike_df["iv"].tolist()
+                if value is not None and pd.notna(value)
+            ]
+            iv = None if ambiguous or not ivs else float(np.mean(ivs))
             points.append(SmilePoint(strike=float(strike), iv=clean(iv)))
         points.sort(key=lambda p: p.strike)
         smiles.append(ExpirySmile(expiry=str(expiry), points=points))
@@ -126,24 +145,46 @@ def get_chain(underlier: str, request: Request) -> ChainResponse:
 
     try:
         df, meta = store.read_chain(underlier)
-    except FileNotFoundError:
+    except (FileNotFoundError, KeyError, OSError, ValueError):
         # TOCTOU-safe fallback: has_chain() and read_chain() are two
         # filesystem calls, never a crash if the file vanished between them.
         return _empty_chain_response(underlier)
 
-    as_of_date = datetime.strptime(meta.as_of, "%Y-%m-%d").date() if _looks_like_date(meta.as_of) else None
-    stale = True if as_of_date is None else (date.today() - as_of_date).days > _STALE_AFTER_DAYS
+    try:
+        mapped_con_id = request.app.state.store.read_symbol_map().get(underlier)
+    except (OSError, TypeError, ValueError):
+        return _empty_chain_response(underlier)
+    if mapped_con_id is None or meta.underlier_con_id != mapped_con_id:
+        return _empty_chain_response(underlier)
+
+    _, stale = option_chain_freshness(
+        meta.as_of,
+        date.today(),
+        stale_after_business_days=_STALE_AFTER_DAYS,
+    )
 
     quotes = [
         OptionQuoteOut(
             expiry=str(row.expiry),
             strike=float(row.strike),
             right=str(row.right),
+            con_id=(int(row.con_id) if pd.notna(row.con_id) else None),
             bid=clean(row.bid),
             ask=clean(row.ask),
             iv=clean(row.iv),
             delta=clean(row.delta),
             multiplier=float(row.multiplier),
+            observed_at=(
+                str(row.observed_at)
+                if hasattr(row, "observed_at") and pd.notna(row.observed_at)
+                else None
+            ),
+            market_data_type=(
+                int(row.market_data_type)
+                if hasattr(row, "market_data_type")
+                and pd.notna(row.market_data_type)
+                else None
+            ),
         )
         for row in df.itertuples()
     ]
@@ -157,14 +198,6 @@ def get_chain(underlier: str, request: Request) -> ChainResponse:
         smile=_build_smile(df),
         missing=False,
     )
-
-
-def _looks_like_date(s: str) -> bool:
-    try:
-        datetime.strptime(s, "%Y-%m-%d")
-        return True
-    except ValueError:
-        return False
 
 
 # --- POST /api/options/book-greeks ---
@@ -207,13 +240,32 @@ class StressGridOut(BaseModel):
 
 
 class BookGreeksResponse(BaseModel):
+    base_currency: str
+    fx: FxEvidenceOut
     underlyings: list[UnderlyingGreeksOut]
     stress_grid: StressGridOut
     risk_free_rate_note: str
     as_of: str | None
 
 
-def _spot(store, symbol_map: dict[str, int], symbol: str) -> tuple[float, pd.Timestamp]:
+def _utc_observation_timestamp(value) -> pd.Timestamp:
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        raise HTTPException(422, detail="cached market data has an invalid observation date")
+    if pd.isna(timestamp):
+        raise HTTPException(422, detail="cached market data has an invalid observation date")
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("UTC")
+    return timestamp.tz_convert("UTC")
+
+
+def _spot(
+    store,
+    symbol_map: dict[str, int],
+    symbol: str,
+    today: date,
+) -> tuple[float, pd.Timestamp]:
     if symbol not in symbol_map:
         raise HTTPException(422, detail=f"unknown symbol: {symbol!r}")
     try:
@@ -226,7 +278,18 @@ def _spot(store, symbol_map: dict[str, int], symbol: str) -> tuple[float, pd.Tim
     last = float(close.iloc[-1])
     if not np.isfinite(last):
         raise HTTPException(422, detail=f"symbol {symbol!r} has a non-finite last close")
-    return last, close.index[-1]
+    last_date = _utc_observation_timestamp(close.index[-1])
+    _, stale = option_chain_freshness(
+        last_date.isoformat(),
+        today,
+        stale_after_business_days=_STALE_AFTER_DAYS,
+    )
+    if stale:
+        raise HTTPException(
+            422,
+            detail=f"cached bars for symbol {symbol!r} are stale — run sync first",
+        )
+    return last, last_date
 
 
 def _find_quote_row(
@@ -258,10 +321,20 @@ def _leg_to_book_leg(
     options_store: OptionsStore,
     spot: float,
     as_of: date,
+    underlier_con_id: int,
     contract_con_id: int | None = None,
-) -> BookLeg:
+) -> tuple[BookLeg, pd.Timestamp | None]:
     if p.right is None:
-        return BookLeg(underlier=p.symbol, qty=p.qty, is_option=False, spot=spot, r=_RISK_FREE_RATE)
+        return (
+            BookLeg(
+                underlier=p.symbol,
+                qty=p.qty,
+                is_option=False,
+                spot=spot,
+                r=_RISK_FREE_RATE,
+            ),
+            None,
+        )
 
     if p.strike is None or p.expiry is None:
         raise HTTPException(
@@ -272,7 +345,34 @@ def _leg_to_book_leg(
         raise HTTPException(
             422, detail=f"no cached option chain for underlier {p.symbol!r} — run options_sync_cli first"
         )
-    chain_df, _ = options_store.read_chain(p.symbol)
+    try:
+        chain_df, chain_meta = options_store.read_chain(p.symbol)
+    except (FileNotFoundError, KeyError, OSError, ValueError):
+        raise HTTPException(
+            422,
+            detail=f"cached option chain for {p.symbol!r} is invalid — run options_sync_cli first",
+        )
+    if chain_meta.underlier_con_id != underlier_con_id:
+        raise HTTPException(
+            422,
+            detail=(
+                f"cached option chain underlier identity for {p.symbol!r} no longer "
+                "matches the instrument map — run options_sync_cli first"
+            ),
+        )
+    _, stale = option_chain_freshness(
+        chain_meta.as_of,
+        as_of,
+        stale_after_business_days=_STALE_AFTER_DAYS,
+    )
+    if stale:
+        raise HTTPException(
+            422,
+            detail=(
+                f"cached option chain for {p.symbol!r} is stale — "
+                "run options_sync_cli first"
+            ),
+        )
     row = _find_quote_row(
         chain_df,
         expiry=p.expiry,
@@ -288,8 +388,24 @@ def _leg_to_book_leg(
                 "chain may not cover this strike/expiry"
             ),
         )
+    if option_chain_freshness(
+        str(row.observed_at),
+        as_of,
+        stale_after_business_days=_STALE_AFTER_DAYS,
+    )[1]:
+        raise HTTPException(
+            422,
+            detail=(
+                f"cached option quote for {p.symbol!r} is stale — "
+                "run options_sync_cli first"
+            ),
+        )
     iv = row.iv
-    if iv is None or not np.isfinite(float(iv)):
+    try:
+        usable_iv = float(iv)
+    except (TypeError, ValueError):
+        usable_iv = float("nan")
+    if not np.isfinite(usable_iv) or usable_iv <= 0:
         raise HTTPException(
             422, detail=f"cached quote for {p.symbol} {p.expiry} {p.strike} {p.right} has no usable IV"
         )
@@ -308,17 +424,20 @@ def _leg_to_book_leg(
         )
     multiplier = p.multiplier if p.multiplier is not None else float(row.multiplier)
 
-    return BookLeg(
-        underlier=p.symbol,
-        qty=p.qty,
-        is_option=True,
-        spot=spot,
-        r=_RISK_FREE_RATE,
-        strike=p.strike,
-        expiry_years=expiry_years,
-        is_call=(p.right == "C"),
-        iv=float(iv),
-        multiplier=multiplier,
+    return (
+        BookLeg(
+            underlier=p.symbol,
+            qty=p.qty,
+            is_option=True,
+            spot=spot,
+            r=_RISK_FREE_RATE,
+            strike=p.strike,
+            expiry_years=expiry_years,
+            is_call=(p.right == "C"),
+            iv=usable_iv,
+            multiplier=multiplier,
+        ),
+        _utc_observation_timestamp(row.observed_at),
     )
 
 
@@ -326,6 +445,7 @@ def _leg_to_book_leg(
 def book_greeks(request: Request, req: BookGreeksRequest) -> BookGreeksResponse:
     store = request.app.state.store
     options_store = _options_store(request)
+    base_currency = request.app.state.base_currency
 
     use_persisted_contract_ids = False
     if req.positions is not None:
@@ -334,6 +454,7 @@ def book_greeks(request: Request, req: BookGreeksRequest) -> BookGreeksResponse:
         pinned = read_book(store, req.book_ref)
         validate_pinned_book_scope(request.app.state, pinned)
         positions = read_book_positions(store, req.book_ref)
+        validate_pinned_instrument_identities(store, pinned, positions)
         use_persisted_contract_ids = pinned["source"] == "live_ibkr"
 
     unsupported_security_types = sorted(
@@ -352,33 +473,65 @@ def book_greeks(request: Request, req: BookGreeksRequest) -> BookGreeksResponse:
             ),
         )
 
+    asserted_currencies = collect_currency_assertions(positions)
+    currencies = resolve_symbol_currencies(
+        store,
+        [position.symbol for position in positions],
+        asserted=asserted_currencies,
+    )
+    non_base_currencies = sorted(
+        {currency for currency in currencies.values() if currency != base_currency}
+    )
+    if non_base_currencies:
+        raise HTTPException(
+            422,
+            detail=(
+                "cross-currency book Greeks are unavailable until dollar delta, vega, "
+                "theta, and stress P&L are normalized leg-by-leg; currencies: "
+                f"{non_base_currencies}"
+            ),
+        )
+
     symbol_map = store.read_symbol_map()
     as_of = date.today()
     spots: dict[str, float] = {}
-    latest_dates: list[pd.Timestamp] = []
+    observation_dates: list[pd.Timestamp] = []
     for p in positions:
         if p.symbol not in spots:
-            spot, last_date = _spot(store, symbol_map, p.symbol)
+            spot, last_date = _spot(store, symbol_map, p.symbol, as_of)
             spots[p.symbol] = spot
-            latest_dates.append(last_date)
+            observation_dates.append(last_date)
 
-    legs = [
-        _leg_to_book_leg(
+    legs = []
+    for p in positions:
+        leg, chain_as_of = _leg_to_book_leg(
             p,
             options_store,
             spots[p.symbol],
             as_of,
+            underlier_con_id=symbol_map[p.symbol],
             contract_con_id=(
                 getattr(p, "con_id", None) if use_persisted_contract_ids else None
             ),
         )
-        for p in positions
-    ]
+        legs.append(leg)
+        if chain_as_of is not None:
+            observation_dates.append(chain_as_of)
 
     underlyings = compute_book_greeks(legs, betas=req.betas)
     grid = aggregate_book_stress_grid(legs)
 
     return BookGreeksResponse(
+        base_currency=base_currency,
+        fx=FxEvidenceOut(
+            status="identity",
+            base_currency=base_currency,
+            source=None,
+            as_of=None,
+            fetched_at=None,
+            missing_currencies=[],
+            note=f"All analytical prices are denominated in {base_currency}.",
+        ),
         underlyings=[
             UnderlyingGreeksOut(
                 underlier=u.underlier,
@@ -398,5 +551,9 @@ def book_greeks(request: Request, req: BookGreeksRequest) -> BookGreeksResponse:
             pnl=[[clean(v) for v in row] for row in grid.to_numpy().tolist()],
         ),
         risk_free_rate_note=f"r={_RISK_FREE_RATE} (rf=0 until FRED wiring, matches routers/risk.py)",
-        as_of=iso(max(latest_dates)) if latest_dates else None,
+        as_of=(
+            iso(min(observation_dates))
+            if observation_dates
+            else None
+        ),
     )

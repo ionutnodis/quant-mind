@@ -13,114 +13,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api, request } from "../lib/api";
+import type { components } from "../lib/api-types";
 import { Panel, Skeleton } from "../components/Panel";
 import { RollingBetaChart, type BetaWindowSeries } from "../components/RollingBetaChart";
 import { FanChart } from "../components/FanChart";
 import { RegressionScatter } from "../components/RegressionScatter";
 
-interface BetaPoint {
-  date: string;
-  beta: number | null;
-}
-
-interface RiskResponse {
-  symbol: string;
-  benchmark: string;
-  window: number;
-  years: number;
-  n_obs: number;
-  beta_series: BetaPoint[];
-  alpha_annualized: number | null;
-  alpha_note: string;
-  es_975: number | null;
-  ann_vol: number | null;
-  mean_arith_annual: number | null;
-  cagr: number | null;
-  drag_exact: number | null;
-  drag_approx: number | null;
-  drag_note: string;
-  as_of: string | null;
-}
-
-interface Histogram {
-  bin_edges: number[];
-  counts: number[];
-}
-
-interface MonteCarloResponse {
-  symbol: string;
-  horizon: number;
-  n_paths: number;
-  histogram: Histogram;
-  p5: number | null;
-  p50: number | null;
-  p95: number | null;
-  es_975: number | null;
-}
-
-interface ScatterPointT {
-  date: string;
-  asset: number | null;
-  factor: number | null;
-}
-
-interface FitLine {
-  factor: string;
-  slope: number | null;
-  slope_se: number | null;
-  slope_ci: [number | null, number | null];
-  intercept: number | null;
-  r_squared: number | null;
-}
-
-interface BetaEstimate {
-  factor: string;
-  beta: number | null;
-  se: number | null;
-  ci_low: number | null;
-  ci_high: number | null;
-}
-
-interface ShareRow {
-  name: string;
-  share: number | null;
-}
-
-interface AttributionRow {
-  name: string;
-  daily: number | null;
-  annualized: number | null;
-}
-
-interface R2Step {
-  factor_added: string;
-  r_squared: number | null;
-}
-
-interface RegressionResponse {
-  symbol: string;
-  factors: string[];
-  window: number | null;
-  years: number;
-  n_obs: number;
-  hac_lags: number;
-  scatter: ScatterPointT[];
-  fit_line: FitLine;
-  alpha_daily: number | null;
-  alpha_annualized: number | null;
-  alpha_se: number | null;
-  alpha_ci: [number | null, number | null];
-  alpha_tstat: number | null;
-  information_ratio: number | null;
-  alpha_note: string;
-  betas: BetaEstimate[];
-  r_squared: number | null;
-  r_squared_progression: R2Step[];
-  variance_decomposition: ShareRow[];
-  attribution: AttributionRow[];
-  as_of: string | null;
-  horizon_note: string;
-}
+type RiskResponse = components["schemas"]["RiskResponse"];
+type RegressionResponse = components["schemas"]["RegressionResponse"];
+type MonteCarloRequest = components["schemas"]["MonteCarloRequest"];
+type MonteCarloResponse = components["schemas"]["MonteCarloResponse"];
+type FxEvidence = components["schemas"]["FxEvidenceOut"];
 
 // Named rate-level series the store may have cached (quantmind.sources.fred)
 // — offered as factor candidates alongside whatever symbols are in the
@@ -149,16 +52,19 @@ function getRegression(
   return request<RegressionResponse>(`/api/risk/${encodeURIComponent(symbol)}/regression?${qs}`);
 }
 
-function postMontecarlo(body: {
-  symbol: string;
-  horizon: number;
-  n_paths: number;
-  seed?: number;
-}): Promise<MonteCarloResponse> {
+function postMontecarlo(body: MonteCarloRequest): Promise<MonteCarloResponse> {
   return request<MonteCarloResponse>("/api/risk/montecarlo", {
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+function FxEvidenceLine({ fx, testId }: { fx: FxEvidence; testId: string }) {
+  return (
+    <p data-testid={testId} className="num text-muted text-[10px]">
+      FX base {fx.base_currency} · source {fx.source ?? "identity"} · as of {fx.as_of ?? "not required"}
+    </p>
+  );
 }
 
 function pct(x: number | null | undefined): string {
@@ -312,8 +218,8 @@ export function Risk() {
           />
         </label>
         <p className="text-muted text-[11px] max-w-[46ch] text-right">
-          Symbol lens now; book lens when positions exist. Construct risk, then decompose it: systematic
-          (factors) vs idiosyncratic (everything else).
+          Risk currently analyses one symbol at a time and does not use the pinned book. Construct the
+          symbol's risk, then decompose it: systematic (factors) vs idiosyncratic (everything else).
         </p>
       </div>
 
@@ -405,6 +311,7 @@ export function Risk() {
           )}
           {regression.data && (
             <>
+              <FxEvidenceLine fx={regression.data.fx} testId="regression-fx-evidence" />
               <RegressionScatter
                 points={regression.data.scatter}
                 slope={regression.data.fit_line.slope}
@@ -612,6 +519,7 @@ export function Risk() {
         )}
         {risk60.data && (
           <>
+            <FxEvidenceLine fx={risk60.data.fx} testId="risk-fx-evidence" />
             <RollingBetaChart series={betaSeries} fullSampleBeta={fullSampleBeta} benchmark={risk60.data.benchmark} />
             <p className="text-muted text-[10px] mt-2">
               Windows: 20d / 60d / 120d (lighter = shorter, noisier) against a full-sample ({years}y) beta of{" "}
@@ -761,6 +669,20 @@ export function Risk() {
           )}
           {mc.data && (
             <>
+              <FxEvidenceLine fx={mc.data.fx} testId="monte-carlo-fx-evidence" />
+              {mc.data.n_nonfinite > 0 && (
+                <p
+                  role="status"
+                  aria-label="Monte Carlo sample warning"
+                  className="mb-3 border border-warning/40 bg-warning/5 px-3 py-2 text-[11px] text-warning"
+                >
+                  {mc.data.n_nonfinite.toLocaleString()} non-finite path
+                  {mc.data.n_nonfinite === 1 ? " was" : "s were"} excluded; results use{" "}
+                  {Math.max(0, mc.data.n_paths - mc.data.n_nonfinite).toLocaleString()} of{" "}
+                  {mc.data.n_paths.toLocaleString()} requested paths. Check cached prices for zero or
+                  degenerate observations.
+                </p>
+              )}
               <FanChart histogram={mc.data.histogram} p5={mc.data.p5} p50={mc.data.p50} p95={mc.data.p95} horizon={mc.data.horizon} />
               <div className="grid grid-cols-3 gap-x-4 gap-y-3 mt-3">
                 <div>

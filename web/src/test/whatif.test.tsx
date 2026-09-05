@@ -67,6 +67,15 @@ const WHATIF_RESPONSE = {
   benchmark: { symbol: "SPY", es_975: 0.029, ann_vol: 0.171 },
   n_obs: 250,
   as_of: "2026-07-24T00:00:00Z",
+  fx: {
+    status: "converted",
+    base_currency: "EUR",
+    source: "ECB",
+    as_of: "2026-07-23",
+    fetched_at: "2026-07-23T17:00:00Z",
+    missing_currencies: [],
+    note: "Prices are normalized to EUR with dated ECB evidence.",
+  },
 };
 
 function fillFirstRow() {
@@ -124,6 +133,18 @@ test("build book -> compute -> amber results render", async () => {
   const mc = screen.getByTestId("whatif-mc-results");
   expect(mc).toHaveClass("text-you");
   expect(within(mc).getByText("1.00%")).toBeInTheDocument();
+});
+
+test("surfaces the What-If FX base, source, and dated evidence", async () => {
+  server.use(http.post("/api/whatif", () => HttpResponse.json(WHATIF_RESPONSE)));
+  renderWhatIf();
+  fillFirstRow();
+
+  fireEvent.click(screen.getByRole("button", { name: /^compute$/i }));
+
+  expect(await screen.findByTestId("whatif-fx-evidence")).toHaveTextContent(
+    "FX base EUR · source ECB · as of 2026-07-23",
+  );
 });
 
 test("n_nonfinite warning renders when the Monte Carlo drops paths", async () => {

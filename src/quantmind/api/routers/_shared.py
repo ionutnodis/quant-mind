@@ -37,7 +37,7 @@ p.multiplier is not None else (100.0 if p.right else 1.0)`.
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import date, datetime, timezone
 from typing import Literal, Sequence, TypeVar
 
 import numpy as np
@@ -45,7 +45,44 @@ import pandas as pd
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, field_validator
 
+from quantmind.fx import FxConversionUnavailable, FxConverter
+
 T = TypeVar("T", bound=Sequence)
+
+
+class FxEvidenceOut(BaseModel):
+    """Shared public evidence shape for every base-currency analysis."""
+
+    status: Literal["identity", "converted", "incomplete"]
+    base_currency: str
+    source: str | None
+    # Weakest latest FX observation actually selected by the analysis.
+    as_of: str | None
+    fetched_at: str | None
+    missing_currencies: list[str]
+    note: str
+
+
+def complete_fx_evidence(
+    converter: FxConverter,
+    *,
+    base_currency: str,
+) -> FxEvidenceOut:
+    converted = converter.source != "identity"
+    return FxEvidenceOut(
+        status="converted" if converted else "identity",
+        base_currency=base_currency,
+        source=converter.source if converted else None,
+        as_of=converter.as_of,
+        fetched_at=converter.fetched_at or None,
+        missing_currencies=[],
+        note=(
+            f"Prices are normalized to {base_currency} with dated "
+            f"{converter.source} evidence."
+            if converted
+            else f"All analytical prices are denominated in {base_currency}."
+        ),
+    )
 
 
 def clean(x: float | None) -> float | None:
@@ -78,6 +115,23 @@ def downsample(seq: T, max_points: int) -> T:
     return seq[::step]
 
 
+def latest_observation_is_future(
+    values: pd.Series | pd.DataFrame,
+    *,
+    today: date | None = None,
+) -> bool:
+    """Whether the final cached observation lies after the UTC evaluation date."""
+    if values.empty:
+        return False
+    latest = pd.Timestamp(values.index[-1])
+    if pd.isna(latest):
+        raise ValueError("invalid final observation timestamp")
+    if latest.tzinfo is not None:
+        latest = latest.tz_convert("UTC")
+    evaluation_date = today or datetime.now(timezone.utc).date()
+    return latest.date() > evaluation_date
+
+
 def read_close_series(store, con_id: int, symbol: str, years: int) -> pd.Series:
     """Cached daily close series for `con_id`, tail-clipped to `years` (0 =
     full history). Missing bars or an empty result -> a structured 422 naming
@@ -91,7 +145,180 @@ def read_close_series(store, con_id: int, symbol: str, years: int) -> pd.Series:
         series = series.iloc[-(years * 252):]
     if series.empty:
         raise HTTPException(422, detail=f"symbol {symbol!r} has no cached history")
+    try:
+        future_dated = latest_observation_is_future(series)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            422,
+            detail=f"symbol {symbol!r} has an invalid cached observation date",
+        )
+    if future_dated:
+        raise HTTPException(
+            422,
+            detail=f"symbol {symbol!r} has future-dated cached bars; run sync",
+        )
     return series
+
+
+def resolve_symbol_currencies(
+    store,
+    symbols: Sequence[str],
+    *,
+    asserted: dict[str, str | None] | None = None,
+) -> dict[str, str]:
+    """Resolve authoritative quote currencies for analytical inputs.
+
+    A posted currency is a consistency assertion, not a way to override the
+    instrument master.  Pinned broker books may carry the only known value,
+    so an assertion is accepted when cached metadata is absent.
+    """
+
+    asserted = asserted or {}
+    metadata = read_instrument_metadata_map(store)
+    try:
+        symbol_map = store.read_symbol_map()
+    except (OSError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            422,
+            detail="symbol map is corrupt; run sync to rebuild it",
+        ) from exc
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+    for symbol in dict.fromkeys(symbols):
+        master_fields = mapped_instrument_metadata(metadata, symbol_map, symbol)
+        master_value = master_fields.get("currency")
+        master = str(master_value).strip().upper() if master_value else None
+        asserted_value = asserted.get(symbol)
+        claim = str(asserted_value).strip().upper() if asserted_value else None
+        if master is not None and claim is not None and master != claim:
+            raise HTTPException(
+                422,
+                detail=(
+                    f"currency assertion for {symbol!r} ({claim}) conflicts with "
+                    f"instrument metadata ({master})"
+                ),
+            )
+        currency = master or claim
+        if currency is None:
+            missing.append(symbol)
+        else:
+            resolved[symbol] = currency
+    if missing:
+        raise HTTPException(
+            422,
+            detail=f"quote currency is unknown for symbols: {sorted(missing)}; sync metadata first",
+        )
+    return resolved
+
+
+def read_instrument_metadata_map(store) -> dict[str, dict]:
+    """Read the instrument master as a named analytical data dependency."""
+
+    try:
+        return store.read_all_instrument_metadata()
+    except (OSError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            422,
+            detail="instrument metadata cache is corrupt; run sync to rebuild it",
+        ) from exc
+
+
+def mapped_instrument_metadata(
+    metadata: dict[str, dict],
+    symbol_map: dict[str, int],
+    symbol: str,
+) -> dict:
+    """Return metadata only when its contract identity matches a mapped symbol.
+
+    An absent record carries no assertion and is safe for callers with an
+    explicit fallback. A present record for a mapped symbol must carry the
+    exact mapped conId before any of its fields can be consumed.
+    """
+
+    fields = metadata.get(symbol) or {}
+    if symbol not in symbol_map:
+        return {}
+    if (
+        fields
+        and fields.get("con_id") != symbol_map[symbol]
+    ):
+        raise HTTPException(
+            422,
+            detail=(
+                f"instrument metadata contract identity for {symbol!r} "
+                "does not match the current symbol map; run sync"
+            ),
+        )
+    return fields
+
+
+def collect_currency_assertions(
+    positions: Sequence[object],
+) -> dict[str, str]:
+    """Build one normalized, conflict-checked currency claim per symbol."""
+
+    asserted: dict[str, str] = {}
+    for position in positions:
+        symbol = str(getattr(position, "symbol"))
+        raw_currency = getattr(position, "currency", None)
+        if not raw_currency:
+            continue
+        currency = str(raw_currency).strip().upper()
+        previous = asserted.get(symbol)
+        if previous is not None and previous != currency:
+            raise HTTPException(
+                422,
+                detail=f"conflicting currency assertions for {symbol!r}",
+            )
+        asserted[symbol] = currency
+    return asserted
+
+
+def load_base_currency_series(
+    store,
+    symbol_map: dict[str, int],
+    symbols: Sequence[str],
+    *,
+    years: int,
+    base_currency: str,
+    asserted_currencies: dict[str, str | None] | None = None,
+) -> tuple[dict[str, pd.Series], dict[str, str], FxConverter]:
+    """Load local closes once and normalize them before any return math."""
+
+    ordered = list(dict.fromkeys(symbols))
+    currencies = resolve_symbol_currencies(
+        store, ordered, asserted=asserted_currencies
+    )
+    try:
+        converter = FxConverter.from_store(
+            store,
+            base_currency=base_currency,
+            currencies=set(currencies.values()),
+        )
+    except (FxConversionUnavailable, ValueError) as exc:
+        needed = sorted({value for value in currencies.values() if value != base_currency})
+        raise HTTPException(
+            422,
+            detail=(
+                f"dated FX normalization to {base_currency} is unavailable for {needed}: "
+                f"{exc}; run sync"
+            ),
+        ) from exc
+
+    output: dict[str, pd.Series] = {}
+    for symbol in ordered:
+        local = read_close_series(store, symbol_map[symbol], symbol, years)
+        try:
+            output[symbol] = converter.convert_series(local, currencies[symbol])
+        except FxConversionUnavailable as exc:
+            raise HTTPException(
+                422,
+                detail=(
+                    f"dated FX normalization for {symbol!r} ({currencies[symbol]}) "
+                    f"is unavailable: {exc}; run sync"
+                ),
+            ) from exc
+    return output, currencies, converter
 
 
 class PositionIn(BaseModel):

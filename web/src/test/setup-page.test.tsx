@@ -12,7 +12,7 @@ afterAll(() => server.close());
 
 const EMPTY_STATUS = {
   overall: "needs_attention",
-  api: { status: "ready", version: "0.4.0.0" },
+  api: { status: "ready", version: "0.5.0.0" },
   broker: { status: "unavailable", provider: "IBKR", mode: "paper", error: null },
   market_data: {
     status: "empty",
@@ -24,6 +24,7 @@ const EMPTY_STATUS = {
     series: 0,
     as_of: null,
     age_days: null,
+    portfolio_discovery_error: null,
   },
   macro_data: {
     status: "empty",
@@ -43,6 +44,21 @@ const EMPTY_STATUS = {
     stale_chains: [],
     chain_as_of: null,
     chain_age_days: null,
+  },
+  fx_data: {
+    status: "not_required",
+    base_currency: "USD",
+    required_currencies: [],
+    missing_currencies: [],
+    provider: null,
+    as_of: null,
+  },
+  ucits_data: {
+    status: "not_required",
+    total_etfs: 0,
+    ready_profiles: 0,
+    missing_symbols: [],
+    stale_symbols: [],
   },
   book: {
     status: "not_pinned",
@@ -77,12 +93,15 @@ test("shows the exact first action and the state of every setup dependency", asy
   renderSetup();
 
   expect(await screen.findByRole("heading", { name: "Finish local setup" })).toBeInTheDocument();
-  expect(screen.getByTestId("overall-status")).toHaveTextContent("▲ ACTION REQUIRED · v0.4.0.0");
+  expect(screen.getByTestId("overall-status")).toHaveTextContent("▲ ACTION REQUIRED · v0.5.0.0");
   expect(screen.getByText("Start IBKR Gateway or TWS")).toBeInTheDocument();
   const broker = within(screen.getByLabelText("IBKR Gateway status"));
   const market = within(screen.getByLabelText("Market cache status"));
   const macro = within(screen.getByLabelText("Macro evidence status"));
   const options = within(screen.getByLabelText("Held option evidence status"));
+  const fx = within(screen.getByLabelText("FX evidence status"));
+  const ucits = within(screen.getByLabelText("European ETF sourced-profile status"));
+  expect(ucits.getByText("European ETF profiles")).toBeInTheDocument();
   const book = within(screen.getByLabelText("Current book status"));
   expect(broker.getByText("Unavailable")).toBeInTheDocument();
   expect(broker.getByTestId("status-glyph")).toHaveTextContent("×");
@@ -90,8 +109,161 @@ test("shows the exact first action and the state of every setup dependency", asy
   expect(market.getByTestId("status-glyph")).toHaveTextContent("◇");
   expect(macro.getByText("Empty")).toBeInTheDocument();
   expect(options.getByText("Not required")).toBeInTheDocument();
+  expect(fx.getByText("Not required")).toBeInTheDocument();
+  expect(ucits.getByText("Not required")).toBeInTheDocument();
   expect(book.getByText("Not pinned")).toBeInTheDocument();
   expect(book.getByTestId("status-glyph")).toHaveTextContent("◇");
+  expect(screen.getByTestId("setup-readiness-grid")).toHaveClass(
+    "grid-cols-1",
+    "sm:grid-cols-2",
+    "xl:grid-cols-4"
+  );
+});
+
+test("explains the recoverable option-currency action without offering a dead-end rebase", async () => {
+  server.use(
+    http.get("/api/setup/status", () =>
+      HttpResponse.json({
+        ...EMPTY_STATUS,
+        overall: "needs_attention",
+        broker: { ...EMPTY_STATUS.broker, status: "connected" },
+        book: {
+          ...EMPTY_STATUS.book,
+          status: "unsupported",
+          snapshot_count: 1,
+          latest_snapshot_id: "abc123def456",
+          valuation_ts: "2026-09-04T13:00:00Z",
+          option_positions: 1,
+          age_days: 0,
+          source: "manual",
+          unsupported_currencies: ["EUR"],
+          reason: "cross_currency_option",
+        },
+        next_action: "resolve_option_currency",
+      })
+    )
+  );
+
+  renderSetup();
+
+  expect(await screen.findByText("Align the option book currency")).toBeInTheDocument();
+  expect(screen.getByText(/Set QM_BASE_CURRENCY/)).toBeInTheDocument();
+  expect(screen.getByText(/multiple currencies is unsupported/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /rebase/i })).not.toBeInTheDocument();
+});
+
+test("explains a failed live portfolio discovery without leaking its cache sentinel", async () => {
+  server.use(
+    http.get("/api/setup/status", () =>
+      HttpResponse.json({
+        ...EMPTY_STATUS,
+        broker: { ...EMPTY_STATUS.broker, status: "connected" },
+        market_data: {
+          ...EMPTY_STATUS.market_data,
+          status: "incomplete",
+          symbols: 1,
+          ready_symbols: 1,
+          as_of: "2026-09-04",
+          portfolio_discovery_error: "live_portfolio_unavailable",
+        },
+        next_action: "sync_market_data",
+      })
+    )
+  );
+
+  renderSetup();
+
+  expect(await screen.findByText("Retry live portfolio discovery")).toBeInTheDocument();
+  expect(screen.getByText(/could not read the IBKR portfolio/)).toBeInTheDocument();
+  expect(screen.getByText(/live IBKR portfolio unavailable/)).toBeInTheDocument();
+  expect(screen.queryByText(/__LIVE_PORTFOLIO_DISCOVERY_FAILED__/)).not.toBeInTheDocument();
+});
+
+test("names a base-currency change when the book must be pinned again", async () => {
+  server.use(
+    http.get("/api/setup/status", () =>
+      HttpResponse.json({
+        ...EMPTY_STATUS,
+        broker: { ...EMPTY_STATUS.broker, status: "connected" },
+        fx_data: { ...EMPTY_STATUS.fx_data, base_currency: "GBP" },
+        book: {
+          ...EMPTY_STATUS.book,
+          status: "stale",
+          snapshot_count: 1,
+          latest_snapshot_id: "abc123def456",
+          valuation_ts: "2026-09-04T13:00:00Z",
+          age_days: 0,
+          source: "manual",
+          reason: "base_currency_mismatch",
+        },
+        next_action: "pin_book",
+      })
+    )
+  );
+
+  renderSetup();
+
+  expect(await screen.findByText("Re-pin the book in the analysis currency")).toBeInTheDocument();
+  expect(screen.getByText(/immutable GBP reference/)).toBeInTheDocument();
+  expect(screen.queryByText(/belongs to a different broker scope/)).not.toBeInTheDocument();
+});
+
+test("names an instrument identity change when the book must be pinned again", async () => {
+  server.use(
+    http.get("/api/setup/status", () =>
+      HttpResponse.json({
+        ...EMPTY_STATUS,
+        broker: { ...EMPTY_STATUS.broker, status: "connected" },
+        book: {
+          ...EMPTY_STATUS.book,
+          status: "stale",
+          snapshot_count: 1,
+          latest_snapshot_id: "abc123def456",
+          valuation_ts: "2026-09-04T13:00:00Z",
+          age_days: 0,
+          source: "manual",
+          reason: "instrument_identity_mismatch",
+        },
+        next_action: "pin_book",
+      })
+    )
+  );
+
+  renderSetup();
+
+  expect(await screen.findByText("Re-pin the book after the instrument update")).toBeInTheDocument();
+  expect(screen.getByText(/symbol now resolves to a different contract/)).toBeInTheDocument();
+});
+
+test("syncs missing dated FX evidence using the normal sync job", async () => {
+  const missingFx = {
+    ...EMPTY_STATUS,
+    broker: { ...EMPTY_STATUS.broker, status: "connected" },
+    fx_data: {
+      status: "missing",
+      base_currency: "GBP",
+      required_currencies: ["EUR"],
+      missing_currencies: ["EUR"],
+      provider: null,
+      as_of: null,
+    },
+    next_action: "sync_fx_data",
+  };
+  server.use(
+    http.get("/api/setup/status", () => HttpResponse.json(missingFx)),
+    http.post("/api/sync", () => HttpResponse.json({ job_id: "fx-sync" })),
+    http.get("/api/sync/fx-sync", () =>
+      HttpResponse.json({ state: "done", result: "synced ECB FX", error: null })
+    )
+  );
+
+  renderSetup();
+  expect(await screen.findByText("Sync dated FX evidence")).toBeInTheDocument();
+  const fx = within(screen.getByLabelText("FX evidence status"));
+  expect(fx.getByText("Missing")).toBeInTheDocument();
+  expect(fx.getByText(/EUR → GBP/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Sync FX data" }));
+  expect(await screen.findByText("synced ECB FX")).toBeInTheDocument();
 });
 
 test("syncs stale evidence and refreshes readiness without reloading the page", async () => {
@@ -180,12 +352,14 @@ test("pins the live IBKR book and exposes the same snapshot to analysis pages", 
 
   renderSetup();
   const pinButton = await screen.findByRole("button", { name: "Pin current book" });
+  expect(screen.getByText(/Portfolio, What-If, and Hedge Lab analyse the same positions/)).toBeInTheDocument();
+  expect(screen.queryByText(/Risk, What-If, and Hedge Lab analyse the same positions/)).not.toBeInTheDocument();
   expect(pinButton.closest(".authoring-only")).not.toBeNull();
   expect(pinButton).not.toHaveClass("border-you", "text-you");
   fireEvent.click(pinButton);
 
   expect(await screen.findByText("Book pinned · abc123def456")).toBeInTheDocument();
-  await waitFor(() => expect(screen.getByTestId("overall-status")).toHaveTextContent("● READY · v0.4.0.0"));
+  await waitFor(() => expect(screen.getByTestId("overall-status")).toHaveTextContent("● READY · v0.5.0.0"));
   expect(screen.getByRole("link", { name: "Open Portfolio" })).toHaveAttribute(
     "href",
     "/portfolio?book_ref=abc123def456"
@@ -379,7 +553,7 @@ test("surfaces a pin failure and keeps the action available for retry", async ()
   renderSetup();
   fireEvent.click(await screen.findByRole("button", { name: "Pin current book" }));
 
-  expect(await screen.findByText(/broker portfolio unavailable/i)).toBeInTheDocument();
+  expect(await screen.findByRole("alert")).toHaveTextContent(/broker portfolio unavailable/i);
   expect(screen.getByRole("button", { name: "Pin current book" })).toBeEnabled();
 });
 

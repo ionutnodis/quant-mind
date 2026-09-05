@@ -12,6 +12,7 @@ behavior-preserving.
 from __future__ import annotations
 
 import math
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -21,11 +22,71 @@ from fastapi import HTTPException
 from quantmind.api.routers._shared import (
     PositionIn,
     clean,
+    collect_currency_assertions,
     downsample,
     iso,
     read_close_series,
+    resolve_symbol_currencies,
     weighted_portfolio_returns,
 )
+from quantmind.datastore.store import BarStore
+
+
+def test_collect_currency_assertions_normalizes_duplicate_symbol_claims():
+    positions = [
+        PositionIn(symbol="IWDA", qty=1, currency="eur"),
+        PositionIn(symbol="IWDA", qty=2, currency=" EUR "),
+        PositionIn(symbol="SPY", qty=1),
+    ]
+
+    assert collect_currency_assertions(positions) == {"IWDA": "EUR"}
+
+
+def test_collect_currency_assertions_rejects_conflicting_duplicate_symbol_claims():
+    positions = [
+        PositionIn(symbol="IWDA", qty=1, currency="EUR"),
+        PositionIn(symbol="IWDA", qty=2, currency="GBP"),
+    ]
+
+    with pytest.raises(HTTPException, match="conflicting currency assertions"):
+        collect_currency_assertions(positions)
+
+
+def test_currency_resolution_names_a_corrupt_instrument_master(tmp_path):
+    store = BarStore(tmp_path)
+    (tmp_path / "instruments.json").write_text('["not", "a", "mapping"]')
+
+    with pytest.raises(HTTPException) as error:
+        resolve_symbol_currencies(store, ["SPY"])
+
+    assert error.value.status_code == 422
+    assert "instrument metadata cache is corrupt" in error.value.detail
+
+
+def test_currency_resolution_rejects_metadata_for_a_different_contract(tmp_path):
+    store = BarStore(tmp_path)
+    store.write_symbol_map({"IWDA": 2})
+    store.write_instrument_metadata(
+        "IWDA", {"con_id": 1, "currency": "USD", "provider": "ibkr"}
+    )
+
+    with pytest.raises(HTTPException) as error:
+        resolve_symbol_currencies(store, ["IWDA"])
+
+    assert error.value.status_code == 422
+    assert "contract identity" in error.value.detail
+
+
+def test_currency_resolution_names_a_corrupt_symbol_map(tmp_path):
+    store = BarStore(tmp_path)
+    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
+    (tmp_path / "symbols.json").write_text("not-json")
+
+    with pytest.raises(HTTPException) as error:
+        resolve_symbol_currencies(store, ["SPY"])
+
+    assert error.value.status_code == 422
+    assert "symbol map is corrupt" in error.value.detail
 
 
 def test_clean_passes_through_finite_numbers():
@@ -106,6 +167,25 @@ def test_read_close_series_clips_to_years():
     series = read_close_series(_Store(), con_id=1, symbol="X", years=1)
     assert len(series) == 252
     assert series.iloc[-1] == 999.0
+
+
+def test_read_close_series_rejects_future_dated_market_evidence():
+    future = date.today() + timedelta(days=1)
+    bars = pd.DataFrame(
+        {"close": [100.0]},
+        index=pd.DatetimeIndex([future]),
+    )
+
+    class _Store:
+        def read_bars(self, con_id, bar_size):
+            return bars, None
+
+    with pytest.raises(HTTPException) as error:
+        read_close_series(_Store(), con_id=1, symbol="SPY", years=1)
+
+    assert error.value.status_code == 422
+    assert "future-dated" in error.value.detail
+    assert "SPY" in error.value.detail
 
 
 def test_weighted_portfolio_returns_hand_computed():

@@ -222,8 +222,14 @@ class IbBroker(ReadOnlyBroker):
                 continue
             candidates[key].append(v)
 
-        currencies: set[str] = set()
-        selected_base_total = False
+        has_base_totals = any(
+            str(getattr(row, "currency", "") or "").strip() == "BASE"
+            for rows in candidates.values()
+            for row in rows
+        )
+        base_mode = base_currency is not None or has_base_totals
+        selected_rows: dict[str, object] = {}
+        selected_currencies: set[str] = set()
         for key, rows in candidates.items():
             if not rows:
                 continue
@@ -232,28 +238,41 @@ class IbBroker(ReadOnlyBroker):
                 for row in rows
                 if str(getattr(row, "currency", "") or "").strip() == "BASE"
             ]
-            if base_rows:
-                selected = base_rows[-1]
-                selected_base_total = True
-            else:
-                row_currencies = {
-                    str(getattr(row, "currency", "") or "").strip()
-                    for row in rows
-                    if str(getattr(row, "currency", "") or "").strip()
-                }
-                if len(row_currencies) > 1:
+            if base_mode:
+                # A BASE ledger is already converted by IBKR. Never fill a
+                # missing BASE tag from a local-currency ledger and then label
+                # it with the account base currency.
+                if not base_rows:
                     continue
-                selected = rows[-1]
-                currencies.update(row_currencies)
+                selected_rows[key] = base_rows[-1]
+                continue
+
+            row_currencies = {
+                str(getattr(row, "currency", "") or "").strip()
+                for row in rows
+                if str(getattr(row, "currency", "") or "").strip()
+            }
+            if len(row_currencies) != 1:
+                continue
+            selected_rows[key] = rows[-1]
+            selected_currencies.update(row_currencies)
+
+        # Without a BASE ledger, one response may only declare one currency.
+        # If tags came from different local ledgers, withhold all of them
+        # rather than publish an internally inconsistent AccountOut.
+        if not base_mode and len(selected_currencies) != 1:
+            selected_rows.clear()
+
+        for key, selected in selected_rows.items():
             try:
                 out[key] = float(selected.value)
             except (TypeError, ValueError):
                 out[key] = None
         out["currency"] = (
             base_currency
-            if selected_base_total
-            else next(iter(currencies))
-            if len(currencies) == 1
+            if base_mode
+            else next(iter(selected_currencies))
+            if len(selected_currencies) == 1
             else None
         )
         return out
@@ -266,6 +285,51 @@ class IbBroker(ReadOnlyBroker):
         if not details:
             raise LookupError(f"could not resolve contract for symbol {symbol!r}")
         return details[0].contract.conId
+
+    async def resolve_option_underlying_con_id(self, option_con_id: int) -> int:
+        """Resolve an underlier from the exact held option contract identity."""
+        from ib_async import Contract
+
+        if (
+            isinstance(option_con_id, bool)
+            or not isinstance(option_con_id, int)
+            or option_con_id <= 0
+        ):
+            raise ValueError("option conId must be a positive integer")
+        details = await self._ib.reqContractDetailsAsync(
+            Contract(conId=option_con_id)
+        )
+        if not details:
+            raise LookupError(
+                f"could not resolve underlying for option con_id {option_con_id}"
+            )
+
+        underlying_con_ids: set[int] = set()
+        for detail in details:
+            contract = getattr(detail, "contract", None)
+            if (
+                getattr(contract, "conId", None) != option_con_id
+                or getattr(contract, "secType", None) != "OPT"
+            ):
+                raise ValueError(
+                    f"contract details do not match held option {option_con_id}"
+                )
+            underlying_con_id = getattr(detail, "underConId", None)
+            if (
+                isinstance(underlying_con_id, bool)
+                or not isinstance(underlying_con_id, int)
+                or underlying_con_id <= 0
+            ):
+                raise LookupError(
+                    f"option {option_con_id} has no authoritative underlying conId"
+                )
+            underlying_con_ids.add(underlying_con_id)
+        if len(underlying_con_ids) != 1:
+            raise ValueError(
+                f"conflicting underlying conIds for option {option_con_id}: "
+                f"{sorted(underlying_con_ids)}"
+            )
+        return next(iter(underlying_con_ids))
 
     async def get_daily_bars(self, con_id: int, years: int = 5) -> pd.DataFrame:
         from ib_async import Contract, util
@@ -331,10 +395,47 @@ class IbBroker(ReadOnlyBroker):
         if not details:
             raise LookupError(f"could not fetch contract details for con_id {con_id}")
         d = details[0]
-        return {
+        identifiers: dict[str, set[str]] = {}
+        for item in getattr(d, "secIdList", None) or []:
+            tag = str(getattr(item, "tag", "") or "").strip().upper()
+            value = str(getattr(item, "value", "") or "").strip().upper()
+            if tag and value:
+                identifiers.setdefault(tag, set()).add(value)
+        isins = identifiers.get("ISIN", set())
+        if len(isins) > 1:
+            raise ValueError(f"conflicting ISIN identifiers for con_id {con_id}")
+
+        result = {
             "long_name": d.longName or None,
             "exchange": d.contract.exchange or None,
             "currency": d.contract.currency or None,
             "sec_type": d.contract.secType or None,
             "industry": (d.industry or None) if hasattr(d, "industry") else None,
         }
+        optional = {
+            "primary_exchange": getattr(d.contract, "primaryExchange", None),
+            "local_symbol": getattr(d.contract, "localSymbol", None),
+            "trading_class": getattr(d.contract, "tradingClass", None),
+            "stock_type": getattr(d, "stockType", None),
+            "issuer_id": getattr(d.contract, "issuerId", None),
+            "isin": next(iter(isins)) if isins else None,
+        }
+        result.update(
+            {
+                key: str(value).strip()
+                for key, value in optional.items()
+                if value is not None and str(value).strip()
+            }
+        )
+        valid_exchanges = [
+            exchange.strip()
+            for exchange in str(getattr(d, "validExchanges", "") or "").split(",")
+            if exchange.strip()
+        ]
+        if valid_exchanges:
+            result["valid_exchanges"] = valid_exchanges
+        if identifiers:
+            result["external_identifiers"] = {
+                key: sorted(values) for key, values in sorted(identifiers.items())
+            }
+        return result

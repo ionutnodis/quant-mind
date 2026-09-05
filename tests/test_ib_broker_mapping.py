@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-from ib_async import AccountValue, BarData, Contract, ContractDetails
+from ib_async import AccountValue, BarData, Contract, ContractDetails, TagValue
 
 from quantmind.broker.ib_broker import IbBroker, positions_to_cost_basis, positions_to_portfolio
 
@@ -266,6 +266,46 @@ async def test_resolve_index_con_id_raises_lookup_error_when_unresolvable():
         await broker.resolve_index_con_id("VIX", "CBOE")
 
 
+async def test_resolve_option_underlying_con_id_uses_the_held_option_identity():
+    details = ContractDetails(
+        contract=Contract(
+            conId=7001,
+            symbol="ASML",
+            secType="OPT",
+            exchange="SMART",
+            currency="EUR",
+        ),
+        underConId=12345,
+    )
+    ib = FakeIB(contract_details=[details])
+
+    underlier_con_id = await IbBroker(ib).resolve_option_underlying_con_id(7001)
+
+    assert underlier_con_id == 12345
+    assert len(ib.reqContractDetails_calls) == 1
+    assert ib.reqContractDetails_calls[0].conId == 7001
+    assert not ib.reqContractDetails_calls[0].symbol
+    assert not ib.reqContractDetails_calls[0].currency
+
+
+async def test_resolve_option_underlying_con_id_rejects_conflicting_details():
+    details = [
+        ContractDetails(
+            contract=Contract(conId=7001, symbol="ASML", secType="OPT"),
+            underConId=12345,
+        ),
+        ContractDetails(
+            contract=Contract(conId=7001, symbol="ASML", secType="OPT"),
+            underConId=99999,
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="conflicting underlying conIds"):
+        await IbBroker(FakeIB(contract_details=details)).resolve_option_underlying_con_id(
+            7001
+        )
+
+
 async def test_get_index_bars_uses_trades_not_adjusted_last():
     ib = FakeIB(bars=_index_bars())
     broker = IbBroker(ib)
@@ -301,6 +341,49 @@ async def test_fetch_contract_details_raises_lookup_error_when_unresolvable():
     broker = IbBroker(ib)
     with pytest.raises(LookupError, match="42"):
         await broker.fetch_contract_details(42)
+
+
+async def test_fetch_contract_details_preserves_ucits_listing_identity():
+    details = ContractDetails(
+        contract=Contract(
+            conId=12345,
+            symbol="IWDA",
+            localSymbol="IWDA",
+            tradingClass="IWDA",
+            secType="STK",
+            exchange="SMART",
+            primaryExchange="AEB",
+            currency="EUR",
+            issuerId="issuer-1",
+        ),
+        longName="iShares Core MSCI World UCITS ETF",
+        stockType="ETF",
+        validExchanges="SMART,AEB,LSEETF",
+        secIdList=[TagValue("ISIN", "IE00B4L5Y983")],
+    )
+
+    meta = await IbBroker(FakeIB(contract_details=[details])).fetch_contract_details(12345)
+
+    assert meta["isin"] == "IE00B4L5Y983"
+    assert meta["primary_exchange"] == "AEB"
+    assert meta["local_symbol"] == "IWDA"
+    assert meta["trading_class"] == "IWDA"
+    assert meta["stock_type"] == "ETF"
+    assert meta["valid_exchanges"] == ["SMART", "AEB", "LSEETF"]
+    assert meta["issuer_id"] == "issuer-1"
+
+
+async def test_fetch_contract_details_fails_closed_on_conflicting_isins():
+    details = ContractDetails(
+        contract=Contract(conId=12345, symbol="IWDA", secType="STK"),
+        secIdList=[
+            TagValue("ISIN", "IE00B4L5Y983"),
+            TagValue("ISIN", "IE00B4L5Y984"),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="conflicting ISIN"):
+        await IbBroker(FakeIB(contract_details=[details])).fetch_contract_details(12345)
 
 
 # --- Task B1: ledger essentials — account summary + avg-cost basis ---
@@ -472,6 +555,37 @@ async def test_account_summary_prefers_base_totals_over_currency_ledgers():
     assert summary["net_liquidation"] == 125000.50
     assert summary["total_cash_value"] == 20000.00
     assert summary["currency"] == "USD"
+
+
+async def test_account_summary_never_labels_a_local_ledger_as_base_currency():
+    ib = FakeIB(
+        account_values=[
+            _account_value("BaseCurrency", "EUR", currency=""),
+            _account_value("NetLiquidation", "125000.50", currency="BASE"),
+            _account_value("TotalCashValue", "20000.00", currency="USD"),
+        ]
+    )
+
+    summary = await IbBroker(ib).get_account_summary()
+
+    assert summary["net_liquidation"] == 125000.50
+    assert summary["total_cash_value"] is None
+    assert summary["currency"] == "EUR"
+
+
+async def test_account_summary_with_mixed_local_ledgers_is_withheld():
+    ib = FakeIB(
+        account_values=[
+            _account_value("NetLiquidation", "125000.50", currency="EUR"),
+            _account_value("TotalCashValue", "20000.00", currency="USD"),
+        ]
+    )
+
+    summary = await IbBroker(ib).get_account_summary()
+
+    assert summary["net_liquidation"] is None
+    assert summary["total_cash_value"] is None
+    assert summary["currency"] is None
 
 
 async def test_account_summary_with_base_totals_and_no_base_currency_is_withheld():

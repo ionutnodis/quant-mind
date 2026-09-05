@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,9 +14,11 @@ class Settings(BaseSettings):
     port: int = 4002  # IB Gateway paper-trading default; 4001 live
     client_id: int = 17  # fixed clientId — see Engineering Constraint 1
     benchmark: str = "SPY"
+    # Investor/reporting currency. Instrument prices remain in their trading
+    # currency and are normalized through dated FX evidence at analysis time.
+    base_currency: str = "USD"
     data_dir: Path = Path("data")
     web_dist: Path | None = None
-    fred_api_key: str = ""
     api_token: str = ""
     api_allowed_origins: str = (
         "http://127.0.0.1:8000,http://localhost:8000,"
@@ -27,6 +30,17 @@ class Settings(BaseSettings):
     # instead of IBKR. Empty by default — never a silent substitute for an
     # IBKR failure, only ever this explicit config-gated list.
     yfinance_symbols: str = ""
+    # Public-repository safety: terms-sensitive profile retrieval is opt-in.
+    # Cached profile data stays local and is never part of the source tree.
+    ucits_metadata_enabled: bool = False
+
+    @field_validator("base_currency")
+    @classmethod
+    def _normalize_base_currency(cls, value: str) -> str:
+        currency = str(value or "").strip().upper()
+        if len(currency) != 3 or not currency.isalpha():
+            raise ValueError("base currency must be a three-letter ISO code")
+        return currency
 
     def yfinance_symbol_list(self) -> list[str]:
         return [s.strip() for s in self.yfinance_symbols.split(",") if s.strip()]
