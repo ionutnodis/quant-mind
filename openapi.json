@@ -4317,6 +4317,104 @@
         "title": "R2Step",
         "type": "object"
       },
+      "RankedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "maxLength": 64,
+            "title": "Id",
+            "type": "string"
+          },
+          "matched_symbols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Matched Symbols",
+            "type": "array"
+          },
+          "published_at": {
+            "title": "Published At",
+            "type": "string"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "regions": {
+            "items": {
+              "maxLength": 100,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Regions",
+            "type": "array"
+          },
+          "relevance": {
+            "default": 0,
+            "title": "Relevance",
+            "type": "integer"
+          },
+          "source_id": {
+            "maxLength": 100,
+            "title": "Source Id",
+            "type": "string"
+          },
+          "source_name": {
+            "maxLength": 200,
+            "title": "Source Name",
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 500,
+            "title": "Summary",
+            "type": "string"
+          },
+          "time_kind": {
+            "default": "published",
+            "enum": [
+              "published",
+              "observed"
+            ],
+            "title": "Time Kind",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 300,
+            "title": "Title",
+            "type": "string"
+          },
+          "topics": {
+            "items": {
+              "maxLength": 100,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Topics",
+            "type": "array"
+          },
+          "url": {
+            "maxLength": 2048,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "source_id",
+          "source_name",
+          "title",
+          "url",
+          "summary",
+          "published_at",
+          "topics",
+          "regions"
+        ],
+        "title": "RankedEvent",
+        "type": "object"
+      },
       "RegressionResponse": {
         "properties": {
           "alpha_annualized": {
@@ -6042,6 +6140,257 @@
         "title": "WhatIfResponse",
         "type": "object"
       },
+      "WorldContext": {
+        "properties": {
+          "book_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Book Ref"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "symbols": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Symbols",
+            "type": "array"
+          }
+        },
+        "required": [
+          "book_ref",
+          "symbols",
+          "label"
+        ],
+        "title": "WorldContext",
+        "type": "object"
+      },
+      "WorldProfile": {
+        "additionalProperties": false,
+        "properties": {
+          "interests": {
+            "items": {
+              "maxLength": 100,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Interests",
+            "type": "array"
+          },
+          "regions": {
+            "items": {
+              "maxLength": 100,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Regions",
+            "type": "array"
+          },
+          "watch_symbols": {
+            "items": {
+              "maxLength": 100,
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Watch Symbols",
+            "type": "array"
+          }
+        },
+        "title": "WorldProfile",
+        "type": "object"
+      },
+      "WorldRefreshResult": {
+        "properties": {
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "skipped": {
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "updated": {
+            "title": "Updated",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "updated",
+          "failed",
+          "skipped"
+        ],
+        "title": "WorldRefreshResult",
+        "type": "object"
+      },
+      "WorldResponse": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "context": {
+            "$ref": "#/components/schemas/WorldContext"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RankedEvent"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "profile": {
+            "$ref": "#/components/schemas/WorldProfile"
+          },
+          "refreshing": {
+            "title": "Refreshing",
+            "type": "boolean"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/WorldSourceStatus"
+            },
+            "title": "Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "sources",
+          "profile",
+          "context",
+          "as_of",
+          "refreshing"
+        ],
+        "title": "WorldResponse",
+        "type": "object"
+      },
+      "WorldSourceStatus": {
+        "properties": {
+          "access": {
+            "title": "Access",
+            "type": "string"
+          },
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "homepage": {
+            "title": "Homepage",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "item_count": {
+            "title": "Item Count",
+            "type": "integer"
+          },
+          "last_attempt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Attempt"
+          },
+          "last_success": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "next_refresh": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Refresh"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "never",
+              "ok",
+              "error",
+              "disabled"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "category",
+          "homepage",
+          "access",
+          "description",
+          "enabled",
+          "state",
+          "last_attempt",
+          "last_success",
+          "next_refresh",
+          "item_count",
+          "error",
+          "stale"
+        ],
+        "title": "WorldSourceStatus",
+        "type": "object"
+      },
       "YieldsBlock": {
         "properties": {
           "series": {
@@ -7155,6 +7504,111 @@
           }
         },
         "summary": "Whatif"
+      }
+    },
+    "/api/world": {
+      "get": {
+        "operationId": "world_api_world_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "book_ref",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 12,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Book Ref"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorldResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "World"
+      }
+    },
+    "/api/world/profile": {
+      "put": {
+        "description": "One local investor lens; complete replacement, last write wins.",
+        "operationId": "save_profile_api_world_profile_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorldProfile"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorldProfile"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Profile"
+      }
+    },
+    "/api/world/refresh": {
+      "post": {
+        "description": "Single-flight, cadence-limited refresh. No user URLs or portfolio payload.",
+        "operationId": "refresh_api_world_refresh_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorldRefreshResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Refresh"
       }
     }
   }

@@ -23,6 +23,9 @@ from quantmind.datastore.store import BarStore
 from quantmind.models.base import FitResult
 from quantmind.models.registry import get_model, list_model_schemas
 from quantmind.risk.returns import InsufficientDataError, simple_returns
+from quantmind.world.models import WorldConfig
+from quantmind.world.service import WorldService
+from quantmind.world.store import WorldStore, WorldStoreError
 
 
 def _clean(x: float | None) -> float | None:
@@ -110,8 +113,13 @@ def create_app(
     allowed_origins: tuple[str, ...] | None = None,
     base_currency: str = "USD",
     ucits_metadata_enabled: bool = False,
+    world_config: WorldConfig | None = None,
 ) -> FastAPI:
     app = FastAPI(title="QuantMind API", version="0.5.0.0")
+
+    @app.exception_handler(WorldStoreError)
+    async def world_cache_error(_request: Request, error: WorldStoreError):
+        return JSONResponse(status_code=503, content={"detail": str(error)})
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_error(_request: Request, error: RequestValidationError):
@@ -124,6 +132,7 @@ def create_app(
         )
     # Shared state for domain routers (routers/*.py): read via request.app.state
     app.state.store = store
+    app.state.world = WorldService(WorldStore(store.root), world_config)
     app.state.benchmark = benchmark
     app.state.base_currency = base_currency
     app.state.ucits_metadata_enabled = ucits_metadata_enabled
