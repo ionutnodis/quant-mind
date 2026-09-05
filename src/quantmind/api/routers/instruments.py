@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from quantmind.api.routers._shared import (
     FxEvidenceOut,
     complete_fx_evidence,
+    latest_observation_is_future,
     load_base_currency_series,
     read_instrument_metadata_map,
 )
@@ -70,6 +71,16 @@ def _bars_for(request: Request, symbol: str) -> tuple[pd.DataFrame, int]:
         bars, _ = store.read_bars(con_id=con_id, bar_size="1d")
     except (FileNotFoundError, KeyError, OSError, ValueError):
         raise HTTPException(422, detail=f"symbol {symbol!r} has no cached bars")
+    try:
+        future_dated = latest_observation_is_future(bars)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            422, detail=f"symbol {symbol!r} has an invalid cached observation date"
+        )
+    if future_dated:
+        raise HTTPException(
+            422, detail=f"symbol {symbol!r} has future-dated cached bars; run sync"
+        )
     return bars, con_id
 
 
@@ -92,7 +103,15 @@ def _has_price_history(store, symbol_map: dict[str, int], symbol: str) -> bool:
         bars, _ = store.read_bars(con_id=con_id, bar_size="1d")
     except (FileNotFoundError, KeyError, OSError, ValueError):
         return False
-    return "close" in bars and not bars["close"].dropna().empty
+    try:
+        future_dated = latest_observation_is_future(bars)
+    except (TypeError, ValueError):
+        return False
+    return (
+        not future_dated
+        and "close" in bars
+        and not bars["close"].dropna().empty
+    )
 
 
 def _risk_state(

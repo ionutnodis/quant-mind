@@ -8,6 +8,8 @@ that block omitted (or that symbol dropped) and named in `missing`, never a
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -168,3 +170,79 @@ def test_macro_mapped_symbol_without_bars_is_skipped_not_500(tmp_path):
     body = r.json()
     assert [row["symbol"] for row in body["sectors"]] == ["XLK"]
     assert set(SECTORS) - {"XLK"} <= set(body["missing"])
+
+
+def test_macro_future_named_series_are_unavailable_and_not_published(tmp_path):
+    store = BarStore(tmp_path)
+    _write_yields(store)
+    _write_net_liquidity(store)
+    future = pd.bdate_range(
+        start=datetime.now(UTC).date() + timedelta(days=1), periods=1
+    )[0].date()
+    store.write_series("US2Y", _flat_series([0.038], end=future.isoformat()))
+    store.write_series(
+        "NET_LIQUIDITY", _flat_series([6100.0], end=future.isoformat())
+    )
+
+    response = _client(store).get("/api/macro")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["yields"] is None
+    assert body["net_liquidity"] is None
+    assert {"US2Y", "NET_LIQUIDITY"} <= set(body["missing"])
+    assert body["as_of"] is None
+
+
+def test_macro_future_rotation_bars_are_missing_and_not_published(tmp_path):
+    store = BarStore(tmp_path)
+    future = pd.bdate_range(
+        start=datetime.now(UTC).date() + timedelta(days=1), periods=1
+    )[0].date()
+    bars = _drift_bars(SECTOR_DRIFT["XLK"])
+    bars.index = pd.bdate_range(end=future, periods=len(bars))
+    store.write_bars(
+        con_id=1,
+        bar_size="1d",
+        bars=bars,
+        meta=BarMeta(
+            bar_type="ADJUSTED_LAST", adjusted_asof=future.isoformat()
+        ),
+    )
+    store.write_symbol_map({"XLK": 1})
+
+    response = _client(store).get("/api/macro")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sectors"] == []
+    assert "XLK" in body["missing"]
+    assert body["as_of"] is None
+
+
+def test_macro_as_of_is_the_weakest_included_observation(tmp_path):
+    store = BarStore(tmp_path)
+    _write_yields(store)
+    _write_net_liquidity(store)
+    old = pd.Timestamp("2026-07-16")
+    recent = pd.Timestamp("2026-07-24")
+    for con_id, symbol, end in (
+        (1, "XLK", old),
+        (2, "XLF", recent),
+    ):
+        bars = _drift_bars(SECTOR_DRIFT[symbol])
+        bars.index = pd.bdate_range(end=end, periods=len(bars))
+        store.write_bars(
+            con_id=con_id,
+            bar_size="1d",
+            bars=bars,
+            meta=BarMeta(
+                bar_type="ADJUSTED_LAST", adjusted_asof=end.date().isoformat()
+            ),
+        )
+    store.write_symbol_map({"XLK": 1, "XLF": 2})
+
+    body = _client(store).get("/api/macro").json()
+
+    assert {row["symbol"] for row in body["sectors"]} == {"XLK", "XLF"}
+    assert body["as_of"] == "2026-07-16T00:00:00Z"

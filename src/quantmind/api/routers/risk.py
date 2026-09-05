@@ -28,6 +28,7 @@ from quantmind.api.routers._shared import (
     complete_fx_evidence,
     downsample,
     iso,
+    latest_observation_is_future,
     load_base_currency_series,
 )
 from quantmind.fx import FxConverter
@@ -74,6 +75,11 @@ def _daily_risk_free(
         levels = request.app.state.store.read_series("US3M")
     except FileNotFoundError:
         return None, "US3M risk-free series is not cached"
+    try:
+        if latest_observation_is_future(levels):
+            return None, "US3M risk-free series is future-dated; run sync"
+    except (TypeError, ValueError):
+        return None, "US3M risk-free series has an invalid observation date"
 
     daily = (levels / _PERIODS_PER_YEAR).replace([np.inf, -np.inf], np.nan).reindex(index)
     n_obs = int(daily.notna().sum())
@@ -125,6 +131,16 @@ def _resolve_factor_levels(
         symbol_map = store.read_symbol_map()
         known = sorted(symbol_map) + store.list_series()
         raise HTTPException(422, detail=f"factor {name!r} not in cache; known: {known}")
+    try:
+        future_dated = latest_observation_is_future(series)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            422, detail=f"factor {name!r} has an invalid cached observation date"
+        )
+    if future_dated:
+        raise HTTPException(
+            422, detail=f"factor {name!r} has future-dated cached data; run sync"
+        )
     if years > 0:
         series = series.iloc[-(years * 252):]
     return series

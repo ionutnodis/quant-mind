@@ -48,6 +48,7 @@ from quantmind.api.routers._shared import (
     complete_fx_evidence,
     downsample,
     iso,
+    latest_observation_is_future,
     mapped_instrument_metadata,
     read_instrument_metadata_map,
     weighted_portfolio_returns,
@@ -297,10 +298,10 @@ def _series_is_stale(series: pd.Series | None, today: date) -> bool:
     if series is None or series.empty:
         return True
     try:
+        if latest_observation_is_future(series, today=today):
+            return True
         observation = pd.Timestamp(series.index[-1]).date()
     except (TypeError, ValueError):
-        return True
-    if observation > today:
         return True
     age_days = int(np.busday_count(observation.isoformat(), today.isoformat()))
     return age_days > _MARK_STALE_AFTER_DAYS

@@ -58,10 +58,22 @@ def _fake_greeks(iv=0.2, delta=0.5):
     return SimpleNamespace(impliedVol=iv, delta=delta, gamma=0.01, vega=0.2, theta=-0.05, undPrice=452.0)
 
 
-def _fake_contract(symbol, expiry, strike, right, con_id):
+def _fake_contract(
+    symbol,
+    expiry,
+    strike,
+    right,
+    con_id,
+    *,
+    multiplier="100",
+    trading_class="",
+    currency="",
+    exchange="SMART",
+):
     return SimpleNamespace(
         symbol=symbol, lastTradeDateOrContractMonth=expiry, strike=strike, right=right,
-        conId=con_id, multiplier="100",
+        conId=con_id, multiplier=multiplier, tradingClass=trading_class,
+        currency=currency, exchange=exchange, secType="OPT",
     )
 
 
@@ -98,6 +110,10 @@ class FakeIb:
                     c.strike,
                     c.right,
                     con_id,
+                    multiplier=c.multiplier,
+                    trading_class=c.tradingClass,
+                    currency=c.currency,
+                    exchange=c.exchange,
                 )
             )
         return out

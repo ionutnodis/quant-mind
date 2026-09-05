@@ -73,8 +73,11 @@ export function Hedge() {
   });
   useEffect(() => {
     if (!linkedBook.data) return;
-    setRows(snapshotToRows(linkedBook.data));
+    // Publish the immutable reference first. Under a heavily loaded render,
+    // the populated rows can become visible before a later state update; the
+    // Run handler must already know to submit by book_ref in that frame.
     setBookRef(linkedBook.data.snapshot_id);
+    setRows(snapshotToRows(linkedBook.data));
     setLinkedBookLoaded(true);
   }, [linkedBook.data]);
   const [targetBeta, setTargetBeta] = useState(0);
@@ -109,8 +112,8 @@ export function Hedge() {
   }
 
   function handleUseCurrentBook(snapshot: BookSnapshotOut) {
-    setRows(snapshotToRows(snapshot));
     setBookRef(snapshot.snapshot_id);
+    setRows(snapshotToRows(snapshot));
   }
 
   if (requestedBookRef && !linkedBookLoaded) {

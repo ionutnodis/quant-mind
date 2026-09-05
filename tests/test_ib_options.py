@@ -252,13 +252,14 @@ def _params(
     strikes=(440.0, 450.0),
     *,
     currency=None,
+    multiplier="100",
 ):
     return OptionChainParams(
         underlying_symbol="SPY",
         underlying_con_id=756733,
         trading_class="SPY",
         exchange="SMART",
-        multiplier="100",
+        multiplier=multiplier,
         expirations=expirations,
         strikes=strikes,
         currency=currency,
@@ -433,6 +434,52 @@ async def test_snapshot_option_quotes_rejects_qualified_currency_mismatch_when_k
     ib = _WrongCurrencyIb()
     chain = _params(
         expirations=("20260918",), strikes=(440.0,), currency="USD"
+    )
+
+    quotes = await snapshot_option_quotes(
+        ib,
+        chain,
+        expiries=chain.expirations,
+        strikes=chain.strikes[:1],
+        sleep=_FakeSleeper(),
+    )
+
+    assert quotes == []
+    assert ib.ticker_batches == []
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["secType", "tradingClass", "multiplier", "currency"],
+)
+async def test_snapshot_option_quotes_rejects_blank_required_contract_identity(
+    missing_field,
+):
+    """Catches unverifiable qualification fields being treated as exact matches."""
+
+    class _BlankIdentityIb(_FakeIbSnapshot):
+        async def qualifyContractsAsync(self, *contracts):
+            self.qualify_batches.append(len(contracts))
+            requested = contracts[0]
+            qualified = _fake_contract(
+                requested.symbol,
+                requested.lastTradeDateOrContractMonth,
+                requested.strike,
+                requested.right,
+                9001,
+                multiplier="10",
+                trading_class="SPY",
+                currency="USD",
+            )
+            setattr(qualified, missing_field, "")
+            return [qualified]
+
+    ib = _BlankIdentityIb()
+    chain = _params(
+        expirations=("20260918",),
+        strikes=(440.0,),
+        currency="USD",
+        multiplier="10",
     )
 
     quotes = await snapshot_option_quotes(

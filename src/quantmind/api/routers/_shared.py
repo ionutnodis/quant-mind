@@ -37,7 +37,7 @@ p.multiplier is not None else (100.0 if p.right else 1.0)`.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Literal, Sequence, TypeVar
 
 import numpy as np
@@ -115,6 +115,23 @@ def downsample(seq: T, max_points: int) -> T:
     return seq[::step]
 
 
+def latest_observation_is_future(
+    values: pd.Series | pd.DataFrame,
+    *,
+    today: date | None = None,
+) -> bool:
+    """Whether the final cached observation lies after the UTC evaluation date."""
+    if values.empty:
+        return False
+    latest = pd.Timestamp(values.index[-1])
+    if pd.isna(latest):
+        raise ValueError("invalid final observation timestamp")
+    if latest.tzinfo is not None:
+        latest = latest.tz_convert("UTC")
+    evaluation_date = today or datetime.now(timezone.utc).date()
+    return latest.date() > evaluation_date
+
+
 def read_close_series(store, con_id: int, symbol: str, years: int) -> pd.Series:
     """Cached daily close series for `con_id`, tail-clipped to `years` (0 =
     full history). Missing bars or an empty result -> a structured 422 naming
@@ -129,13 +146,13 @@ def read_close_series(store, con_id: int, symbol: str, years: int) -> pd.Series:
     if series.empty:
         raise HTTPException(422, detail=f"symbol {symbol!r} has no cached history")
     try:
-        observation_date = pd.Timestamp(series.index[-1]).date()
+        future_dated = latest_observation_is_future(series)
     except (TypeError, ValueError):
         raise HTTPException(
             422,
             detail=f"symbol {symbol!r} has an invalid cached observation date",
         )
-    if observation_date > datetime.now(timezone.utc).date():
+    if future_dated:
         raise HTTPException(
             422,
             detail=f"symbol {symbol!r} has future-dated cached bars; run sync",

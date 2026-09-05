@@ -18,7 +18,12 @@ import pandas as pd
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
-from quantmind.api.routers._shared import clean, downsample, iso
+from quantmind.api.routers._shared import (
+    clean,
+    downsample,
+    iso,
+    latest_observation_is_future,
+)
 
 router = APIRouter()
 
@@ -81,7 +86,10 @@ def _read_named_series(store, name: str) -> pd.Series | None:
         s = store.read_series(name)
     except (FileNotFoundError, KeyError, OSError, ValueError):
         return None
-    return s if len(s) > 0 else None
+    try:
+        return s if len(s) > 0 and not latest_observation_is_future(s) else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _rotation_row(store, symbol_map: dict[str, int], symbol: str) -> tuple[RotationRow | None, pd.Timestamp | None]:
@@ -95,6 +103,11 @@ def _rotation_row(store, symbol_map: dict[str, int], symbol: str) -> tuple[Rotat
     close = bars["close"]
     if len(close) == 0:
         return None, None
+    try:
+        if latest_observation_is_future(close):
+            return None, None
+    except (TypeError, ValueError):
+        return None, None
     ret_1d = clean(close.iloc[-1] / close.iloc[-2] - 1) if len(close) >= 2 else None
     ret_1m = clean(close.iloc[-1] / close.iloc[-1 - _ONE_MONTH] - 1) if len(close) > _ONE_MONTH else None
     ret_3m = clean(close.iloc[-1] / close.iloc[-1 - _THREE_MONTH] - 1) if len(close) > _THREE_MONTH else None
@@ -106,20 +119,20 @@ def _rotation_block(
     store, symbol_map: dict[str, int], symbols: list[str], missing: list[str]
 ) -> tuple[list[RotationRow], pd.Timestamp | None]:
     rows: list[RotationRow] = []
-    latest: pd.Timestamp | None = None
+    weakest: pd.Timestamp | None = None
     for symbol in symbols:
         row, last_date = _rotation_row(store, symbol_map, symbol)
         if row is None:
             missing.append(symbol)
             continue
         rows.append(row)
-        if last_date is not None and (latest is None or last_date > latest):
-            latest = last_date
+        if last_date is not None and (weakest is None or last_date < weakest):
+            weakest = last_date
     # Rotation ranking: best 1-day movers first, symbols with no computable
     # ret_1d (too little history) sink to the bottom rather than sorting
     # arbitrarily.
     rows.sort(key=lambda r: (r.ret_1d is None, -(r.ret_1d if r.ret_1d is not None else 0.0)))
-    return rows, latest
+    return rows, weakest
 
 
 @router.get("/macro", response_model=MacroResponse)
@@ -175,7 +188,7 @@ def macro(request: Request) -> MacroResponse:
     if factors_latest is not None:
         latest_dates.append(factors_latest)
 
-    as_of = iso(max(latest_dates)) if latest_dates else None
+    as_of = iso(min(latest_dates)) if latest_dates else None
 
     return MacroResponse(
         yields=yields_block,

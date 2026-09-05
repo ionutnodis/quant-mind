@@ -6,6 +6,8 @@ symbols -> 422, a mapped-but-unsynced symbol degrades into `missing`.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -87,6 +89,33 @@ def test_mapped_symbol_without_bars_is_skipped_not_500(store):
     body = r.json()
     assert "UNSYNCED" not in body["symbols"]
     assert "UNSYNCED" in body["missing"]
+
+
+def test_future_dated_rotation_symbol_is_missing_not_ranked(store):
+    future = pd.bdate_range(
+        start=datetime.now(UTC).date() + timedelta(days=1), periods=1
+    )[0].date()
+    bars, meta = store.read_bars(con_id=1, bar_size="1d")
+    bars.index = pd.bdate_range(end=future, periods=len(bars))
+    store.write_bars(
+        con_id=1,
+        bar_size="1d",
+        bars=bars,
+        meta=BarMeta(
+            bar_type=meta.bar_type, adjusted_asof=future.isoformat()
+        ),
+    )
+
+    response = _client(store).post(
+        "/api/rotation",
+        json={"universe": "custom", "symbols": ["A", "B"]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["symbols"] == ["B"]
+    assert body["missing"] == ["A"]
+    assert body["as_of"] == "2026-07-24T00:00:00Z"
 
 
 def test_custom_universe_returns_clustered_matrix_and_returns(store):
@@ -343,3 +372,35 @@ def test_rotation_crisis_needs_two_instruments(tmp_path):
     client = _client(_crisis_store(tmp_path))
     r = client.post("/api/rotation/crisis", json={"universe": "custom", "symbols": ["A"]})
     assert r.status_code == 422
+
+
+def test_rotation_crisis_rejects_a_future_dated_benchmark(tmp_path):
+    store = _crisis_store(tmp_path)
+    bars, meta = store.read_bars(con_id=1, bar_size="1d")
+    future = pd.bdate_range(
+        start=datetime.now(UTC).date() + timedelta(days=1), periods=1
+    )[0].date()
+    future_row = bars.iloc[[-1]].copy()
+    future_row.index = pd.DatetimeIndex([future])
+    store.write_bars(
+        con_id=1,
+        bar_size="1d",
+        bars=pd.concat([bars, future_row]),
+        meta=BarMeta(
+            bar_type=meta.bar_type, adjusted_asof=future.isoformat()
+        ),
+    )
+
+    response = _client(store).post(
+        "/api/rotation/crisis",
+        json={
+            "universe": "custom",
+            "symbols": ["A", "B"],
+            "tail": 0.2,
+            "min_tail": 10,
+            "years": 5,
+        },
+    )
+
+    assert response.status_code == 422
+    assert "benchmark" in response.json()["detail"]

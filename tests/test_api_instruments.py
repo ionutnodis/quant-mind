@@ -125,6 +125,38 @@ def test_instrument_missing_metadata_returns_nulls_not_crash(client):
     assert body["beta_benchmark"] == "SPY"
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["/api/instruments/EEM", "/api/instruments/EEM/candles"],
+)
+def test_instrument_endpoints_reject_future_dated_bars(tmp_path, path):
+    store = BarStore(tmp_path)
+    future = pd.bdate_range(
+        start=datetime.now(UTC).date() + timedelta(days=1), periods=1
+    )[0].date()
+    bars = _bars(seed=2, price0=50.0)
+    bars.index = pd.bdate_range(end=future, periods=len(bars))
+    store.write_bars(
+        con_id=2,
+        bar_size="1d",
+        bars=bars,
+        meta=BarMeta(
+            bar_type="ADJUSTED_LAST", adjusted_asof=future.isoformat()
+        ),
+    )
+    store.write_symbol_map({"EEM": 2})
+    store.write_instrument_metadata("EEM", {"con_id": 2, "currency": "USD"})
+    client = TestClient(
+        _make_app(store, benchmark="EEM"), base_url="http://127.0.0.1"
+    )
+
+    response = client.get(path)
+
+    assert response.status_code == 422
+    assert "EEM" in response.json()["detail"]
+    assert "future-dated" in response.json()["detail"]
+
+
 def test_instrument_beta_matches_risk_after_dated_fx_normalization(tmp_path):
     from quantmind.api.app import create_app
 

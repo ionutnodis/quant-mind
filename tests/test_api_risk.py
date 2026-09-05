@@ -2,6 +2,8 @@
 and block-bootstrap Monte Carlo. Serialization policy: UTC ISO timestamps,
 NaN -> null, unknown symbol/insufficient data -> structured 422, never a 500."""
 
+from datetime import UTC, datetime, timedelta
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -296,6 +298,48 @@ def test_risk_applies_rf_jensen_alpha_when_us3m_present(client_with_rf):
     body = r.json()
     assert body["alpha_annualized"] is not None
     assert body["alpha_note"] == "excess-return Jensen alpha vs SPY, rf=US3M/252"
+
+
+def test_risk_suppresses_alpha_when_us3m_has_a_future_watermark(client_with_rf):
+    store = client_with_rf.app.state.store
+    levels = store.read_series("US3M")
+    future = pd.bdate_range(
+        start=datetime.now(UTC).date() + timedelta(days=1), periods=1
+    )[0]
+    store.write_series(
+        "US3M",
+        pd.concat([levels, pd.Series([0.045], index=pd.DatetimeIndex([future]))]),
+    )
+
+    response = client_with_rf.get(
+        "/api/risk/MTUM", params={"window": 30, "years": 1}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["alpha_annualized"] is None
+    assert "future-dated" in body["alpha_note"]
+
+
+def test_regression_rejects_a_future_dated_named_factor(client_with_named_series):
+    store = client_with_named_series.app.state.store
+    levels = store.read_series("US10Y")
+    future = pd.bdate_range(
+        start=datetime.now(UTC).date() + timedelta(days=1), periods=1
+    )[0]
+    store.write_series(
+        "US10Y",
+        pd.concat([levels, pd.Series([0.04], index=pd.DatetimeIndex([future]))]),
+    )
+
+    response = client_with_named_series.get(
+        "/api/risk/MTUM/regression",
+        params={"factors": "SPY,US10Y", "years": 1},
+    )
+
+    assert response.status_code == 422
+    assert "US10Y" in response.json()["detail"]
+    assert "future-dated" in response.json()["detail"]
 
 
 def test_risk_beta_normalizes_european_prices_before_return_math(tmp_path):

@@ -238,14 +238,14 @@ def _chain_contract_matches(
     if identity is None or identity[1:] not in requested_terms:
         return False
     sec_type = getattr(contract, "secType", "")
-    if sec_type and sec_type != "OPT":
+    if sec_type != "OPT":
         return False
     trading_class = getattr(contract, "tradingClass", "")
-    if trading_class and trading_class != chain.trading_class:
+    if trading_class != chain.trading_class:
         return False
     multiplier = getattr(contract, "multiplier", "")
     try:
-        if multiplier and float(multiplier) != float(chain.multiplier):
+        if float(multiplier) != float(chain.multiplier):
             return False
     except (TypeError, ValueError):
         return False

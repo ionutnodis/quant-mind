@@ -36,7 +36,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
 from quantmind.analytics.correlation import crisis_correlation
-from quantmind.api.routers._shared import clean, iso
+from quantmind.api.routers._shared import clean, iso, latest_observation_is_future
 from quantmind.api.routers.macro import FACTORS, SECTORS
 from quantmind.risk.returns import InsufficientDataError
 
@@ -163,6 +163,13 @@ def _closes_for(
         if close.empty:
             missing.append(symbol)
             continue
+        try:
+            future_dated = latest_observation_is_future(close)
+        except (TypeError, ValueError):
+            future_dated = True
+        if future_dated:
+            missing.append(symbol)
+            continue
         closes[symbol] = close
     return closes, missing
 
@@ -246,6 +253,11 @@ def _benchmark_returns(store, symbol_map: dict[str, int], benchmark: str, years:
     except (FileNotFoundError, KeyError, OSError, ValueError):
         return None
     close = bars["close"]
+    try:
+        if latest_observation_is_future(close):
+            return None
+    except (TypeError, ValueError):
+        return None
     if years > 0:
         close = close.iloc[-(years * 252):]
     return close.pct_change().dropna()
