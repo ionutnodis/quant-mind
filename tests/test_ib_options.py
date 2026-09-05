@@ -540,6 +540,78 @@ async def test_snapshot_option_quotes_rejects_ticker_contract_substitution():
     assert quotes == []
 
 
+async def test_snapshot_option_quotes_rejects_ticker_security_type_substitution():
+    """Catches a stock ticker being accepted as evidence for an option."""
+
+    class _TickerSecurityTypeSubstitutionIb(_FakeIbSnapshot):
+        async def qualifyContractsAsync(self, *contracts):
+            self.qualify_batches.append(len(contracts))
+            requested = contracts[0]
+            return [
+                _fake_contract(
+                    requested.symbol,
+                    requested.lastTradeDateOrContractMonth,
+                    requested.strike,
+                    requested.right,
+                    9001,
+                    trading_class="SPY",
+                    currency="USD",
+                )
+            ]
+
+        async def reqTickersAsync(self, *contracts):
+            self.ticker_batches.append(len(contracts))
+            substituted = _fake_contract(
+                contracts[0].symbol,
+                contracts[0].lastTradeDateOrContractMonth,
+                contracts[0].strike,
+                contracts[0].right,
+                contracts[0].conId,
+                trading_class=contracts[0].tradingClass,
+                currency=contracts[0].currency,
+            )
+            substituted.secType = "STK"
+            return [_fake_ticker(substituted, bid=1.0, ask=1.2)]
+
+    chain = _params(expirations=("20260918",), strikes=(440.0,))
+
+    quotes = await snapshot_option_quotes(
+        _TickerSecurityTypeSubstitutionIb(),
+        chain,
+        expiries=chain.expirations,
+        strikes=chain.strikes[:1],
+        sleep=_FakeSleeper(),
+    )
+
+    assert quotes == []
+
+
+async def test_snapshot_option_quotes_rejects_blank_chain_trading_class():
+    """Catches two blank trading classes being treated as an exact match."""
+
+    ib = _FakeIbSnapshot()
+    chain = OptionChainParams(
+        underlying_symbol="SPY",
+        underlying_con_id=756733,
+        trading_class="",
+        exchange="SMART",
+        multiplier="100",
+        expirations=("20260918",),
+        strikes=(440.0,),
+    )
+
+    quotes = await snapshot_option_quotes(
+        ib,
+        chain,
+        expiries=chain.expirations,
+        strikes=chain.strikes,
+        sleep=_FakeSleeper(),
+    )
+
+    assert quotes == []
+    assert ib.ticker_batches == []
+
+
 async def test_snapshot_option_quotes_keeps_exact_qualified_and_ticker_identity():
     """Catches an over-strict identity guard dropping a valid sampled contract."""
 

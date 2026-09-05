@@ -237,6 +237,8 @@ def _chain_contract_matches(
     identity = _contract_identity(contract)
     if identity is None or identity[1:] not in requested_terms:
         return False
+    if not isinstance(chain.trading_class, str) or not chain.trading_class.strip():
+        return False
     sec_type = getattr(contract, "secType", "")
     if sec_type != "OPT":
         return False
@@ -261,6 +263,7 @@ def _qualified_contract_identity(contract) -> tuple | None:
         return None
     return (
         *identity,
+        str(getattr(contract, "secType", "")),
         str(getattr(contract, "tradingClass", "")),
         str(getattr(contract, "multiplier", "")),
         str(getattr(contract, "currency", "")),

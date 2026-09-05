@@ -118,6 +118,28 @@ def test_future_dated_rotation_symbol_is_missing_not_ranked(store):
     assert body["as_of"] == "2026-07-24T00:00:00Z"
 
 
+def test_rotation_as_of_is_last_common_matrix_observation(store):
+    bars, meta = store.read_bars(con_id=1, bar_size="1d")
+    older_bars = bars.loc[:"2026-07-22"]
+    store.write_bars(
+        con_id=1,
+        bar_size="1d",
+        bars=older_bars,
+        meta=BarMeta(
+            bar_type=meta.bar_type,
+            adjusted_asof="2026-07-22",
+        ),
+    )
+
+    response = _client(store).post(
+        "/api/rotation",
+        json={"universe": "custom", "symbols": ["A", "B"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["as_of"] == "2026-07-22T00:00:00Z"
+
+
 def test_custom_universe_returns_clustered_matrix_and_returns(store):
     r = _client(store).post(
         "/api/rotation",
@@ -356,6 +378,36 @@ def test_rotation_crisis_returns_normal_and_crisis_matrices(tmp_path):
     lo, hi = body["crisis_mean_corr_ci"]
     assert lo is not None and hi is not None and lo <= hi
     assert "range-restriction" in body["caveat"].lower()
+
+
+def test_rotation_crisis_as_of_is_last_common_constituent_and_benchmark_observation(tmp_path):
+    store = _crisis_store(tmp_path)
+    for con_id, end in ((1, "2026-07-17"), (2, "2026-07-22")):
+        bars, meta = store.read_bars(con_id=con_id, bar_size="1d")
+        older_bars = bars.loc[:end]
+        store.write_bars(
+            con_id=con_id,
+            bar_size="1d",
+            bars=older_bars,
+            meta=BarMeta(
+                bar_type=meta.bar_type,
+                adjusted_asof=end,
+            ),
+        )
+
+    response = _client(store).post(
+        "/api/rotation/crisis",
+        json={
+            "universe": "custom",
+            "symbols": ["A", "B"],
+            "tail": 0.2,
+            "min_tail": 10,
+            "years": 5,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["as_of"] == "2026-07-17T00:00:00Z"
 
 
 def test_rotation_crisis_min_tail_guard_is_422(tmp_path):

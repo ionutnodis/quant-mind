@@ -289,6 +289,7 @@ def rotation_crisis(request: Request, req: CrisisRequest) -> CrisisResponse:
         res = crisis_correlation(returns_df, bench, tail=req.tail, min_tail=req.min_tail, seed=0)
     except InsufficientDataError as e:
         raise HTTPException(422, detail=str(e))
+    common_index = returns_df.index.intersection(bench.index)
 
     clustered = cluster_order(res.normal_corr)
     normal = res.normal_corr.loc[clustered, clustered]
@@ -305,7 +306,7 @@ def rotation_crisis(request: Request, req: CrisisRequest) -> CrisisResponse:
         tail_n=res.tail_n,
         benchmark=benchmark,
         caveat=res.caveat,
-        as_of=iso(max(closes[s].index[-1] for s in symbols)),
+        as_of=iso(common_index[-1]),
         missing=missing,
     )
 
@@ -330,8 +331,7 @@ def rotation(request: Request, req: RotationRequest) -> RotationResponse:
         )
 
     returns_df = pd.DataFrame({s: closes[s].pct_change().dropna() for s in symbols}).dropna()
-    as_of_dates = [closes[s].index[-1] for s in symbols]
-    as_of = iso(max(as_of_dates))
+    as_of = iso(returns_df.index[-1]) if not returns_df.empty else None
 
     if len(symbols) == 1 or returns_df.shape[0] < 2:
         clustered = symbols
