@@ -113,7 +113,7 @@ OS-process lock acquisition and interrupted ownership recovery.
 Browser checks use Chromium and WebKit, the real API with isolated synthetic
 data, multiple display widths, and a short landscape viewport. Unit tests use
 fixed fixtures and mocked network access; CI does not depend on feed uptime.
-The [README screenshots](../README.md#build-your-personal-world-desk) were captured
+The [README screenshots](../README.md#make-world-your-own) were captured
 from the running UI using the explicitly illustrative demo, not real portfolios.
 
 The initial read-only live probe parsed 13 public feeds. A final repeat parsed

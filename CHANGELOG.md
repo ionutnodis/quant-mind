@@ -9,19 +9,21 @@ All notable changes to QuantMind are documented in this file.
 - Open **World** for a personal event desk covering central banks, macro releases, energy, geopolitics and disasters through 17 source routes; 14 require no API key. Optional SEC, X and Reddit routes clearly state their identity, approval or payment requirements.
 - Filter cached events through a pinned portfolio, watchlist, interests and regions, with explicit reasons for each match and separate published/observed timestamps. Holding mentions are distinguished from thematic attention, not presented as risk attribution.
 - Run `uv run python -m quantmind.world_cli --watch` to keep collecting while the browser is closed, or select individual sources with repeatable `--source` flags.
-- Follow the expanded README and source guide for first use, optional credentials, freshness and rights boundaries; desktop, phone and ultrawide screenshots use a reproducible illustrative demo.
+- Follow the quick-start README and detailed user guide for first use, optional credentials, freshness and rights boundaries. Phone screenshots retain their proportions at compact widths; future design concepts are kept separate from current product screens.
 
 ### Changed
 
 - Navigation and the command palette carry the selected immutable book between workspaces, preserving account, broker-mode and reporting-currency checks.
 - Source failures retain last-good events and provenance. Independent status, stale warnings and bounded refreshes keep failures visible without overwriting portfolio or market evidence.
 - World scales from narrow phones to ultrawide displays, with read-only companion controls below 768 × 600 and recoverable lens editing in the full workspace.
+- Pages and charts load on demand. Initial static JavaScript is about 363 kB raw / 114 kB gzip, down from 1.87 MB / 593 kB; the shared Plotly runtime downloads only when needed. Production bundle budgets and browser tests guard loading and recovery behavior.
 
 ### Fixed
 
 - Concurrent API/CLI refreshes now share a tested process lease; first-start database races, cancellation, sibling persistence failures and corrupt observed-event rows cannot silently break refresh ownership or permanently poison a feed.
 - Malformed social identities, ticker-prefix matches, unsafe cached links and compressed-response expansion are rejected before they can create misleading evidence or exceed the ingestion memory boundary.
 - Lens save feedback reflects actual persistence, pending saves cannot discard newer edits, and invalid saved preferences can be repaired from the page.
+- Long headlines, summaries, and saved lens values wrap within narrow screens instead of forcing horizontal scrolling. World also reuses date-formatting setup when filtering events.
 - Release checks detect mismatches between the API, Python package, lockfile and web package versions; Setup tests no longer depend on a prior release's version literal.
 
 ## [0.5.0.0] - 2026-09-04

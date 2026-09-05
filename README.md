@@ -1,462 +1,190 @@
 # QuantMind
 
-**A local-first, options-aware portfolio risk workbench for investors who want to understand the book they actually own.**
+A personal portfolio and risk workbench: understand what you own, explore what drives its risk, and follow the world events that matter to you.
 
-QuantMind brings positions, factor exposure, scenario analysis, expected shortfall, options Greeks, and hedge exploration into one auditable workspace. It is designed for a concentrated, discretionary investor with a long-beta core and an options overlay, not for generic charting or trade execution.
+QuantMind runs on your computer. It combines a read-only IBKR connection, a local evidence cache, analytical tools, and a personal **World** news desk. It is built for one investor and one selected account at a time.
 
-The **World monitor** adds a personal news-and-events desk: open macro, central-bank, energy, geopolitical and disaster feeds, filtered locally through your pinned book, watchlist and interests. It works without an IBKR connection or market-news subscription.
+[Get started](#get-started) · [Find your way around](#find-your-way-around) · [World monitor](#make-world-your-own) · [User guide](docs/USER_GUIDE.md) · [Release notes](CHANGELOG.md)
 
-> [!WARNING]
-> QuantMind is pre-1.0 research software. It is read-only, does not submit orders, and is not investment advice. Verify all inputs, model assumptions, and outputs independently before making an investment decision.
+<a href="docs/screenshots/world-desktop.png"><img src="docs/screenshots/world-desktop.png" alt="QuantMind World desk with a personal watchlist, explained event matches, and source health" width="1000"></a>
 
-## Start here: the QuantMind mental model
+*World on desktop. Headlines and watchlists shown here are illustrative fixtures, not live news or a real portfolio. Click any screenshot to open it at full size.*
 
-QuantMind has two kinds of truth and one deliberate boundary:
+> [!IMPORTANT]
+> **Research software, not a trading system.** QuantMind is a pre-1.0 alpha. It never submits orders, and its outputs are not investment advice. Check the inputs, assumptions, and limitations before using a result.
 
-```text
-IBKR + permitted public sources
-          │
-          ▼
-  1. SYNC THE EVIDENCE CACHE     prices, contract identity, FX, macro, ETF facts
-          │
-          ▼
-  2. PIN THE CURRENT BOOK        immutable positions + broker/account provenance
-          │
-          ▼
-  3A. ANALYSE THE PINNED BOOK    Portfolio → What-If → Hedge Lab
-  3B. ANALYSE ONE SYMBOL SERIES  Risk → factors and tail statistics
-          │
-          ▼
-     human decision only         QuantMind never submits an order
-```
+## What you can do
 
-**Sync** and **Pin** are different operations. Sync refreshes the evidence used by the models. Pin creates an immutable record of the positions used by Portfolio, What-If, and Hedge Lab. Those book-scoped screens should be read as: “this result was computed for book `book_ref`, using evidence available as of this time.” Risk has a separate scope in v0.5: it analyses the single symbol selected on that page and does not consume `book_ref`.
+- **Understand your positions:** inspect stocks, ETFs, and equity options, including contract identity, currencies, valuation, and delta-adjusted exposure.
+- **Study a holding's risk:** fit factor regressions, inspect beta and uncertainty, and explore historical tail loss and simulations.
+- **Compare equity-book decisions:** test weight changes or explore hedge sizing against a target beta, without placing a trade.
+- **Build a personal World desk:** follow public macro, central-bank, energy, and world-event feeds through your holdings, watchlist, topics, and regions.
+- **Keep evidence visible:** see where data came from, how old it is, and why a calculation is unavailable.
 
-Five terms appear throughout the product:
+**Know the scope:** Risk currently analyses **one symbol**, not the whole book's factor contributions. What-If and Hedge Lab currently require an equity-only book. European listings, dated FX conversion, and optional justETF profiles are supported; issuer-holdings look-through is still future work.
 
-| Term | Plain-English meaning |
-| --- | --- |
-| **Book** | The selected account's stocks, ETFs, and equity options at one point in time |
-| **Pinned book / `book_ref`** | An immutable ID for that book; it prevents a refresh from silently changing positions underneath book-scoped Portfolio, What-If, or Hedge Lab results |
-| **Evidence cache** | Local market, macro, FX, contract, and fund-reference data used by the calculations |
-| **As of** | The observation date of the weakest required input, not merely the newest file written |
-| **Ready / attention / blocked** | Whether QuantMind has enough trustworthy evidence to calculate; amber and red are data-quality states, not trading signals |
+## Get started
 
-If the interface seems empty, begin at `/book/setup`. Do not begin in Risk or Hedge Lab and try to infer what is missing.
+You need **Python 3.12+**, [uv](https://docs.astral.sh/uv/), and [Bun](https://bun.sh/). Start with the demo if you want to learn the interface before connecting an account.
 
-## Your first useful session
-
-The goal of the first session is not to generate a trade. It is to prove that QuantMind is analysing the intended account, listings, currencies, and option contracts.
-
-1. **Choose the reporting boundary.** Set one `QM_ACCOUNT_ID` and a `QM_BASE_CURRENCY` in `.env`. A family-office or advisor login must select one account; QuantMind refuses to blend visible accounts.
-2. **Connect the evidence sources.** Start IB Gateway/TWS in read-only mode, start QuantMind, and open `/book/setup`.
-3. **Follow exactly one next action.** Setup will ask for market sync, held-option sync, FX sync, or a new book pin. Resolve amber/red cards instead of skipping past them.
-4. **Reconcile Portfolio against IBKR.** Check symbols, contract IDs, currencies, quantities, option strikes/expiries/multipliers, and total value. Stop if the rows do not match the broker.
-5. **Open Risk for one symbol.** Select the held or cached symbol you want to study, start with the benchmark as the primary factor, and add only factors for which you have an economic thesis. Risk's beta, R², variance contribution, return attribution, and tail loss describe that symbol, not the pinned portfolio.
-6. **Test a decision.** Use What-If to clone the pinned equity book and change weights, or Hedge Lab to rank a small candidate set against a target beta. These are comparisons, not recommendations or orders.
-7. **Return to Setup after the portfolio changes.** Sync evidence if needed, pin a new book, and keep the older `book_ref` as the audit trail for earlier Portfolio, What-If, and Hedge Lab results.
-
-The detailed installation and broker acceptance checklist lives in the [first-user runbook](docs/FIRST_USER_RUNBOOK.md).
-
-Setup is the control plane for that sequence. Read the **Next action** first, then use the evidence cards to understand why the book is ready, needs attention, or is blocked. The **European ETF profiles** card reports whether optional sourced-profile enrichment is required. The synthetic example below is deliberately blocked: the API is healthy, but IBKR is unavailable, market and macro evidence are incomplete, and no book has been pinned.
-
-![Current Setup screen showing the single next action and readiness cards for the API, broker, market cache, macro, options, FX, European ETF profiles, and current book](docs/screenshots/setup-desktop.png)
-
-## Screen-by-screen guide
-
-| Screen | The question it answers | What you should do there |
-| --- | --- | --- |
-| **Setup** | “Can I trust the inputs for this book?” | Connect one IBKR account, sync required evidence, resolve stale/missing states, and pin the current book |
-| **Today** | “What changed around my book?” | Scan market regime, overnight moves, curve/volatility context, rotation, and headline book risk before deeper analysis |
-| **Portfolio** | “What do I actually own and where is the exposure?” | Reconcile the ledger, inspect local/base values, delta-adjusted exposure, option sleeve, expiry buckets, and core-vs-overlay P&L |
-| **Risk** | “Which common drivers explain this symbol's return and risk?” | Choose one symbol, select factors, inspect beta and uncertainty, decompose explained vs specific variance, and calculate symbol-level tail risk |
-| **What-If** | “How would a proposed equity-weight change alter risk?” | Clone the pinned book, edit weights, recompute, compare book-vs-benchmark risk, and save a named local scenario |
-| **Hedge Lab** | “Which allowed instrument best moves beta toward my target?” | Set a target, constrain candidates, run the ranking, and inspect notional, residual beta, carry, and resilience |
-| **Macro** | “What regime variables surround the portfolio?” | Review yields, curve, liquidity, sectors, and factor context using dated source evidence |
-| **World** | “Which world events deserve my attention, and why?” | Refresh public feeds, set a local personal lens, filter headlines, and inspect source freshness and direct holding mentions |
-| **Lab** | “Does a research model fit this series well enough to inspect?” | Select data, fit a registered model, examine parameter uncertainty, simulate, then compare its output with the book |
-
-### Build your personal World desk
-
-1. Open **World** in the sidebar (or press `⌘K` / `Ctrl+K` and select World).
-2. Click **Refresh sources**. No keys are needed for the 14 public routes. Each source shows its own outcome; a failed feed does not erase cached events or stop portfolio analysis.
-3. In **Personal lens**, enter comma-separated watch symbols (`NVDA, ASML`), interests (`semiconductors, energy, rates`) and regions (`Europe, US, UK`). Click **Save lens**, then **My lens** to see matching events. Preferences stay in your local data directory.
-4. For actual holding matches, open a pinned Portfolio and choose **World**. Navigation carries `book_ref` with you. You can also paste a 12-character pinned reference and click **Apply**. Without a selected book, watchlist matches are not represented as holdings.
-5. Read **Why it matches** beside each event, then follow the headline to its original source. Amber identifies a direct book mention; steel identifies a watchlist, topic or regional interest. These are attention rules, not causal risk estimates or trading signals.
-
-![World monitor showing a synthetic technology-investor lens, event explanations and independent source health](docs/screenshots/world-desktop.png)
-
-*World screenshots use explicitly illustrative news and a synthetic watchlist, not live investment information.* The same semantic layout reflows on phones, iPads and ultrawide monitors. Phones can browse and filter; editing and refreshing require the full workspace. [See the ultrawide layout](docs/screenshots/world-wide.png). The isolated demo can be reproduced with [scripts/world_demo.py](scripts/world_demo.py).
-
-![World monitor on a phone, with events and match explanations stacked for reading](docs/screenshots/world-mobile.png)
-
-**Keep it running:** optionally refresh from a second terminal while using the dashboard:
-
-```bash
-# One refresh; the normal source cooldowns still apply
-uv run python -m quantmind.world_cli
-
-# Continue every five minutes; Ctrl+C stops the monitor
-uv run python -m quantmind.world_cli --watch --interval 300
-
-# Monitor only selected public sources
-uv run python -m quantmind.world_cli --watch --source fed --source ecb --source eia
-```
-
-The API and CLI share the cache and refresh lock. The visible page checks the local cache every 30 seconds (every two seconds during an active refresh), so CLI updates appear automatically. No provider is polled merely by opening the page. **World “Latest successful refresh” is an ingestion timestamp**, not the time every story happened. Every event has a separate **Published** or **Observed** timestamp and every source has its own last-success/stale status.
-
-X and Reddit are separate, disabled-by-default connectors. X requires explicit acceptance of its paid API plus a bearer token and query. Reddit requires approved OAuth access. Configure either only in server-side `.env`, never in frontend `VITE_` variables. See the [source catalog and setup guide](docs/data-sources.md) for every endpoint, access requirement, supported coverage and limitations.
-
-### What to read on Today
-
-The top banner is operational: it tells you when the evidence cache is stale and provides the sync action. “Your book” remains blank until a valid current book is available. “At a glance” is market context; it is not a substitute for Portfolio or Risk. “Benchmark tail risk” is an anchor until a complete portfolio-level estimate can be calculated.
-
-*Current-release screenshots below use QuantMind's deterministic synthetic E2E dataset. They never contain a real account or portfolio.*
-
-![Today screen showing the evidence-age banner, market regime, book state, market context, overnight ranking, and benchmark tail-risk anchor](docs/screenshots/today-desktop.png)
-
-The same workflow remains readable on a phone, but QuantMind deliberately hides analysis-authoring and book-mutation controls below `768 × 600`. Mobile is a read-only companion for checking state and results; use a tablet, laptop, or wider monitor to sync, pin, fit, or edit a scenario.
-
-![Current Today screen rendered as the read-only phone companion](docs/screenshots/today-mobile.png)
-
-### How to read the Risk screen
-
-Risk is a single-symbol decomposition page, not a pinned-book view or a single score:
-
-- **Beta / slope** estimates sensitivity to the selected primary factor. A beta of `1.3` means the series historically moved about 1.3% for a 1% factor move over the fitted sample; it is not a forecast.
-- **R²** is the share of historical return variation explained by the selected factor set. High R² means the factor model describes more of the history, not that the investment is safer.
-- **Per-factor beta with HAC confidence intervals** shows estimate uncertainty while allowing for heteroskedasticity and autocorrelation.
-- **Variance decomposition** separates named systematic drivers from the residual, instrument-specific share. Factor shares can be signed in correlated multi-factor models; read them with the displayed reconciliation evidence.
-- **Return attribution** separates average historical return associated with alpha, named factors, and the residual.
-- **Expected shortfall (ES 97.5%)** is the average loss in the worst 2.5% of observed daily outcomes. It is a tail-loss summary, not a maximum possible loss.
-- **Monte Carlo horizon risk** block-bootstraps historical returns into multi-day paths. It answers a horizon question and inherits the limits of the historical sample.
-
-Start with one factor. Add a second factor only when it answers a distinct question, then watch the R² progression and whether coefficients remain stable. Throwing many correlated ETFs into the regression produces an impressive-looking but hard-to-interpret model.
-
-Jensen alpha is shown only when the cached risk-free series matches the reporting currency. v0.5 includes USD `US3M` evidence; an EUR, GBP, or other non-USD analysis therefore withholds alpha instead of silently subtracting a USD cash rate.
-
-![Risk screen showing the factor builder, regression evidence, factor betas, variance decomposition, attribution, rolling beta, tail risk, and Monte Carlo controls](docs/screenshots/risk-desktop.png)
-
-### Portfolio valuation and FX
-
-The Portfolio ledger keeps local and reporting-currency values distinct. For example, a London listing may be quoted in pence by a vendor, normalized to GBP at ingestion, and then converted to an EUR reporting book using dated ECB evidence. QuantMind retains the original quote convention and conversion evidence.
-
-- `local_*` values describe the listing or broker currency.
-- `*_base` values describe `QM_BASE_CURRENCY`.
-- A dash means the number was intentionally withheld, not zero.
-- If one position cannot be priced or converted, QuantMind labels the available subtotal and withholds totals or weights that would imply completeness.
-- Foreign-position unrealized P&L remains local-currency-only in v0.5 because current FX is not evidence of the acquisition-date cost rate.
-
-### What-If versus Hedge Lab
-
-Use **What-If** when you already have a proposed change and want a before/after comparison. Use **Hedge Lab** when you have a target beta and want a ranked list of candidate instruments. Both operate on a pinned book and cached evidence. Neither routes a trade.
-
-An explicitly requested hedge candidate is part of the analytical question: if its currency, FX evidence, or cached history is missing, Hedge Lab returns a named `422` instead of quietly changing the requested universe. When QuantMind chooses the default candidate universe, any omitted candidates and reasons are returned as `skipped_candidates`.
-
-In this alpha, What-If and Hedge Lab are equity-book tools. They fail closed for option books or non-unit multipliers until contract-aware repricing is implemented. Options remain visible in Portfolio and the option-risk surfaces; they are never flattened into ordinary shares just to make a scenario run.
-
-## Three practical workflows
-
-### Concentrated technology book
-
-1. Reconcile the largest positions and option multipliers in Portfolio.
-2. Inspect delta-adjusted underlier exposure so stock and option legs are viewed together.
-3. In Risk, select one holding, use the broad benchmark first, then add a technology/semiconductor factor and rates only when the exposure thesis calls for them.
-4. Compare the holding's Portfolio weight with its symbol-level beta and factor decomposition. QuantMind does not yet aggregate those Risk estimates into book-level factor contributions.
-5. Test a resize in What-If or a beta target in Hedge Lab; compare the resulting tail loss and factor exposure before making any broker-side decision.
-
-### European and UCITS portfolio
-
-1. Set `QM_BASE_CURRENCY` to the currency in which you manage the book, such as `EUR` or `GBP`.
-2. Let IBKR provide listing identity and currency for held instruments. Use explicit yfinance symbols only as a fallback, for example `LGEN.L`.
-3. Enable `QM_UCITS_METADATA_ENABLED=true` only if you accept justETF enrichment. QuantMind keys fund facts by checksum-valid ISIN and caches them locally for 30 days.
-4. Re-run Setup sync after adding a new currency or ETF. Confirm the FX and European ETF profiles cards before pinning the next book.
-5. Treat fund profile data and price data as separate provenance chains. A fresh price does not make stale fund facts fresh. After a failed profile refresh, the instrument sheet keeps the last successful source URL and fetch date visible while withholding the stale fund facts themselves.
-
-### Long equity plus option overlay
-
-1. Pin the book only after exact held contracts have been identified.
-2. Confirm option right, strike, expiry, multiplier, quote freshness, and pricing coverage in Portfolio.
-3. Read delta-adjusted underlier exposure alongside the option sleeve and expiry buckets.
-4. Treat cross-currency aggregate monetary Greeks as unavailable when QuantMind says so. Do not manually add unlike currencies.
-5. Use broker tools for execution; refresh and pin a new QuantMind book after the overlay changes.
-
-## Status and evidence rules
-
-| UI state | Meaning | Operator response |
-| --- | --- | --- |
-| **Ready / green** | All required evidence for that surface passed freshness and identity checks | Continue, while still verifying model assumptions |
-| **Attention / amber** | A recoverable input is stale, partial, or optional-source work failed | Read the named warning, run the offered sync, and verify the new as-of time |
-| **Blocked / red** | QuantMind cannot make the calculation without fabricating, mixing, or mis-scoping data | Resolve the named account, currency, contract, book, or unsupported-instrument issue |
-| **Unavailable / dash** | The value is intentionally not calculated from current evidence | Do not interpret it as zero and do not fill it manually without recording provenance |
-
-## A normal operating rhythm
-
-- **Before analysis:** start IBKR, open Setup, refresh stale evidence, then pin the book you intend to discuss.
-- **During book analysis:** keep the `book_ref` fixed while moving between Portfolio, What-If, and Hedge Lab. Record the selected symbol separately when using Risk.
-- **After a broker-side change:** sync changed instruments and pin a new book rather than overwriting the old analytical state.
-- **When sharing output:** include the book reference for book-scoped results or the selected symbol for Risk, plus reporting currency, as-of date, selected factors, horizon, and any incomplete-evidence warning.
-- **When a result looks surprising:** inspect source provenance and contract identity before changing the model.
-
-## Why QuantMind
-
-Most market tools know the market. QuantMind is intended to know your book:
-
-- Pin an immutable representation of the current book before running a What-If or hedge calculation.
-- Separate systematic factor exposure from idiosyncratic risk with regression, beta, variance decomposition, and return attribution.
-- Treat equity positions and option overlays as one analytical problem, with Greeks, option-chain storage, scenario stress, and Monte Carlo tools.
-- Keep the evidence local and explicit: as-of times, data freshness, book references, failure states, and source boundaries are visible rather than silently filled in.
-- Work from an IBKR-connected cache when available, while keeping a deterministic synthetic mode for development and demos.
-
-QuantMind does not try to replace TradingView, Koyfin, or an execution platform. It supplies the book-aware risk layer those products cannot provide.
-
-## What is included today
-
-| Area | Current capability |
-| --- | --- |
-| Book truth | Canonical book contract, immutable snapshots, provenance manifests, corruption detection, and explicit `book_ref` pinning |
-| Factor risk | Base-currency CAPM and multi-factor regression, rolling beta, alpha only when risk-free evidence exists, variance decomposition, and attribution |
-| Risk | Historical expected shortfall, annualised volatility, horizon Monte Carlo, drawdown context, and scenario tooling |
-| Options | Read-only IBKR chain ingestion for bounded surfaces plus exact held contracts, stored bid/ask marks, book Greeks, and option-aware risk boundaries |
-| Decisions | What-If analysis, hedge candidate ranking/sizing, leverage checks, and saved local scenarios |
-| Market context | Regime, macro, rotation, instruments, news adapters, and a research-model lab |
-| Data | IBKR-first daily bars and contract identity, ECB dated FX, opt-in ISIN-addressed UCITS profiles, explicit yfinance fallback, FRED macro data, and a local Parquet/DuckDB cache |
-| Product | Guided first-run readiness, FastAPI API, React 19 web client, generated OpenAPI types, and a dark professional alpha workbench |
-
-The current release is a single-book alpha. Multi-book onboarding, issuer-specific UCITS holdings ingestion, wider vendor ingestion, production broker jobs, and the full SaaS layer are intentionally future work.
-
-## Architecture
-
-```text
-IBKR Gateway / permitted public sources
-                 │
-                 ▼
-      sync CLIs and source adapters
-                 │
-                 ▼
-  local Parquet + DuckDB evidence cache
-                 │
-                 ▼
-Python risk, factor, options, and hedge core
-                 │
-                 ▼
-         FastAPI contract + OpenAPI
-                 │
-                 ▼
-    React workbench / local browser UI
-```
-
-The analytical core is deliberately separated from I/O. `risk/`, `analytics/`, and `hedge/` contain pure calculation code; broker, source, datastore, and API layers carry integration concerns.
-
-## Quick start
-
-For the first live portfolio, follow the complete [first-user runbook](docs/FIRST_USER_RUNBOOK.md). The short path is below.
-
-### Prerequisites
-
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/)
-- [Bun](https://bun.sh/)
-- Optional: IBKR Gateway or TWS for live read-only data and portfolio access
-
-### Run the local workbench
+### 1. Install
 
 ```bash
 git clone https://github.com/ionutnodis/quant-mind.git
 cd quant-mind
-
-cp .env.example .env
 uv sync --locked --dev
-cd web && bun install --frozen-lockfile && bun run build && cd ..
-
-# Start IBKR Gateway or TWS first, then start the local workbench.
-uv run python -m quantmind.api.main
+cd web
+bun install --frozen-lockfile
+bun run build
+cd ..
 ```
 
-Open `http://127.0.0.1:8000/book/setup` (`/setup` remains a first-use alias). The Setup screen diagnoses the local API, the selected IBKR account, daily-bar freshness, and the current pinned book. It can run the market sync and pin the current live book without submitting orders.
+### 2. Choose demo or your own portfolio
 
-### Explore without connecting a brokerage account
+**Try the demo — no broker or API keys needed**
 
-Use the isolated synthetic environment to learn the navigation and model surfaces before pointing QuantMind at IBKR. It writes only to a temporary generated dataset and cannot submit orders.
-
-Terminal 1, from the repository root:
+From the repository root:
 
 ```bash
 uv run python -m quantmind.testing.synthetic_e2e --port 8765
 ```
 
-Terminal 2:
+In a second terminal, from the repository root:
 
 ```bash
 cd web
 QM_API_PROXY_TARGET=http://127.0.0.1:8765 bun run dev -- --port 4173
 ```
 
-Open `http://127.0.0.1:4173`. The synthetic environment is deliberately deterministic, so it is suitable for orientation, screenshots, UI development, and regression testing. It is not suitable for validating broker connectivity.
+Open **[127.0.0.1:4173](http://127.0.0.1:4173)**. The dashboard uses a temporary synthetic dataset, isolated from your real holdings. It is for learning and testing, not live prices or broker validation. World starts empty in this demo; [the illustrated World demo](docs/USER_GUIDE.md#try-the-illustrated-world-demo) includes sample events.
 
-For frontend development, run Vite in a second terminal:
-
-```bash
-cd web
-bun run dev
-```
-
-Open the Vite URL, normally `http://127.0.0.1:5173`. Vite proxies `/api` to the local API, so the browser does not need direct broker access.
-
-### Populate data
-
-With IBKR Gateway running, sync the starter universe, the selected account's stock and option underliers, held-option chains, and macro series:
+**Use your own portfolio**
 
 ```bash
-uv run python -m quantmind.sync_cli
+cp .env.example .env
 ```
 
-To sync a smaller set of daily bars:
-
-```bash
-uv run python -m quantmind.sync_cli SPY QQQ TLT
-```
-
-Option-chain sync can also be run explicitly. It reads cached spot data and snapshots monthly options up to 90 days out, within ±15% of spot:
-
-```bash
-uv run python -m quantmind.options_sync_cli SPY QQQ
-```
-
-If a broker is unavailable, the application starts in a degraded but honest state: unavailable live data is surfaced as unavailable rather than invented.
-
-### Resolve identity and stale-cache blocks
-
-The `symbol_map`, stored as `$QM_DATA_DIR/symbols.json`, deliberately maps each display symbol to one canonical IBKR contract ID (`conId`). This alpha cannot represent two listings that IBKR reports under the same ticker. Before sync, normalize a dual-listed same-ticker holding to one canonical listing/symbol; QuantMind blocks analysis rather than collapse two contracts into one position.
-
-Do not hand-edit the cache to clear an identity warning. Run **Sync market data** in Setup or `uv run python -m quantmind.sync_cli` to rebuild stale or mismatched instrument metadata. Re-run `uv run python -m quantmind.options_sync_cli UNDERLIER` for a stale or mismatched option chain. If an existing `book_ref` then reports that instrument identity changed, pin a new book before analysis.
-
-## Configuration
-
-Runtime configuration is loaded from `.env` with the `QM_` prefix. Common settings:
+Edit `.env` to select your IBKR account, connection, and reporting currency:
 
 ```dotenv
-# IBKR Gateway is paper-trading port 4002 by default; live is commonly 4001.
+QM_ACCOUNT_ID=YOUR_ACCOUNT_ID
 QM_HOST=127.0.0.1
 QM_PORT=4002
-QM_CLIENT_ID=17
-QM_ACCOUNT_ID=
-
-# Local data cache and benchmark
-QM_DATA_DIR=data
-QM_BENCHMARK=SPY
-QM_BASE_CURRENCY=USD
-# Optional when the production frontend is built outside ./web/dist
-# QM_WEB_DIST=/absolute/path/to/web/dist
-
-# Opt-in free fallback. IBKR remains authoritative for symbols it supplies.
-QM_YFINANCE_SYMBOLS=LGEN.L
-
-# Optional UCITS profile enrichment. Disabled until explicitly accepted.
-QM_UCITS_METADATA_ENABLED=false
-
-# Optional local API protection
-QM_API_TOKEN=
-QM_API_ALLOWED_ORIGINS=http://127.0.0.1:8000,http://localhost:8000,http://127.0.0.1:5173,http://localhost:5173
+QM_BASE_CURRENCY=EUR
 ```
 
-Do not commit `.env`, API keys, brokerage credentials, account numbers, or private portfolio data.
-
-## Development and verification
+Start **IB Gateway or TWS with read-only API access**, then run:
 
 ```bash
-# Python suite
-uv run pytest
+uv run python -m quantmind.api.main
+```
 
-# Web suite, build, and browser smoke test
+Open **[Setup](http://127.0.0.1:8000/book/setup)** and follow its **Next action**. Port `4002` is the usual paper IB Gateway port; check your own connection settings. Use the [first-user runbook](docs/FIRST_USER_RUNBOOK.md) for broker configuration and the acceptance checklist.
+
+> Keep `.env`, account IDs, API tokens, and your `data/` directory private. The default server is local-only; this is not a hosted multi-user service.
+
+### 3. Get to your first useful result
+
+1. **Sync in Setup.** Download the prices, contracts, FX, and other evidence the selected book needs. Resolve any named warnings.
+2. **Pin your book.** Save a snapshot of the selected account's positions. A pinned reference keeps those positions fixed while you compare results.
+3. **Check Portfolio against IBKR.** Verify quantities, listings, currencies, option contracts, and valuation before trusting the analysis.
+4. **Explore.** Use Risk for a single holding, World for relevant events, or What-If and Hedge Lab for an equity-only book.
+
+**Sync refreshes data; pin saves positions.** After a broker-side portfolio change, sync as needed and pin a new book. A dash means unavailable, not zero. [Learn the terminology and evidence rules →](docs/USER_GUIDE.md#start-here-the-quantmind-mental-model)
+
+## Find your way around
+
+| Screen | Start here when you want to… |
+| --- | --- |
+| **Setup** | Connect, refresh missing data, resolve warnings, or pin a book. |
+| **Today** | Scan market regime, overnight moves, and benchmark context. |
+| **Portfolio** | Reconcile holdings and inspect valuation and option exposure. |
+| **Risk** | Understand the factors and tail risk of **one selected symbol**. |
+| **What-If** | Compare a proposed **equity-book** weight change. |
+| **Hedge Lab** | Explore equity-book hedge candidates and target-beta sizing. |
+| **Macro** | Check rates, the yield curve, liquidity, and market context. |
+| **World** | Read and filter events with an explanation of why they match. |
+| **Lab** | Fit and inspect research models. |
+
+Press **⌘K / Ctrl+K** to jump between screens. For a walkthrough with examples, see the [screen-by-screen guide](docs/USER_GUIDE.md#screen-by-screen-guide).
+
+<details>
+<summary>See Setup and Risk</summary>
+
+**Setup: follow the next action.** This synthetic example deliberately shows missing evidence, so you can recognise a blocked state.
+
+<a href="docs/screenshots/setup-desktop.png"><img src="docs/screenshots/setup-desktop.png" alt="Setup screen with a next action and readiness checks for broker and market data" width="1000"></a>
+
+**Risk: explore one symbol's drivers and tail risk.** This is not a portfolio-level factor decomposition.
+
+<a href="docs/screenshots/risk-desktop.png"><img src="docs/screenshots/risk-desktop.png" alt="Single-symbol Risk screen with factor estimates, variance decomposition, and tail-risk controls" width="1000"></a>
+
+*Both screenshots use synthetic data.*
+
+</details>
+
+## Make World your own
+
+World can run without an IBKR connection. On your normal local server:
+
+1. Open **World → Refresh sources**. The 14 public routes need no API keys; each source reports its own success or failure.
+2. Under **Personal lens**, add watch symbols such as `NVDA, ASML`, interests such as `semiconductors, energy`, and regions such as `Europe, US`.
+3. Choose **Save lens → My lens**. Open World from a pinned Portfolio to include direct holding matches.
+4. Read **Why it matches**, check the timestamp, and open the original source before drawing a conclusion.
+
+Matches are attention filters, not estimates of an event's impact on your portfolio. Failed sources leave existing cached events available; public feeds are not guaranteed real-time or complete.
+
+For background refreshes, run this in a second terminal:
+
+```bash
+uv run python -m quantmind.world_cli --watch --interval 300
+```
+
+X and Reddit connectors are **off by default** and require their own approved access; X also requires explicit acceptance of paid API use. [Source catalog, credentials, freshness, and limitations →](docs/data-sources.md)
+
+## On every screen size
+
+The workspace reflows from ultrawide monitors to laptops and tablets. On a phone, it becomes a **read-only companion** for browsing state and results. Syncing, pinning, and analysis authoring need a viewport at least `768 × 600`.
+
+<p align="center">
+  <a href="docs/screenshots/world-mobile.png"><img src="docs/screenshots/world-mobile.png" alt="Phone-sized World view with readable headlines and event-match explanations" width="260"></a>
+</p>
+
+*World on a phone, shown at a compact width with its original proportions. [Full-height Today view](docs/screenshots/today-mobile.png) · [Ultrawide World view](docs/screenshots/world-wide.png)*
+
+## Help and deeper reading
+
+| I need to… | Read this |
+| --- | --- |
+| Connect my first account or troubleshoot Setup | [First-user runbook](docs/FIRST_USER_RUNBOOK.md) |
+| Understand a result, European ETFs, FX, or option limits | [User guide](docs/USER_GUIDE.md) |
+| Configure World feeds, X, or Reddit | [World source guide](docs/data-sources.md) |
+| Check data provenance and provider boundaries | [Data sources](DATA_SOURCES.md) |
+| Develop the frontend or run browser tests | [Web development guide](web/README.md) |
+| Understand architecture and product direction | [Engineering notes](CLAUDE.md) · [Design system](DESIGN.md) · [Future concepts](docs/PRODUCT_DIRECTION.md) |
+| See what changed or what is still planned | [Changelog](CHANGELOG.md) · [Backlog](TODOS.md) |
+| Report a security problem | [Security policy](SECURITY.md) |
+
+<details>
+<summary>Developer checks</summary>
+
+```bash
+uv run pytest
 cd web
 bun run lint
 bunx vitest run
 bun run build
+bun run test:bundle
+bunx playwright install chromium webkit
 bunx playwright test
 ```
 
-The browser suite starts an isolated synthetic FastAPI cache. It is safe to use in CI and does not read a developer's local holdings.
+The browser tests run against an isolated synthetic backend and the production frontend build. See [web/README.md](web/README.md) for development servers and generated API types.
 
-When changing an API contract, regenerate both committed API artifacts:
+</details>
 
-```bash
-uv run python scripts/dump_openapi.py
-cd web
-bun run gen:types
-```
+## Project status and licensing
 
-## Product boundaries
+Single-account, local-first alpha. No trade execution, hosted account management, complete book-factor X-ray, or issuer-level ETF holdings look-through yet. See the [detailed boundaries](docs/USER_GUIDE.md#product-boundaries).
 
-- **Read-only by design:** no order submission or broker execution surface.
-- **Exactly one account:** `QM_ACCOUNT_ID` selects the portfolio. A multi-account IBKR session without an explicit selection fails closed rather than blending client books.
-- **One contract per display symbol:** the current `symbol_map` stores one canonical `conId` for each symbol. Dual-listed positions that share a ticker must be normalized to one canonical listing/symbol before sync; the alpha has no in-app listing-reconciliation layer.
-- **Advisor-safe reads:** selected-account portfolio updates avoid IBKR's global positions request, which is not available to advisor/master sessions with more than 50 subaccounts.
-- **Local-first:** binds to loopback by default and keeps the evidence cache on the local machine.
-- **Single provenance:** yfinance fallback is opt-in and never silently replaces IBKR data for the same symbol. A configured fallback symbol with an existing positive IBKR conId remains IBKR-owned and is skipped with a warning.
-- **European quote units:** London `GBp`/`GBX` fallback bars are normalized from pence to GBP at ingestion, with the original unit and scale retained in metadata.
-- **Failure isolation:** one unavailable symbol, index entitlement, metadata record, or external-data source produces an explicit partial sync without discarding successful independent cache phases.
-- **Single writer:** browser-triggered, full-CLI, and option-chain syncs share a datastore-wide process lock, so two processes cannot publish competing cache generations.
-- **Data honesty:** readiness uses the weakest required market/macro observation; stale books, incomplete option chains, unsupported contracts, and invalid numeric input are represented explicitly. If any position is unpriced, QuantMind withholds total value and portfolio weights and labels the priced subtotal.
-- **Currency guard:** mixed-currency stock and ETF prices are converted into `QM_BASE_CURRENCY` with dated, provenance-backed ECB observations before portfolio and factor-return math. Cross-currency aggregate option Greeks remain withheld until every monetary Greek is converted leg by leg.
-- **UCITS identity:** broker symbol/conId identifies the listing; ISIN identifies the ETF share class. Optional justETF enrichment is disabled by default, routed only for supported European fund-domicile prefixes, cached for 30 days, and shown separately from price provenance. The prefix gate is an ingestion heuristic, not a regulatory UCITS attestation.
-- **Instrument guard:** the first-user acceptance book may contain stocks, ETFs, and equity options. Futures, futures options, bonds, CFDs, FX/cash rows, and other security types remain explicitly unsupported.
-- **Responsive workflow:** one semantic UI scales from wide monitors through laptops and tablets to a read-only phone companion; authoring controls require at least 768 × 600 and dense analytical tables scroll inside their panels.
-
-### Missing-FX behavior by endpoint
-
-| Surface | Behavior when required dated FX is missing or stale |
-| --- | --- |
-| Portfolio | Returns `200` with local marks, `fx.status=incomplete`, partial valuation, and withheld total/weights where conversion is unavailable |
-| Setup | Returns `needs_attention` and routes the user to `sync_fx_data` |
-| Risk, What-If, Hedge, Leverage | Return a named `422` rather than calculate returns, factors, or sizing from unlike currencies |
-| Options Greeks | Return a named `422` for non-base-currency books until monetary Greeks and stress P&L are normalized leg by leg |
-
-The 0.5 API keeps broker-reported account fields in their original currency and adds explicit `*_base` fields for normalized account totals. Base-currency analytical responses share one nested `fx` evidence contract (`status`, `base_currency`, `source`, `as_of`, `fetched_at`, and missing currencies).
-
-Pinned books keep their original reporting currency as part of their immutable identity. After changing `QM_BASE_CURRENCY`, mint a lineage-preserving successor before reusing an older analysis URL:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/book/OLD_BOOK_REF/rebase
-```
-
-The response returns a new `snapshot_id`, retains the original positions and valuation timestamp, and records `rebased_from`. The old snapshot remains unchanged.
-
-## Approved product direction
-
-The following images are **design-review mockups, not v0.5 product screenshots**. They document the approved direction for the next audience-facing iteration: reconciliation before publication, a book-level risk X-ray, immutable before/after decision review, and a read-only mobile companion. They are included so contributors can distinguish the intended product thesis from capabilities that already ship. Names, positions, and values shown in these mockups are illustrative and are not broker data.
-
-### Reconcile before publishing a book
-
-![Approved future-state mockup showing source-to-canonical book reconciliation and hard truth gates](docs/screenshots/concept-setup-reconciliation.png)
-
-### Explain concentration as risk, not only capital weight
-
-![Approved future-state mockup showing a concentrated portfolio risk X-ray and named factor contributions](docs/screenshots/concept-risk-xray.png)
-
-### Review a proposed change against the same evidence
-
-![Approved future-state mockup comparing an immutable live book with a hypothetical decision](docs/screenshots/concept-decision-review.png)
-
-### Keep phones useful without turning them into an execution surface
-
-![Approved future-state mockup of the read-only mobile risk companion](docs/screenshots/concept-mobile-companion.png)
-
-## Documentation
-
-- [Design system and product decisions](DESIGN.md)
-- [First-user installation and acceptance runbook](docs/FIRST_USER_RUNBOOK.md)
-- [Contributor and engineering notes](CLAUDE.md)
-- [Agent workflow routing](AGENTS.md)
-- [Data-source boundaries and provenance](DATA_SOURCES.md)
-- [World source catalog, credentials and operating guide](docs/data-sources.md)
-- [World release engineering brief](docs/WORLD_ENGINEERING_BRIEF.md)
-- [Security policy](SECURITY.md)
-- [Web-client setup and API type generation](web/README.md)
-- [API contract](openapi.json)
-- [Release notes](CHANGELOG.md)
-- [Deferred work](TODOS.md)
-
-## License and status
-
-QuantMind is a public, pre-1.0 source repository. No open-source license has been granted yet; all rights are reserved unless the repository owner grants permission in writing. Public visibility alone does not grant permission to copy, modify, or redistribute the code.
+This repository is publicly visible, but **no open-source license has been granted**. All rights are reserved unless the owner grants written permission; public visibility alone does not permit copying, modification, or redistribution.
