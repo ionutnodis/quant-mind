@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -163,7 +164,10 @@ def test_setup_status_prioritizes_starting_gateway_for_an_empty_install(tmp_path
     assert response.status_code == 200
     assert response.json() == {
         "overall": "needs_attention",
-        "api": {"status": "ready", "version": "0.5.0.0"},
+        "api": {
+            "status": "ready",
+            "version": (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip(),
+        },
         "broker": {
             "status": "unavailable",
             "provider": "IBKR",

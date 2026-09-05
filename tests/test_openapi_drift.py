@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tomllib
 from pathlib import Path
 
 # scripts/ isn't a package on the default test path (no conftest.py rootdir
@@ -30,3 +31,15 @@ def test_committed_openapi_json_matches_generated_spec():
     committed = json.loads(OUTPUT_PATH.read_text())
     current = json.loads(json.dumps(build_spec(), sort_keys=True))
     assert committed == current, DRIFT_MESSAGE
+
+
+def test_release_version_matches_api_and_package_manifests():
+    version = (_REPO_ROOT / "VERSION").read_text().strip()
+    project = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text())
+    frontend = json.loads((_REPO_ROOT / "web/package.json").read_text())
+    locked = tomllib.loads((_REPO_ROOT / "uv.lock").read_text())
+    installed_project = next(package for package in locked["package"] if package["name"] == "quantmind")
+    assert build_spec()["info"]["version"] == version
+    assert project["project"]["version"] == version
+    assert frontend["version"] == version
+    assert installed_project["version"] == version

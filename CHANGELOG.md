@@ -22,6 +22,7 @@ All notable changes to QuantMind are documented in this file.
 - Concurrent API/CLI refreshes now share a tested process lease; first-start database races, cancellation, sibling persistence failures and corrupt observed-event rows cannot silently break refresh ownership or permanently poison a feed.
 - Malformed social identities, ticker-prefix matches, unsafe cached links and compressed-response expansion are rejected before they can create misleading evidence or exceed the ingestion memory boundary.
 - Lens save feedback reflects actual persistence, pending saves cannot discard newer edits, and invalid saved preferences can be repaired from the page.
+- Release checks detect mismatches between the API, Python package, lockfile and web package versions; Setup tests no longer depend on a prior release's version literal.
 
 ## [0.5.0.0] - 2026-09-04
 

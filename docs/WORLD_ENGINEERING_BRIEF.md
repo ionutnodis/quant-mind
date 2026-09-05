@@ -94,11 +94,16 @@ No order-placement endpoint or broker permission was added.
 
 ## Verification and review
 
-Final local release checks: **1,594 backend tests passed** (8 skipped,
+Final local release checks: **1,595 backend tests passed** (8 skipped,
 1 deselected), **133 frontend tests passed**, and **18 Chromium/WebKit browser
 tests passed**. Frontend lint and the production build passed; existing
 deprecation/runtime-fixture warnings and the large JavaScript chunk warning
 remain. Provider tests were rerun after a test-only placeholder cleanup.
+
+The first CI run exposed a prior-version literal in the Setup response test
+after the release bump. The test now reads `VERSION`, and a new regression checks
+the API, Python package, lockfile and web package against that manifest. The full
+backend suite was rerun after the fix; no application behavior was weakened.
 
 Tests cover parsers, API authentication and book scope, profile persistence,
 source outages, retention, cache corruption, single-flight refresh, CLI exit
