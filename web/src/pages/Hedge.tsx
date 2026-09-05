@@ -28,6 +28,20 @@ type LeverageRequest = components["schemas"]["LeverageRequest"];
 type LeverageResponse = components["schemas"]["LeverageResponse"];
 type FxEvidence = components["schemas"]["FxEvidenceOut"];
 
+interface HedgeRunVariables {
+  bookRef: string | null;
+  rows: BookRow[];
+  targetBeta: number;
+  years: number;
+}
+
+interface LeverageRunVariables {
+  bookRef: string | null;
+  rows: BookRow[];
+  drawdownBudget: number;
+  years: number;
+}
+
 function runHedge(body: HedgeRequest) {
   return request<HedgeResponse>("/api/hedge", { method: "POST", body: JSON.stringify(body) });
 }
@@ -73,9 +87,6 @@ export function Hedge() {
   });
   useEffect(() => {
     if (!linkedBook.data) return;
-    // Publish the immutable reference first. Under a heavily loaded render,
-    // the populated rows can become visible before a later state update; the
-    // Run handler must already know to submit by book_ref in that frame.
     setBookRef(linkedBook.data.snapshot_id);
     setRows(snapshotToRows(linkedBook.data));
     setLinkedBookLoaded(true);
@@ -86,7 +97,7 @@ export function Hedge() {
   const [drawdownBudget, setDrawdownBudget] = useState(0.25);
 
   const run = useMutation({
-    mutationFn: () => {
+    mutationFn: ({ bookRef, rows, targetBeta, years }: HedgeRunVariables) => {
       if (bookRef) {
         return runHedge({ book_ref: bookRef, objective: { kind: "beta_target", value: targetBeta }, years });
       }
@@ -97,7 +108,7 @@ export function Hedge() {
   });
 
   const leverage = useMutation({
-    mutationFn: () => {
+    mutationFn: ({ bookRef, rows, drawdownBudget, years }: LeverageRunVariables) => {
       if (!(drawdownBudget > 0)) throw new Error("drawdown budget must be a positive fraction (e.g. 0.25)");
       if (bookRef) return runLeverage({ book_ref: bookRef, drawdown_budget: drawdownBudget, years });
       const book = rowsToPositions(rows);
@@ -212,8 +223,8 @@ export function Hedge() {
             className="w-full border border-hairline bg-elevated py-1.5 text-[12px] text-ink hover:border-market hover:bg-hairline disabled:border-hairline disabled:bg-transparent disabled:text-muted disabled:opacity-40"
             disabled={run.isPending}
             onClick={() => {
-              run.mutate();
-              leverage.mutate();
+              run.mutate({ bookRef, rows, targetBeta, years });
+              leverage.mutate({ bookRef, rows, drawdownBudget, years });
             }}
           >
             {run.isPending ? "Running…" : "Run"}

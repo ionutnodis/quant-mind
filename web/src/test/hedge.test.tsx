@@ -9,9 +9,9 @@
  * No @testing-library/user-event dependency in this repo — fireEvent only
  * (pattern: src/test/lab.test.tsx).
  */
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { delay, http, HttpResponse } from "msw";
+import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
 import { Hedge } from "../pages/Hedge";
@@ -278,9 +278,13 @@ test("load current book populates rows and runs by book_ref", async () => {
 
 test("book_ref query loads and submits the pinned book without showing defaults", async () => {
   window.history.replaceState(null, "", "/hedge?book_ref=url-snapshot");
+  let releaseLinkedBook!: () => void;
+  const linkedBookGate = new Promise<void>((resolve) => {
+    releaseLinkedBook = resolve;
+  });
   server.use(
     http.get("/api/book/url-snapshot", async () => {
-      await delay(50);
+      await linkedBookGate;
       return HttpResponse.json({ ...CURRENT_BOOK, snapshot_id: "url-snapshot" });
     }),
     http.post("/api/hedge", async ({ request }) => {
@@ -301,10 +305,20 @@ test("book_ref query loads and submits the pinned book without showing defaults"
 
   expect(screen.queryByLabelText(/qty row 1/i)).not.toBeInTheDocument();
   expect(await screen.findByText("Loading pinned book url-snapshot…")).toBeInTheDocument();
+
+  // Click in the first DOM observer callback where the linked rows are
+  // visible. This exercises the commit-to-passive-effect window: a visible
+  // pinned book must be runnable immediately, without waiting for hook
+  // options to catch up.
+  queueMicrotask(releaseLinkedBook);
+  await waitFor(() => {
+    screen.getByDisplayValue("25");
+    fireEvent.click(screen.getByRole("button", { name: /^run$/i }));
+  }, BOOK_FETCH_TIMEOUT);
+
   await screen.findByDisplayValue("25", {}, BOOK_FETCH_TIMEOUT);
   expect(screen.getByDisplayValue("SPY")).toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: /^run$/i }));
   await screen.findByRole("table");
   await screen.findByRole("heading", { name: "Resilience" });
 });
