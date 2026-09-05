@@ -183,6 +183,14 @@ def test_single_instrument_metadata_read_rejects_invalid_record_shape(tmp_path):
         {"ucits_profile_status": "READY"},
         {"ucits_profile_status": []},
         {"ucits_profile_status": {}},
+        {"ucits_profile_last_successful_provenance": "justetf"},
+        {
+            "ucits_profile_last_successful_provenance": {
+                "source": "justetf",
+                "source_url": "http://www.justetf.com/en/etf-profile.html?isin=IE00B4L5Y983",
+                "fetched_at_utc": "2026-09-01T12:00:00Z",
+            }
+        },
         {"con_id": True},
         {"price_scale": True},
         {"price_scale": 0},

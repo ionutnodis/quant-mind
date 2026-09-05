@@ -125,11 +125,29 @@ def _chain_df(rows: list[dict]) -> pd.DataFrame:
 
 
 def _write_chain(store: BarStore, underlier: str, rows: list[dict], spot: float, as_of: str | None = None) -> None:
+    snapshot_as_of = as_of or str(date.today())
+    observed_at = (
+        snapshot_as_of
+        if "T" in snapshot_as_of
+        else f"{snapshot_as_of}T00:00:00Z"
+    )
+    evidenced_rows = [
+        {
+            **row,
+            "observed_at": row.get("observed_at", observed_at),
+            "market_data_type": row.get("market_data_type", 1),
+        }
+        for row in rows
+    ]
+    weakest_observed_at = min(
+        pd.Timestamp(row["observed_at"]).tz_convert("UTC")
+        for row in evidenced_rows
+    ).isoformat().replace("+00:00", "Z")
     OptionsStore(store.root).write_chain(
         underlier,
-        _chain_df(rows),
+        _chain_df(evidenced_rows),
         OptionsSnapshotMeta(
-            as_of=as_of or str(date.today()),
+            as_of=weakest_observed_at,
             spot=spot,
             underlier_con_id=store.read_symbol_map()[underlier],
         ),
@@ -310,6 +328,87 @@ def test_live_portfolio_rejects_dual_listings_that_share_one_ticker(store):
     assert response.status_code == 422
     assert "multiple listings" in response.json()["detail"]
     assert "ASML" in response.json()["detail"]
+
+
+def test_live_portfolio_allows_a_broker_stock_absent_from_the_symbol_map(store):
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=999,
+                symbol="BROKER_ONLY",
+                qty=3,
+                currency="USD",
+                exchange="SMART",
+            ),
+        ),
+        as_of="2026-09-04",
+    )
+
+    response = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+
+    assert response.status_code == 200, response.text
+    position = response.json()["positions"][0]
+    assert position["symbol"] == "BROKER_ONLY"
+    assert position["last_close"] is None
+    assert position["market_value"] is None
+
+
+def test_live_unmapped_stock_does_not_consume_unbound_cached_currency(store):
+    store.write_instrument_metadata(
+        "BROKER_ONLY",
+        {"con_id": 123, "currency": "EUR", "exchange": "AEB"},
+    )
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=999,
+                symbol="BROKER_ONLY",
+                qty=3,
+                currency=None,
+                exchange="SMART",
+            ),
+        ),
+        as_of="2026-09-04",
+    )
+
+    response = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+
+    assert response.status_code == 200, response.text
+    position = response.json()["positions"][0]
+    assert position["currency"] is None
+    assert response.json()["fx"]["missing_currencies"] == ["UNKNOWN"]
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"con_id": 999, "currency": "EUR", "exchange": "AEB"},
+        {"currency": "EUR", "exchange": "AEB"},
+    ],
+    ids=["mismatched-con-id", "missing-con-id"],
+)
+def test_live_portfolio_rejects_unbound_metadata_currency_fallback(store, metadata):
+    stored_metadata = store.read_all_instrument_metadata()
+    stored_metadata["SPY"] = metadata
+    store.replace_instrument_metadata(stored_metadata)
+    portfolio = Portfolio(
+        positions=(
+            Position(
+                con_id=1,
+                symbol="SPY",
+                qty=10,
+                currency=None,
+                exchange="ARCA",
+            ),
+        ),
+        as_of="2026-09-04",
+    )
+
+    response = _client(store, broker=FakeBroker(portfolio)).get("/api/portfolio")
+
+    assert response.status_code == 422
+    assert "SPY" in response.json()["detail"]
+    assert "metadata contract identity" in response.json()["detail"]
 
 
 def test_portfolio_position_without_cached_bars_returns_null_price_fields(store):
@@ -1007,8 +1106,8 @@ def test_european_history_is_normalized_before_beta_and_attribution(tmp_path):
     store.write_bars(1, "1d", bars, meta)
     store.write_bars(2, "1d", bars.copy(), meta)
     store.write_symbol_map({"SPY": 1, "IWDA": 2})
-    store.write_instrument_metadata("SPY", {"currency": "USD"})
-    store.write_instrument_metadata("IWDA", {"currency": "EUR"})
+    store.write_instrument_metadata("SPY", {"con_id": 1, "currency": "USD"})
+    store.write_instrument_metadata("IWDA", {"con_id": 2, "currency": "EUR"})
     rows = ["CURRENCY,TIME_PERIOD,OBS_VALUE"]
     for timestamp in bars.index:
         day = timestamp.date().isoformat()
@@ -1118,8 +1217,10 @@ def test_exposure_loads_fx_for_a_foreign_benchmark_not_held_in_the_book(tmp_path
     store.write_bars(1, "1d", bars, meta)
     store.write_bars(2, "1d", bars.copy(), meta)
     store.write_symbol_map({"UKBENCH": 1, "IWDA": 2})
-    store.write_instrument_metadata("UKBENCH", {"currency": "GBP"})
-    store.write_instrument_metadata("IWDA", {"currency": "EUR"})
+    store.write_instrument_metadata(
+        "UKBENCH", {"con_id": 1, "currency": "GBP"}
+    )
+    store.write_instrument_metadata("IWDA", {"con_id": 2, "currency": "EUR"})
     rows = ["CURRENCY,TIME_PERIOD,OBS_VALUE"]
     for timestamp in bars.index:
         day = timestamp.date().isoformat()
@@ -1195,6 +1296,40 @@ def test_exposure_and_attribution_fail_closed_without_benchmark_currency(tmp_pat
     assert "benchmark SPY currency metadata" in body["attribution"]["reason"]
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"con_id": 999, "currency": "USD"},
+        {"currency": "USD"},
+    ],
+    ids=["mismatched-con-id", "missing-con-id"],
+)
+def test_exposure_and_attribution_fail_closed_with_unbound_benchmark_metadata(
+    rich_store, metadata
+):
+    stored_metadata = rich_store.read_all_instrument_metadata()
+    stored_metadata["SPY"] = metadata
+    rich_store.replace_instrument_metadata(stored_metadata)
+    portfolio = Portfolio(
+        positions=(Position(con_id=2, symbol="QQQ", qty=10, currency="USD"),),
+        as_of=date.today().isoformat(),
+    )
+
+    response = _client(rich_store, broker=FakeBroker(portfolio)).get(
+        "/api/portfolio", params={"attribution_days": 90}
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["exposure"][0]["beta"] is None
+    assert "benchmark SPY" in body["exposure"][0]["beta_note"]
+    assert "metadata contract identity" in body["exposure"][0]["beta_note"]
+    assert "run sync" in body["exposure"][0]["beta_note"]
+    assert body["attribution"]["available"] is False
+    assert "benchmark SPY" in body["attribution"]["reason"]
+    assert "metadata contract identity" in body["attribution"]["reason"]
+
+
 def test_exposure_and_attribution_fail_closed_without_benchmark_fx(tmp_path):
     store = BarStore(tmp_path)
     bars = _random_bars(seed=16, start=100.0)
@@ -1202,8 +1337,10 @@ def test_exposure_and_attribution_fail_closed_without_benchmark_fx(tmp_path):
     store.write_bars(1, "1d", bars, meta)
     store.write_bars(2, "1d", bars.copy(), meta)
     store.write_symbol_map({"UKBENCH": 1, "SPY": 2})
-    store.write_instrument_metadata("UKBENCH", {"currency": "GBP"})
-    store.write_instrument_metadata("SPY", {"currency": "USD"})
+    store.write_instrument_metadata(
+        "UKBENCH", {"con_id": 1, "currency": "GBP"}
+    )
+    store.write_instrument_metadata("SPY", {"con_id": 2, "currency": "USD"})
     portfolio = Portfolio(
         positions=(Position(con_id=2, symbol="SPY", qty=10, currency="USD"),),
         as_of=date.today().isoformat(),
@@ -1790,7 +1927,7 @@ def test_options_sleeve_populated_via_book_ref_with_chain_data(store):
     assert sleeve["total_positions"] == 1
     assert sleeve["priced_positions"] == 1
     assert sleeve["missing_positions"] == 0
-    assert sleeve["chain_as_of"] == str(date.today())
+    assert sleeve["chain_as_of"] == f"{date.today().isoformat()}T00:00:00Z"
     assert sleeve["chain_age_days"] == 0
     assert sleeve["chain_stale"] is False
     assert sleeve["reason"] is None
@@ -1975,10 +2112,12 @@ def test_options_sleeve_surfaces_stale_chain_without_reporting_complete(store):
                 "iv": 0.25,
                 "delta": 0.5,
                 "multiplier": 100.0,
+                "observed_at": f"{chain_date.isoformat()}T20:00:00Z",
+                "market_data_type": 4,
             }
         ],
         spot=100.0,
-        as_of=str(chain_date),
+        as_of=f"{date.today().isoformat()}T20:00:00Z",
     )
     client = _client(store, broker=None)
     pinned = client.post(
@@ -2001,13 +2140,18 @@ def test_options_sleeve_surfaces_stale_chain_without_reporting_complete(store):
     ).json()
     sleeve = body["options_sleeve"]
 
-    assert sleeve["status"] == "partial"
-    assert sleeve["chain_as_of"] == str(chain_date)
+    assert sleeve["available"] is False
+    assert sleeve["status"] == "unavailable"
+    assert sleeve["priced_positions"] == 0
+    assert sleeve["chain_as_of"] == f"{chain_date.isoformat()}T20:00:00Z"
     assert sleeve["chain_age_days"] == int(
         np.busday_count(chain_date.isoformat(), date.today().isoformat())
     )
     assert sleeve["chain_stale"] is True
     assert "stale" in sleeve["reason"]
+    assert sleeve["underlyings"] == []
+    assert sleeve["stress_grid"] is None
+    assert body["exposure"] == []
     assert body["positions"][0]["last_close"] is None
     assert body["totals"]["valuation_status"] == "partial"
 
@@ -2131,8 +2275,10 @@ def test_attribution_aligns_price_levels_before_cross_calendar_returns(tmp_path)
     store.write_bars(1, "1d", bars(close), meta)
     store.write_bars(2, "1d", bars(close.iloc[::2]), meta)
     store.write_symbol_map({"SPY": 1, "BOOK": 2})
-    for symbol in ("SPY", "BOOK"):
-        store.write_instrument_metadata(symbol, {"currency": "USD"})
+    for con_id, symbol in enumerate(("SPY", "BOOK"), 1):
+        store.write_instrument_metadata(
+            symbol, {"con_id": con_id, "currency": "USD"}
+        )
     portfolio = Portfolio(
         positions=(
             Position(con_id=2, symbol="BOOK", qty=10, currency="USD"),

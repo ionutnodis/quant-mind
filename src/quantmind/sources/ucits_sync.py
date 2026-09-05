@@ -62,6 +62,7 @@ def sync_ucits_profiles(
                 "ucits_profile_status": ProfileFreshness.MISSING.value,
                 "ucits_profile_checked_at": checked_at,
                 "ucits_profile_reason": reason,
+                "ucits_profile_last_successful_provenance": None,
             }
             results[symbol] = UcitsSyncStatus(
                 symbol=symbol,
@@ -90,11 +91,21 @@ def sync_ucits_profiles(
                 reason=reason,
                 resolution=resolution,
             )
+        last_successful_provenance = (
+            status.resolution.last_successful_provenance
+            if status.resolution is not None
+            else None
+        )
         metadata_updates[symbol] = {
             "ucits_profile_isin": isin,
             "ucits_profile_status": status.freshness.value,
             "ucits_profile_checked_at": checked_at,
             "ucits_profile_reason": reason,
+            "ucits_profile_last_successful_provenance": (
+                last_successful_provenance.model_dump(mode="json")
+                if last_successful_provenance is not None
+                else None
+            ),
         }
         results[symbol] = status
         if pace_seconds and index < len(candidates) - 1:

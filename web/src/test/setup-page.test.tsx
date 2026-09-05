@@ -352,6 +352,8 @@ test("pins the live IBKR book and exposes the same snapshot to analysis pages", 
 
   renderSetup();
   const pinButton = await screen.findByRole("button", { name: "Pin current book" });
+  expect(screen.getByText(/Portfolio, What-If, and Hedge Lab analyse the same positions/)).toBeInTheDocument();
+  expect(screen.queryByText(/Risk, What-If, and Hedge Lab analyse the same positions/)).not.toBeInTheDocument();
   expect(pinButton.closest(".authoring-only")).not.toBeNull();
   expect(pinButton).not.toHaveClass("border-you", "text-you");
   fireEvent.click(pinButton);

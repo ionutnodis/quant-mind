@@ -427,6 +427,28 @@ test("options sleeve renders greeks table and stress grid when available", async
   expect(screen.getByText("12.50")).toBeInTheDocument(); // vega
 });
 
+test("options sleeve labels chain age as business days", async () => {
+  const withStaleSleeve = {
+    ...TWO_POSITIONS,
+    options_sleeve: {
+      available: true,
+      status: "partial",
+      reason: "Refresh the option chains before relying on full-book Greeks.",
+      total_positions: 1,
+      priced_positions: 1,
+      chain_as_of: "2026-03-27",
+      chain_age_days: 2,
+      chain_stale: true,
+      underlyings: [{ underlier: "SPY", gamma: 0.01, vega: 12.5, theta: -3.2 }],
+      stress_grid: null,
+    },
+  };
+  server.use(http.get("/api/portfolio", () => HttpResponse.json(withStaleSleeve)));
+  renderPortfolio();
+
+  expect(await screen.findByText(/2 business days old/)).toBeInTheDocument();
+});
+
 test("expiry buckets render legs grouped by days-to-expiry", async () => {
   const withBuckets = {
     ...TWO_POSITIONS,

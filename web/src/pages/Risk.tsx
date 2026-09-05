@@ -218,8 +218,8 @@ export function Risk() {
           />
         </label>
         <p className="text-muted text-[11px] max-w-[46ch] text-right">
-          Symbol lens now; book lens when positions exist. Construct risk, then decompose it: systematic
-          (factors) vs idiosyncratic (everything else).
+          Risk currently analyses one symbol at a time and does not use the pinned book. Construct the
+          symbol's risk, then decompose it: systematic (factors) vs idiosyncratic (everything else).
         </p>
       </div>
 

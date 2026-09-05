@@ -1153,6 +1153,7 @@ export interface components {
             /** Trading Class */
             trading_class: string | null;
             ucits_profile: components["schemas"]["UcitsEtfProfileV1"] | null;
+            ucits_profile_last_successful_provenance: components["schemas"]["MetadataProvenanceV1"] | null;
             /** Ucits Profile Reason */
             ucits_profile_reason: string | null;
             ucits_profile_status: components["schemas"]["ProfileFreshness"] | null;
@@ -1447,14 +1448,20 @@ export interface components {
             ask: number | null;
             /** Bid */
             bid: number | null;
+            /** Con Id */
+            con_id: number | null;
             /** Delta */
             delta: number | null;
             /** Expiry */
             expiry: string;
             /** Iv */
             iv: number | null;
+            /** Market Data Type */
+            market_data_type: number | null;
             /** Multiplier */
             multiplier: number;
+            /** Observed At */
+            observed_at: string | null;
             /** Right */
             right: string;
             /** Strike */

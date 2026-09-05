@@ -327,6 +327,21 @@ export function InstrumentSheet({
                   <p className="mt-1 text-base text-muted md:text-[13px]">
                     {instrument.data.ucits_profile_reason ?? "Run metadata sync to refresh this profile."}
                   </p>
+                  {instrument.data.ucits_profile_last_successful_provenance ? (
+                    <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-base text-muted md:text-[12px]">
+                      <span>
+                        last successful fetch {instrument.data.ucits_profile_last_successful_provenance.fetched_at_utc.slice(0, 10)}
+                      </span>
+                      <a
+                        href={instrument.data.ucits_profile_last_successful_provenance.source_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="underline underline-offset-2 hover:text-market"
+                      >
+                        last successful justETF source ↗
+                      </a>
+                    </div>
+                  ) : null}
                 </section>
               ) : null}
 

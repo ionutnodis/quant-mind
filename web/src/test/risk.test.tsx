@@ -193,7 +193,8 @@ test("renders symbol picker, factor builder, and single-factor regression stats 
   const primary = screen.getByRole("combobox", { name: /primary factor/i }) as HTMLSelectElement;
   await waitFor(() => expect(primary.value).toBe("SPY"));
 
-  expect(screen.getByText(/symbol lens now/i)).toBeInTheDocument();
+  expect(screen.getByText(/currently analyses one symbol at a time/i)).toBeInTheDocument();
+  expect(screen.getByText(/does not use the pinned book/i)).toBeInTheDocument();
   expect(screen.getAllByText(/^1\.000$/).length).toBeGreaterThan(0); // slope / beta
   expect(screen.getAllByText(/0\.980/).length).toBeGreaterThan(0); // R^2 (single + all-factor)
   expect(screen.getByText(/98\.00%/)).toBeInTheDocument(); // variance share for SPY

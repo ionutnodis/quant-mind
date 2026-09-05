@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Sequence
 
 
@@ -46,6 +46,9 @@ class OptionQuote:
     iv: float | None
     delta: float | None
     multiplier: float
+    observed_at: str
+    market_data_type: int
+    received_at: str
 
 
 # --- pure selection helpers ---
@@ -85,6 +88,21 @@ async def fetch_chain_params(ib, symbol: str, con_id: int, sec_type: str = "STK"
     chains = await ib.reqSecDefOptParamsAsync(symbol, "", sec_type, con_id)
     if not chains:
         raise LookupError(f"no option chain parameters returned for {symbol!r}")
+    returned_con_ids = [getattr(chain, "underlyingConId", None) for chain in chains]
+    if any(
+        not isinstance(returned_con_id, int)
+        or isinstance(returned_con_id, bool)
+        or returned_con_id <= 0
+        for returned_con_id in returned_con_ids
+    ):
+        raise LookupError(
+            f"option chain parameters for {symbol!r} returned an invalid underlyingConId"
+        )
+    if any(returned_con_id != con_id for returned_con_id in returned_con_ids):
+        raise LookupError(
+            f"option chain parameters for {symbol!r} returned conflicting "
+            f"underlyingConId values {sorted(set(returned_con_ids))}; expected {con_id}"
+        )
     chain = next((c for c in chains if c.exchange == "SMART"), chains[0])
     return OptionChainParams(
         underlying_symbol=symbol,
@@ -112,7 +130,43 @@ def _finite_or_none(x) -> float | None:
     return xf
 
 
-def _ticker_to_quote(underlier: str, ticker) -> OptionQuote:
+def _utc_timestamp(value) -> datetime | None:
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        return None
+    return value.astimezone(timezone.utc)
+
+
+def _ticker_market_evidence(ticker) -> tuple[str, int, str] | None:
+    market_data_type = getattr(ticker, "marketDataType", None)
+    if (
+        not isinstance(market_data_type, int)
+        or isinstance(market_data_type, bool)
+        or market_data_type not in {1, 2, 3, 4}
+    ):
+        return None
+    received_at = _utc_timestamp(getattr(ticker, "time", None))
+    if received_at is None:
+        return None
+    if market_data_type == 1:
+        observed_at = received_at
+    elif market_data_type == 2:
+        observed_at = _utc_timestamp(getattr(ticker, "lastTimestamp", None))
+    else:
+        observed_at = _utc_timestamp(
+            getattr(ticker, "delayedLastTimestamp", None)
+        )
+    if observed_at is None or observed_at > received_at:
+        return None
+    timestamp = observed_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+    received_timestamp = received_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return timestamp, market_data_type, received_timestamp
+
+
+def _ticker_to_quote(underlier: str, ticker) -> OptionQuote | None:
+    evidence = _ticker_market_evidence(ticker)
+    if evidence is None:
+        return None
+    observed_at, market_data_type, received_at = evidence
     c = ticker.contract
     greeks = ticker.modelGreeks or ticker.lastGreeks or ticker.bidGreeks or ticker.askGreeks
     iv = delta = None
@@ -133,6 +187,22 @@ def _ticker_to_quote(underlier: str, ticker) -> OptionQuote:
         iv=iv,
         delta=delta,
         multiplier=multiplier,
+        observed_at=observed_at,
+        market_data_type=market_data_type,
+        received_at=received_at,
+    )
+
+
+def _contract_identity(contract) -> tuple[int, str, str, float, str] | None:
+    con_id = getattr(contract, "conId", None)
+    if not isinstance(con_id, int) or isinstance(con_id, bool) or con_id <= 0:
+        return None
+    return (
+        con_id,
+        str(getattr(contract, "symbol", "")),
+        str(getattr(contract, "lastTradeDateOrContractMonth", "")),
+        float(getattr(contract, "strike", 0.0)),
+        str(getattr(contract, "right", "")),
     )
 
 
@@ -180,7 +250,10 @@ async def snapshot_option_quotes(
         qualified = [c for c in qualified_raw if c is not None and getattr(c, "conId", None)]
         if qualified:
             tickers = await ib.reqTickersAsync(*qualified)
-            quotes.extend(_ticker_to_quote(chain.underlying_symbol, t) for t in tickers)
+            for ticker in tickers:
+                quote = _ticker_to_quote(chain.underlying_symbol, ticker)
+                if quote is not None:
+                    quotes.append(quote)
         await sleep(pace_seconds)
     return quotes
 
@@ -227,16 +300,25 @@ async def snapshot_held_option_quotes(
     quotes: list[OptionQuote] = []
     for i in range(0, len(contracts), batch_size):
         batch = contracts[i : i + batch_size]
+        requested_identities = {
+            identity
+            for contract in batch
+            if (identity := _contract_identity(contract)) is not None
+        }
         qualified_raw = await ib.qualifyContractsAsync(*batch)
         qualified = [
             contract
             for contract in qualified_raw
-            if contract is not None and getattr(contract, "conId", None)
+            if contract is not None
+            and _contract_identity(contract) in requested_identities
         ]
         if qualified:
             tickers = await ib.reqTickersAsync(*qualified)
-            quotes.extend(
-                _ticker_to_quote(ticker.contract.symbol, ticker) for ticker in tickers
-            )
+            for ticker in tickers:
+                if _contract_identity(ticker.contract) not in requested_identities:
+                    continue
+                quote = _ticker_to_quote(ticker.contract.symbol, ticker)
+                if quote is not None:
+                    quotes.append(quote)
         await sleep(pace_seconds)
     return quotes

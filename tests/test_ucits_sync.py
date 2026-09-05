@@ -6,7 +6,6 @@ from quantmind.datastore.store import BarStore
 from quantmind.sources.providers.justetf import JustEtfProvider
 from quantmind.sources.ucits_sync import sync_ucits_profiles
 
-
 PROFILE_HTML = """
 <html><h1>iShares Core MSCI World UCITS ETF USD (Acc)</h1>
 <table>
@@ -102,6 +101,47 @@ def test_ucits_sync_isolates_one_profile_failure(tmp_path):
     assert result["EXSA"].freshness.value == "MISSING"
     assert store.read_instrument_metadata("EXSA")["provider"] == "ibkr"
     assert store.read_instrument_metadata("EXSA")["ucits_profile_status"] == "MISSING"
+
+
+def test_ucits_sync_persists_last_successful_provenance_after_refresh_failure(tmp_path):
+    store = BarStore(tmp_path)
+    metadata = {
+        "IWDA": {
+            "con_id": 1,
+            "provider": "ibkr",
+            "stock_type": "ETF",
+            "isin": "IE00B4L5Y983",
+        }
+    }
+    store.write_instrument_metadata("IWDA", metadata["IWDA"])
+    successful_at = datetime(2026, 8, 1, 12, tzinfo=UTC)
+
+    sync_ucits_profiles(
+        store,
+        metadata,
+        JustEtfProvider(store, fetcher=lambda _url: PROFILE_HTML),
+        now=successful_at,
+    )
+    result = sync_ucits_profiles(
+        store,
+        metadata,
+        JustEtfProvider(
+            store,
+            fetcher=lambda _url: (_ for _ in ()).throw(
+                TimeoutError("provider unavailable")
+            ),
+        ),
+        now=datetime(2026, 9, 4, 12, tzinfo=UTC),
+    )
+
+    assert result["IWDA"].freshness.value == "STALE"
+    listing = store.read_instrument_metadata("IWDA")
+    assert listing["ucits_profile_status"] == "STALE"
+    assert listing["ucits_profile_last_successful_provenance"] == {
+        "source": "justetf",
+        "source_url": "https://www.justetf.com/en/etf-profile.html?isin=IE00B4L5Y983",
+        "fetched_at_utc": "2026-08-01T12:00:00Z",
+    }
 
 
 def test_ucits_sync_paces_profile_candidates(tmp_path):

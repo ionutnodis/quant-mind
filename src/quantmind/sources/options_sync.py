@@ -33,7 +33,19 @@ from quantmind.datastore.options_store import OptionsSnapshotMeta, OptionsStore
 from quantmind.datastore.store import BarStore
 from quantmind.portfolio import Position
 
-_QUOTE_COLUMNS = ["expiry", "strike", "right", "con_id", "bid", "ask", "iv", "delta", "multiplier"]
+_QUOTE_COLUMNS = [
+    "expiry",
+    "strike",
+    "right",
+    "con_id",
+    "bid",
+    "ask",
+    "iv",
+    "delta",
+    "multiplier",
+    "observed_at",
+    "market_data_type",
+]
 
 
 def _quotes_to_frame(quotes: list[OptionQuote]) -> pd.DataFrame:
@@ -50,6 +62,8 @@ def _quotes_to_frame(quotes: list[OptionQuote]) -> pd.DataFrame:
             "iv": [q.iv for q in quotes],
             "delta": [q.delta for q in quotes],
             "multiplier": [q.multiplier for q in quotes],
+            "observed_at": [q.observed_at for q in quotes],
+            "market_data_type": [q.market_data_type for q in quotes],
         }
     )
 
@@ -117,12 +131,20 @@ async def sync_options_chains(
             for quote in [*quotes, *exact_quotes]
         }
         quotes = list(by_contract.values())
+        if not quotes:
+            # An empty broker response is absence of evidence, not a fresh
+            # empty market. Preserve any prior snapshot so its age continues
+            # to advance and consumers naturally fail closed once it is stale.
+            counts[underlier] = 0
+            await sleep(pace_seconds)
+            continue
         df = _quotes_to_frame(quotes)
+        market_as_of = min(quote.observed_at for quote in quotes)
         options_store.write_chain(
             underlier,
             df,
             OptionsSnapshotMeta(
-                as_of=str(as_of),
+                as_of=market_as_of,
                 spot=spot,
                 underlier_con_id=con_id,
             ),

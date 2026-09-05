@@ -81,6 +81,7 @@ from quantmind.api.routers._shared import (
     complete_fx_evidence,
     iso,
     load_base_currency_series,
+    mapped_instrument_metadata,
     read_instrument_metadata_map,
     read_close_series,
     refuse_unsupported_contract_legs,
@@ -423,19 +424,15 @@ def hedge(request: Request, req: HedgeRequest) -> HedgeResponse:
                 for remaining_symbol in candidate_pool[candidate_index:]
             )
             break
-        metadata_fields = candidate_metadata.get(csym) or {}
-        metadata_con_id = metadata_fields.get("con_id")
-        if (
-            metadata_con_id is not None
-            and metadata_con_id != symbol_map.get(csym)
-        ):
+        try:
+            metadata_fields = mapped_instrument_metadata(
+                candidate_metadata, symbol_map, csym
+            )
+        except HTTPException as exc:
             skipped_candidates.append(
                 HedgeCandidateSkipOut(
                     symbol=csym,
-                    reason=(
-                        "instrument metadata contract identity does not match "
-                        "the current symbol map; run sync"
-                    ),
+                    reason=str(exc.detail),
                 )
             )
             continue

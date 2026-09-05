@@ -2476,6 +2476,16 @@
               }
             ]
           },
+          "ucits_profile_last_successful_provenance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MetadataProvenanceV1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "ucits_profile_reason": {
             "anyOf": [
               {
@@ -2524,6 +2534,7 @@
           "issuer_id",
           "ucits_profile_status",
           "ucits_profile_reason",
+          "ucits_profile_last_successful_provenance",
           "ucits_profile",
           "last_close",
           "high_52w",
@@ -3526,6 +3537,17 @@
             ],
             "title": "Bid"
           },
+          "con_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Con Id"
+          },
           "delta": {
             "anyOf": [
               {
@@ -3552,9 +3574,31 @@
             ],
             "title": "Iv"
           },
+          "market_data_type": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Market Data Type"
+          },
           "multiplier": {
             "title": "Multiplier",
             "type": "number"
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
           },
           "right": {
             "title": "Right",
@@ -3569,11 +3613,14 @@
           "expiry",
           "strike",
           "right",
+          "con_id",
           "bid",
           "ask",
           "iv",
           "delta",
-          "multiplier"
+          "multiplier",
+          "observed_at",
+          "market_data_type"
         ],
         "title": "OptionQuoteOut",
         "type": "object"

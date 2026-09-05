@@ -7,8 +7,10 @@ converted to base ``b`` by multiplying by ``q[c] / q[b]``.  One quote per
 currency also makes the N-1 independent-currency-factor structure explicit.
 
 ECB rates are informational reference rates, not executable broker marks.
-Callers must surface the source/as-of metadata and this module fails closed
-when a required observation is missing, non-positive, future-dated, or stale.
+Callers must surface the source/selected-observation as-of metadata and this
+module fails closed when a required observation is missing, non-positive,
+future-dated, or stale. Cache-health callers can inspect ``cache_as_of``
+instead of conversion evidence.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ import hashlib
 import json
 import math
 import ssl
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable
@@ -511,6 +513,12 @@ class FxConverter:
     source_url: str
     fetched_at: str
     max_age_days: int = 7
+    _used_observation_dates: dict[str, set[pd.Timestamp]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "base_currency", _currency(self.base_currency))
@@ -518,13 +526,33 @@ class FxConverter:
             raise ValueError("max_age_days must be non-negative")
 
     @property
-    def as_of(self) -> str | None:
+    def cache_as_of(self) -> str | None:
         relevant = [
             pd.Timestamp(series.dropna().index[-1])
             for currency, series in self.usd_per_currency.items()
             if currency != "USD" and not series.dropna().empty
         ]
         return min(relevant).date().isoformat() if relevant else None
+
+    @property
+    def as_of(self) -> str | None:
+        """Weakest latest observation used, or the cache watermark pre-use."""
+
+        used = [
+            max(dates)
+            for currency, dates in self._used_observation_dates.items()
+            if currency != "USD" and dates
+        ]
+        return min(used).date().isoformat() if used else self.cache_as_of
+
+    def _record_observations(
+        self, currency: str, observation_dates: Iterable[pd.Timestamp]
+    ) -> None:
+        normalized = _currency(currency)
+        if normalized == "USD":
+            return
+        dates = self._used_observation_dates.setdefault(normalized, set())
+        dates.update(pd.Timestamp(value).normalize() for value in observation_dates)
 
     @classmethod
     def from_store(
@@ -567,10 +595,12 @@ class FxConverter:
             max_age_days=max_age_days,
         )
 
-    def _quote(self, currency: str, when: pd.Timestamp) -> float:
+    def _quote(
+        self, currency: str, when: pd.Timestamp
+    ) -> tuple[float, pd.Timestamp | None]:
         normalized = _currency(currency)
         if normalized == "USD":
-            return 1.0
+            return 1.0, None
         series = self.usd_per_currency.get(normalized)
         if series is None or series.empty:
             raise FxConversionUnavailable(f"no dated {normalized} FX observation")
@@ -583,7 +613,7 @@ class FxConverter:
             raise FxObservationStale(
                 f"stale {normalized} FX observation from {observation_date.date()}"
             )
-        return float(candidates.iloc[-1])
+        return float(candidates.iloc[-1]), observation_date
 
     def rate(self, currency: str, as_of: str | date | pd.Timestamp) -> float:
         source = _currency(currency)
@@ -592,8 +622,12 @@ class FxConverter:
         when = pd.Timestamp(as_of)
         if when.tzinfo is not None:
             when = when.tz_convert("UTC").tz_localize(None)
-        source_quote = self._quote(source, when)
-        base_quote = self._quote(self.base_currency, when)
+        source_quote, source_date = self._quote(source, when)
+        base_quote, base_date = self._quote(self.base_currency, when)
+        if source_date is not None:
+            self._record_observations(source, [source_date])
+        if base_date is not None:
+            self._record_observations(self.base_currency, [base_date])
         return source_quote / base_quote
 
     def convert(
@@ -612,9 +646,9 @@ class FxConverter:
         if index.tz is not None:
             index = index.tz_convert("UTC").tz_localize(None)
 
-        def aligned_quote(target: str) -> pd.Series:
+        def aligned_quote(target: str) -> tuple[pd.Series, pd.DatetimeIndex]:
             if target == "USD":
-                return pd.Series(1.0, index=index)
+                return pd.Series(1.0, index=index), pd.DatetimeIndex([])
             series = self.usd_per_currency.get(target)
             if series is None or series.empty:
                 raise FxConversionUnavailable(f"no dated {target} FX observation")
@@ -627,15 +661,24 @@ class FxConverter:
                 method="ffill",
                 tolerance=pd.Timedelta(days=self.max_age_days),
             )
+            selected_dates = pd.Series(
+                normalized.index, index=normalized.index
+            ).reindex(
+                index,
+                method="ffill",
+                tolerance=pd.Timedelta(days=self.max_age_days),
+            )
             if aligned.isna().any():
                 missing_date = index[aligned.isna()][0]
                 raise FxConversionUnavailable(
                     f"no dated {target} FX observation for {missing_date.date()}"
                 )
-            return aligned
+            return aligned, pd.DatetimeIndex(selected_dates)
 
-        source_quote = aligned_quote(source)
-        base_quote = aligned_quote(self.base_currency)
+        source_quote, source_dates = aligned_quote(source)
+        base_quote, base_dates = aligned_quote(self.base_currency)
+        self._record_observations(source, source_dates)
+        self._record_observations(self.base_currency, base_dates)
         return pd.Series(
             local_prices.to_numpy(dtype=float) * source_quote.to_numpy() / base_quote.to_numpy(),
             index=local_prices.index,

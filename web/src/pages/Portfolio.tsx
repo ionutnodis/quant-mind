@@ -374,7 +374,7 @@ export function Portfolio() {
             {(data.options_sleeve.status === "partial" || data.options_sleeve.chain_stale) && (
               <p className="border border-warning/40 px-3 py-2 text-[14px] leading-relaxed text-warning">
                 {data.options_sleeve.chain_stale
-                  ? `Option evidence is stale${data.options_sleeve.chain_age_days != null ? ` (${data.options_sleeve.chain_age_days} days old)` : ""}. `
+                  ? `Option evidence is stale${data.options_sleeve.chain_age_days != null ? ` (${data.options_sleeve.chain_age_days} business days old)` : ""}. `
                   : ""}
                 {data.options_sleeve.reason ?? "Refresh the option chains before relying on full-book Greeks."}
               </p>

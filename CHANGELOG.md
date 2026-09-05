@@ -35,6 +35,11 @@ All notable changes to QuantMind are documented in this file.
 - Partial FX availability preserves supported-currency valuations and provenance while withholding unsupported legs and incomplete attribution.
 - Portfolio valuation timestamps now distinguish the immutable book pin from the oldest current market mark; Monte Carlo output also names excluded non-finite paths.
 - UCITS enrichment now honors its feature flag, validates structured ISIN/profile fields and TER bounds, and safely parses nested or void HTML elements.
+- Portfolio and Hedge currency evidence now ignores or rejects unbound instrument metadata, while newly acquired live holdings that are not yet mapped remain visible as explicitly unpriced positions instead of taking down the book.
+- Book Greeks now reject stale option chains and underlier spots, report the weakest dependency timestamp, and treat future-dated chains as invalid; option-age labels explicitly use business days.
+- Option snapshots now preserve exact contract IDs, IBKR market-data type, and quote-level market observation time; zero-quote refreshes retain older evidence, ambiguous deliverables are excluded from smiles, and stale or identity-substituted contracts fail closed.
+- FX provenance now reports the oldest observation actually used by a calculation rather than the newest cache watermark, and failed UCITS refreshes retain the last successful source provenance while withholding stale fund facts.
+- Product guidance now distinguishes pinned-book Portfolio, What-If, and Hedge analysis from the Risk screen's current single-symbol scope.
 
 ## [0.4.0.0] - 2026-09-04
 

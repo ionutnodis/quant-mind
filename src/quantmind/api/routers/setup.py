@@ -506,10 +506,10 @@ def _options_data_status(store) -> OptionsDataReadiness:
         frame, meta = cached
         try:
             chain_date = datetime.fromisoformat(meta.as_of.replace("Z", "+00:00")).date()
-            chain_dates.append(chain_date)
             if meta.underlier_con_id != symbol_map.get(position.symbol):
                 missing_contracts.append(contract_label)
                 continue
+            chain_dates.append(chain_date)
             if option_chain_freshness(meta.as_of, today)[1]:
                 stale_chains.add(position.symbol)
             matches = frame[
@@ -670,7 +670,7 @@ def _fx_data_status(
         required_currencies=required,
         missing_currencies=sorted({*missing, *stale}),
         provider=converter.source,
-        as_of=converter.as_of,
+        as_of=converter.cache_as_of,
     )
 
 

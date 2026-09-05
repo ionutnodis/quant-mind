@@ -48,6 +48,7 @@ from quantmind.api.routers._shared import (
     complete_fx_evidence,
     downsample,
     iso,
+    mapped_instrument_metadata,
     read_instrument_metadata_map,
     weighted_portfolio_returns,
 )
@@ -611,18 +612,18 @@ def _option_mark(
     chain_cache: dict[str, tuple[pd.DataFrame, OptionsSnapshotMeta] | None],
     today: date,
     expected_underlier_con_id: int | None,
-) -> float | None:
+) -> tuple[float | None, date | None]:
     """Return an exact contract's cached midpoint or usable one-sided quote."""
     if leg is None or leg.strike is None or leg.expiry is None or leg.right is None:
-        return None
+        return None, None
     cached = _cached_option_chain(
         p.symbol, expected_underlier_con_id, options_store, chain_cache
     )
     if cached is None:
-        return None
+        return None, None
     chain_df, meta = cached
     if option_chain_freshness(meta.as_of, today)[1]:
-        return None
+        return None, None
     row = _find_quote_row(
         chain_df,
         expiry=leg.expiry,
@@ -631,23 +632,17 @@ def _option_mark(
         con_id=getattr(leg, "con_id", None),
     )
     if row is None:
-        return None
-    return _quote_mark(row)
-
-
-def _option_mark_observation_date(
-    underlier: str,
-    chain_cache: dict[str, tuple[pd.DataFrame, OptionsSnapshotMeta] | None],
-) -> date | None:
-    cached = chain_cache.get(underlier)
-    if cached is None:
-        return None
+        return None, None
     try:
-        return datetime.fromisoformat(
-            cached[1].as_of.replace("Z", "+00:00")
-        ).date()
+        observed_at = datetime.fromisoformat(
+            str(row.observed_at).replace("Z", "+00:00")
+        )
     except ValueError:
-        return None
+        return None, None
+    if option_chain_freshness(str(row.observed_at), today)[1]:
+        return None, None
+    mark = _quote_mark(row)
+    return (mark, observed_at.date()) if mark is not None else (None, None)
 
 
 def _priced_option_leg(
@@ -670,6 +665,12 @@ def _priced_option_leg(
     if cached is None:
         return None
     chain_df, meta = cached
+    if option_chain_freshness(
+        meta.as_of,
+        as_of,
+        stale_after_business_days=_OPTIONS_STALE_AFTER_DAYS,
+    )[1]:
+        return None
     row = _find_quote_row(
         chain_df,
         expiry=leg.expiry,
@@ -678,6 +679,12 @@ def _priced_option_leg(
         con_id=getattr(leg, "con_id", None),
     )
     if row is None:
+        return None
+    if option_chain_freshness(
+        str(row.observed_at),
+        as_of,
+        stale_after_business_days=_OPTIONS_STALE_AFTER_DAYS,
+    )[1]:
         return None
     if _quote_mark(row) is None:
         return None
@@ -929,18 +936,21 @@ async def get_portfolio(
             for p in portfolio.positions
         ]
 
+    symbol_map = store.read_symbol_map()
     instrument_metadata = read_instrument_metadata_map(store)
-    resolved_position_currencies = [
-        (
-            position.currency.strip().upper()
-            if position.currency and position.currency.strip()
-            else str((instrument_metadata.get(position.symbol) or {}).get("currency") or "")
-            .strip()
-            .upper()
-            or None
+    resolved_position_currencies: list[str | None] = []
+    for position in portfolio.positions:
+        if position.currency and position.currency.strip():
+            resolved_position_currencies.append(
+                position.currency.strip().upper()
+            )
+            continue
+        metadata = mapped_instrument_metadata(
+            instrument_metadata, symbol_map, position.symbol
         )
-        for position in portfolio.positions
-    ]
+        resolved_position_currencies.append(
+            str(metadata.get("currency") or "").strip().upper() or None
+        )
     account, account_note, account_fx_evidence = await _resolve_account(
         broker,
         book_ref,
@@ -984,8 +994,6 @@ async def get_portfolio(
     snapshot_id = pinned_snapshot_id or BookSnapshot.create(
         portfolio, valuation_ts=valuation_ts, base_currency=base_currency
     ).snapshot_id
-    symbol_map = store.read_symbol_map()
-
     position_currencies = {
         currency for currency in resolved_position_currencies if currency is not None
     }
@@ -1033,8 +1041,9 @@ async def get_portfolio(
             series = _close_series(store, p.con_id)
             if series is not None:
                 close_series[p.con_id] = series
-        last_close = (
-            _option_mark(
+        mark_date = None
+        if p.sec_type == "OPT":
+            last_close, mark_date = _option_mark(
                 p,
                 leg,
                 options_store,
@@ -1042,23 +1051,17 @@ async def get_portfolio(
                 today,
                 symbol_map.get(p.symbol),
             )
-            if p.sec_type == "OPT"
-            else (
+        else:
+            last_close = (
                 None
                 if _series_is_stale(close_series.get(p.con_id), today)
                 else _last_close(close_series.get(p.con_id))
             )
-        )
+            if last_close is not None:
+                mark_date = _last_observation_date(close_series.get(p.con_id))
         last_closes.append(last_close)
         if p.sec_type == "STK" and last_close is None:
             missing_base_history_symbols.add(p.symbol)
-        mark_date = None
-        if last_close is not None:
-            mark_date = (
-                _last_observation_date(close_series.get(p.con_id))
-                if p.sec_type == "STK"
-                else _option_mark_observation_date(p.symbol, option_chain_cache)
-            )
         mark_dates.append(mark_date)
         local_mv = (
             clean(p.qty * p.multiplier * last_close)
@@ -1253,15 +1256,21 @@ async def get_portfolio(
     )
     benchmark_base_series: pd.Series | None = None
     benchmark_unavailability_reason: str | None = None
-    benchmark_currency = (
-        (store.read_instrument_metadata(benchmark) or {}).get("currency")
-        if benchmark in symbol_map
-        else None
-    )
+    benchmark_identity_reason: str | None = None
+    try:
+        benchmark_metadata = mapped_instrument_metadata(
+            instrument_metadata, symbol_map, benchmark
+        )
+    except HTTPException as exc:
+        benchmark_metadata = {}
+        benchmark_identity_reason = f"benchmark {benchmark} {exc.detail}"
+    benchmark_currency = benchmark_metadata.get("currency")
     if benchmark_local_series is None:
         benchmark_unavailability_reason = f"benchmark {benchmark} has no cached bars"
     elif _series_is_stale(benchmark_local_series, today):
         benchmark_unavailability_reason = f"benchmark {benchmark} cached bars are stale"
+    elif benchmark_identity_reason is not None:
+        benchmark_unavailability_reason = benchmark_identity_reason
     elif not benchmark_currency:
         benchmark_unavailability_reason = (
             f"benchmark {benchmark} currency metadata unavailable"
@@ -1320,6 +1329,43 @@ async def get_portfolio(
             if group_has_options:
                 unpriceable_option_underliers.add(underlier)
             continue
+        cached_chain = (
+            _cached_option_chain(
+                underlier,
+                symbol_map.get(underlier),
+                options_store,
+                option_chain_cache,
+            )
+            if group_has_options
+            else None
+        )
+        if cached_chain is not None:
+            chain_df = cached_chain[0]
+            for position, leg in group:
+                if (
+                    position.sec_type != "OPT"
+                    or leg is None
+                    or leg.strike is None
+                    or leg.expiry is None
+                    or leg.right is None
+                ):
+                    continue
+                quote_row = _find_quote_row(
+                    chain_df,
+                    expiry=leg.expiry,
+                    strike=leg.strike,
+                    right=leg.right,
+                    con_id=getattr(leg, "con_id", None),
+                )
+                if quote_row is None:
+                    continue
+                quote_as_of = str(quote_row.observed_at)
+                age_days, stale = option_chain_freshness(
+                    quote_as_of,
+                    today,
+                    stale_after_business_days=_OPTIONS_STALE_AFTER_DAYS,
+                )
+                chain_snapshots.append((quote_as_of, age_days, stale))
         spot_series = _close_series(store, symbol_map[underlier])
         # Exposure, Greeks, and stress P&L are just as mark-sensitive as the
         # ledger. Reuse the ledger freshness contract so a fresh chain cannot
@@ -1379,17 +1425,11 @@ async def get_portfolio(
             )
             if resolved is None:
                 continue
-            book_leg, bucket_row, chain_as_of = resolved
+            book_leg, bucket_row, _ = resolved
             book_legs.append(book_leg)
             expiry_rows.append(bucket_row)
             priced_option_underliers.add(underlier)
             priced_option_positions += 1
-            age_days, stale = option_chain_freshness(
-                chain_as_of,
-                today,
-                stale_after_business_days=_OPTIONS_STALE_AFTER_DAYS,
-            )
-            chain_snapshots.append((chain_as_of, age_days, stale))
 
     betas_clean = {k: v for k, v in underlier_betas.items() if v is not None}
     underlyings = compute_book_greeks(book_legs, betas=betas_clean) if book_legs else []
@@ -1451,7 +1491,9 @@ async def get_portfolio(
             stress_grid=None,
         )
     elif not priced_option_underliers:
-        if unpriceable_option_underliers:
+        if chain_stale is True:
+            reason = "cached option chain is stale — run options_sync"
+        elif unpriceable_option_underliers:
             reason = (
                 "option underliers are unavailable, stale, or missing trustworthy "
                 f"FX: {sorted(unpriceable_option_underliers)} — sync bars first"

@@ -171,6 +171,32 @@ def test_converter_does_not_use_future_or_too_old_fx_observation():
         converter.rate("EUR", "2026-09-10")
 
 
+def test_converter_as_of_reports_the_observation_used_not_the_cache_watermark():
+    converter = FxConverter(
+        base_currency="USD",
+        usd_per_currency={
+            "EUR": pd.Series(
+                [1.10, 1.20],
+                index=pd.to_datetime(["2026-07-24", "2026-09-04"]),
+            ),
+        },
+        source="ECB",
+        source_url="https://data-api.ecb.europa.eu/",
+        fetched_at="2026-09-04T17:00:00Z",
+    )
+
+    assert converter.as_of == "2026-09-04"
+
+    converted = converter.convert_series(
+        pd.Series([100.0], index=pd.to_datetime(["2026-07-24"])), "EUR"
+    )
+
+    assert converted.iloc[0] == pytest.approx(110.0)
+    assert converter.as_of == "2026-07-24"
+    assert converter.cache_as_of == "2026-09-04"
+    assert converter.fetched_at == "2026-09-04T17:00:00Z"
+
+
 def test_convert_series_carries_weekends_but_rejects_future_and_stale_quotes():
     converter = FxConverter(
         base_currency="USD",

@@ -402,6 +402,49 @@ def test_instrument_withholds_a_profile_after_its_freshness_window(tmp_path):
     assert "30" in body["ucits_profile_reason"]
 
 
+def test_instrument_exposes_last_successful_provenance_without_stale_profile_facts(
+    tmp_path,
+):
+    store = BarStore(tmp_path)
+    store.write_bars(
+        7,
+        "1d",
+        _bars(seed=7),
+        BarMeta(bar_type="ADJUSTED_LAST", adjusted_asof="2026-07-24"),
+    )
+    store.write_symbol_map({"IWDA": 7})
+    store.write_instrument_metadata(
+        "IWDA",
+        {
+            "con_id": 7,
+            "currency": "EUR",
+            "stock_type": "ETF",
+            "isin": "IE00B4L5Y983",
+            "ucits_profile_isin": "IE00B4L5Y983",
+            "ucits_profile_status": "STALE",
+            "ucits_profile_reason": "justETF refresh failed (TimeoutError)",
+            "ucits_profile_last_successful_provenance": {
+                "source": "justetf",
+                "source_url": "https://www.justetf.com/en/etf-profile.html?isin=IE00B4L5Y983",
+                "fetched_at_utc": "2026-08-01T12:00:00Z",
+            },
+        },
+    )
+
+    body = TestClient(
+        _make_app(store, benchmark="IWDA", base_currency="EUR"),
+        base_url="http://127.0.0.1",
+    ).get("/api/instruments/IWDA").json()
+
+    assert body["ucits_profile_status"] == "STALE"
+    assert body["ucits_profile"] is None
+    assert body["ucits_profile_last_successful_provenance"] == {
+        "source": "justetf",
+        "source_url": "https://www.justetf.com/en/etf-profile.html?isin=IE00B4L5Y983",
+        "fetched_at_utc": "2026-08-01T12:00:00Z",
+    }
+
+
 def test_instrument_reclassifies_a_missing_fresh_profile_file(tmp_path):
     store = BarStore(tmp_path)
     store.write_bars(

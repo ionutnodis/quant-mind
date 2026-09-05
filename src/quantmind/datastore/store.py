@@ -122,6 +122,19 @@ def _validate_instrument_metadata(payload: object) -> dict[str, dict]:
                 "FRESH, STALE, MISSING, or null",
             )
 
+        profile_provenance = fields.get("ucits_profile_last_successful_provenance")
+        if profile_provenance is not None:
+            from quantmind.instruments.metadata import MetadataProvenanceV1
+
+            try:
+                MetadataProvenanceV1.model_validate(profile_provenance, strict=False)
+            except Exception as error:
+                raise _instrument_metadata_value_error(
+                    symbol,
+                    "ucits_profile_last_successful_provenance",
+                    "valid justETF provenance or null",
+                ) from error
+
         price_scale = fields.get("price_scale")
         if price_scale is not None and (
             isinstance(price_scale, bool)

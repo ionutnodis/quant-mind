@@ -12,7 +12,8 @@ travel in the parquet schema metadata (same technique as BarStore's BarMeta).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+from numbers import Integral
 from pathlib import Path
 
 import numpy as np
@@ -22,7 +23,19 @@ import pyarrow.parquet as pq
 
 _META_PREFIX = b"quantmind.options."
 _CHAIN_COLUMNS = frozenset(
-    {"expiry", "strike", "right", "con_id", "bid", "ask", "iv", "delta", "multiplier"}
+    {
+        "expiry",
+        "strike",
+        "right",
+        "con_id",
+        "bid",
+        "ask",
+        "iv",
+        "delta",
+        "multiplier",
+        "observed_at",
+        "market_data_type",
+    }
 )
 
 
@@ -44,11 +57,9 @@ def option_chain_freshness(
         snapshot_date = datetime.fromisoformat(as_of.replace("Z", "+00:00")).date()
     except ValueError:
         return None, True
-    age_days = (
-        0
-        if snapshot_date >= today
-        else int(np.busday_count(snapshot_date.isoformat(), today.isoformat()))
-    )
+    if snapshot_date > today:
+        return None, True
+    age_days = int(np.busday_count(snapshot_date.isoformat(), today.isoformat()))
     return age_days, age_days > stale_after_business_days
 
 
@@ -59,7 +70,66 @@ class OptionsStore:
     def _path(self, underlier: str) -> Path:
         return self.root / "options" / f"{underlier}.parquet"
 
+    @staticmethod
+    def _validate_quote_evidence(
+        underlier: str,
+        quotes: pd.DataFrame,
+        meta: OptionsSnapshotMeta,
+    ) -> None:
+        missing_columns = _CHAIN_COLUMNS - set(quotes.columns)
+        if missing_columns:
+            raise ValueError(
+                f"cached option chain for {underlier!r} is missing columns: "
+                f"{sorted(missing_columns)}"
+            )
+        try:
+            snapshot_time = datetime.fromisoformat(meta.as_of.replace("Z", "+00:00"))
+        except (AttributeError, ValueError):
+            raise ValueError(
+                f"cached option chain for {underlier!r} has an invalid snapshot timestamp"
+            )
+        if snapshot_time.tzinfo is None:
+            raise ValueError(
+                f"cached option chain for {underlier!r} snapshot timestamp "
+                "must be timezone-aware"
+            )
+        snapshot_time = snapshot_time.astimezone(timezone.utc)
+
+        observation_times: list[datetime] = []
+        for row in quotes.itertuples(index=False):
+            raw_observed_at = row.observed_at
+            try:
+                observed_at = datetime.fromisoformat(
+                    str(raw_observed_at).replace("Z", "+00:00")
+                )
+            except ValueError:
+                raise ValueError(
+                    f"cached option quote for {underlier!r} has an invalid observed_at"
+                )
+            if observed_at.tzinfo is None:
+                raise ValueError(
+                    f"cached option quote for {underlier!r} observed_at must be timezone-aware"
+                )
+            observation_times.append(observed_at.astimezone(timezone.utc))
+
+            market_data_type = row.market_data_type
+            if (
+                not isinstance(market_data_type, Integral)
+                or isinstance(market_data_type, bool)
+                or int(market_data_type) not in {1, 2, 3, 4}
+            ):
+                raise ValueError(
+                    f"cached option quote for {underlier!r} has an invalid market_data_type"
+                )
+
+        if observation_times and min(observation_times) != snapshot_time:
+            raise ValueError(
+                f"cached option chain for {underlier!r} snapshot timestamp must equal "
+                "its weakest quote observation"
+            )
+
     def write_chain(self, underlier: str, quotes: pd.DataFrame, meta: OptionsSnapshotMeta) -> None:
+        self._validate_quote_evidence(underlier, quotes, meta)
         path = self._path(underlier)
         path.parent.mkdir(parents=True, exist_ok=True)
         table = pa.Table.from_pandas(quotes, preserve_index=False)
@@ -105,7 +175,9 @@ class OptionsStore:
             spot=float(md[_META_PREFIX + b"spot"].decode()),
             underlier_con_id=int(md[_META_PREFIX + b"underlier_con_id"].decode()),
         )
-        return table.to_pandas(), meta
+        quotes = table.to_pandas()
+        self._validate_quote_evidence(underlier, quotes, meta)
+        return quotes, meta
 
     def has_chain(self, underlier: str) -> bool:
         return self._path(underlier).exists()

@@ -21,20 +21,21 @@ IBKR + permitted public sources
   2. PIN THE CURRENT BOOK        immutable positions + broker/account provenance
           │
           ▼
-  3. ANALYSE ONE BOOK REFERENCE  portfolio → risk → what-if → hedge
+  3A. ANALYSE THE PINNED BOOK    Portfolio → What-If → Hedge Lab
+  3B. ANALYSE ONE SYMBOL SERIES  Risk → factors and tail statistics
           │
           ▼
      human decision only         QuantMind never submits an order
 ```
 
-**Sync** and **Pin** are different operations. Sync refreshes the evidence used by the models. Pin creates an immutable record of the positions to which the analysis refers. Every decision screen should therefore be read as: “this result was computed for book `book_ref`, using evidence available as of this time.”
+**Sync** and **Pin** are different operations. Sync refreshes the evidence used by the models. Pin creates an immutable record of the positions used by Portfolio, What-If, and Hedge Lab. Those book-scoped screens should be read as: “this result was computed for book `book_ref`, using evidence available as of this time.” Risk has a separate scope in v0.5: it analyses the single symbol selected on that page and does not consume `book_ref`.
 
 Five terms appear throughout the product:
 
 | Term | Plain-English meaning |
 | --- | --- |
 | **Book** | The selected account's stocks, ETFs, and equity options at one point in time |
-| **Pinned book / `book_ref`** | An immutable ID for that book; it prevents a refresh from silently changing the portfolio underneath an analysis |
+| **Pinned book / `book_ref`** | An immutable ID for that book; it prevents a refresh from silently changing positions underneath book-scoped Portfolio, What-If, or Hedge Lab results |
 | **Evidence cache** | Local market, macro, FX, contract, and fund-reference data used by the calculations |
 | **As of** | The observation date of the weakest required input, not merely the newest file written |
 | **Ready / attention / blocked** | Whether QuantMind has enough trustworthy evidence to calculate; amber and red are data-quality states, not trading signals |
@@ -49,15 +50,15 @@ The goal of the first session is not to generate a trade. It is to prove that Qu
 2. **Connect the evidence sources.** Start IB Gateway/TWS in read-only mode, start QuantMind, and open `/book/setup`.
 3. **Follow exactly one next action.** Setup will ask for market sync, held-option sync, FX sync, or a new book pin. Resolve amber/red cards instead of skipping past them.
 4. **Reconcile Portfolio against IBKR.** Check symbols, contract IDs, currencies, quantities, option strikes/expiries/multipliers, and total value. Stop if the rows do not match the broker.
-5. **Open Risk.** Start with the benchmark as the primary factor. Add only factors for which you have an economic thesis, then compare beta, R², variance contribution, return attribution, and tail loss.
+5. **Open Risk for one symbol.** Select the held or cached symbol you want to study, start with the benchmark as the primary factor, and add only factors for which you have an economic thesis. Risk's beta, R², variance contribution, return attribution, and tail loss describe that symbol, not the pinned portfolio.
 6. **Test a decision.** Use What-If to clone the pinned equity book and change weights, or Hedge Lab to rank a small candidate set against a target beta. These are comparisons, not recommendations or orders.
-7. **Return to Setup after the portfolio changes.** Sync evidence if needed, pin a new book, and keep the older `book_ref` as the audit trail for the earlier analysis.
+7. **Return to Setup after the portfolio changes.** Sync evidence if needed, pin a new book, and keep the older `book_ref` as the audit trail for earlier Portfolio, What-If, and Hedge Lab results.
 
 The detailed installation and broker acceptance checklist lives in the [first-user runbook](docs/FIRST_USER_RUNBOOK.md).
 
-Setup is the control plane for that sequence. Read the **Next action** first, then use the evidence cards to understand why the book is ready, needs attention, or is blocked. The synthetic example below is deliberately blocked: the API is healthy, but IBKR is unavailable, market and macro evidence are incomplete, and no book has been pinned.
+Setup is the control plane for that sequence. Read the **Next action** first, then use the evidence cards to understand why the book is ready, needs attention, or is blocked. The **European ETF profiles** card reports whether optional sourced-profile enrichment is required. The synthetic example below is deliberately blocked: the API is healthy, but IBKR is unavailable, market and macro evidence are incomplete, and no book has been pinned.
 
-![Setup screen showing the single next action and readiness cards for the API, broker, market cache, macro, options, FX, UCITS metadata, and current book](docs/screenshots/setup-desktop.png)
+![Current Setup screen showing the single next action and readiness cards for the API, broker, market cache, macro, options, FX, European ETF profiles, and current book](docs/screenshots/setup-desktop.png)
 
 ## Screen-by-screen guide
 
@@ -66,7 +67,7 @@ Setup is the control plane for that sequence. Read the **Next action** first, th
 | **Setup** | “Can I trust the inputs for this book?” | Connect one IBKR account, sync required evidence, resolve stale/missing states, and pin the current book |
 | **Today** | “What changed around my book?” | Scan market regime, overnight moves, curve/volatility context, rotation, and headline book risk before deeper analysis |
 | **Portfolio** | “What do I actually own and where is the exposure?” | Reconcile the ledger, inspect local/base values, delta-adjusted exposure, option sleeve, expiry buckets, and core-vs-overlay P&L |
-| **Risk** | “Which common drivers explain the return and risk?” | Choose a symbol/book lens, select factors, inspect beta and uncertainty, decompose explained vs specific variance, and calculate tail risk |
+| **Risk** | “Which common drivers explain this symbol's return and risk?” | Choose one symbol, select factors, inspect beta and uncertainty, decompose explained vs specific variance, and calculate symbol-level tail risk |
 | **What-If** | “How would a proposed equity-weight change alter risk?” | Clone the pinned book, edit weights, recompute, compare book-vs-benchmark risk, and save a named local scenario |
 | **Hedge Lab** | “Which allowed instrument best moves beta toward my target?” | Set a target, constrain candidates, run the ranking, and inspect notional, residual beta, carry, and resilience |
 | **Macro** | “What regime variables surround the portfolio?” | Review yields, curve, liquidity, sectors, and factor context using dated source evidence |
@@ -86,7 +87,7 @@ The same workflow remains readable on a phone, but QuantMind deliberately hides 
 
 ### How to read the Risk screen
 
-Risk is a decomposition page, not a single score:
+Risk is a single-symbol decomposition page, not a pinned-book view or a single score:
 
 - **Beta / slope** estimates sensitivity to the selected primary factor. A beta of `1.3` means the series historically moved about 1.3% for a 1% factor move over the fitted sample; it is not a forecast.
 - **R²** is the share of historical return variation explained by the selected factor set. High R² means the factor model describes more of the history, not that the investment is safer.
@@ -126,8 +127,8 @@ In this alpha, What-If and Hedge Lab are equity-book tools. They fail closed for
 
 1. Reconcile the largest positions and option multipliers in Portfolio.
 2. Inspect delta-adjusted underlier exposure so stock and option legs are viewed together.
-3. In Risk, use the broad benchmark first, then add a technology/semiconductor factor and rates only when the exposure thesis calls for them.
-4. Compare capital concentration with beta and variance contribution. A 10% capital weight can represent far more than 10% of modeled risk.
+3. In Risk, select one holding, use the broad benchmark first, then add a technology/semiconductor factor and rates only when the exposure thesis calls for them.
+4. Compare the holding's Portfolio weight with its symbol-level beta and factor decomposition. QuantMind does not yet aggregate those Risk estimates into book-level factor contributions.
 5. Test a resize in What-If or a beta target in Hedge Lab; compare the resulting tail loss and factor exposure before making any broker-side decision.
 
 ### European and UCITS portfolio
@@ -135,8 +136,8 @@ In this alpha, What-If and Hedge Lab are equity-book tools. They fail closed for
 1. Set `QM_BASE_CURRENCY` to the currency in which you manage the book, such as `EUR` or `GBP`.
 2. Let IBKR provide listing identity and currency for held instruments. Use explicit yfinance symbols only as a fallback, for example `LGEN.L`.
 3. Enable `QM_UCITS_METADATA_ENABLED=true` only if you accept justETF enrichment. QuantMind keys fund facts by checksum-valid ISIN and caches them locally for 30 days.
-4. Re-run Setup sync after adding a new currency or ETF. Confirm FX and UCITS cards before pinning the next book.
-5. Treat fund profile data and price data as separate provenance chains. A fresh price does not make stale fund facts fresh.
+4. Re-run Setup sync after adding a new currency or ETF. Confirm the FX and European ETF profiles cards before pinning the next book.
+5. Treat fund profile data and price data as separate provenance chains. A fresh price does not make stale fund facts fresh. After a failed profile refresh, the instrument sheet keeps the last successful source URL and fetch date visible while withholding the stale fund facts themselves.
 
 ### Long equity plus option overlay
 
@@ -158,9 +159,9 @@ In this alpha, What-If and Hedge Lab are equity-book tools. They fail closed for
 ## A normal operating rhythm
 
 - **Before analysis:** start IBKR, open Setup, refresh stale evidence, then pin the book you intend to discuss.
-- **During analysis:** keep the `book_ref` fixed while moving between Portfolio, Risk, What-If, and Hedge Lab.
+- **During book analysis:** keep the `book_ref` fixed while moving between Portfolio, What-If, and Hedge Lab. Record the selected symbol separately when using Risk.
 - **After a broker-side change:** sync changed instruments and pin a new book rather than overwriting the old analytical state.
-- **When sharing output:** include the book reference, reporting currency, as-of date, selected factors, horizon, and any incomplete-evidence warning.
+- **When sharing output:** include the book reference for book-scoped results or the selected symbol for Risk, plus reporting currency, as-of date, selected factors, horizon, and any incomplete-evidence warning.
 - **When a result looks surprising:** inspect source provenance and contract identity before changing the model.
 
 ## Why QuantMind

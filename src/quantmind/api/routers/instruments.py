@@ -10,7 +10,7 @@ Constraints). Unknown symbol -> 422 (pattern: routers/risk.py).
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Literal
 
 import pandas as pd
@@ -25,11 +25,17 @@ from quantmind.api.routers._shared import (
 )
 from quantmind.instruments.metadata import (
     UCITS_PROFILE_MAX_AGE_DAYS,
+    MetadataProvenanceV1,
     ProfileFreshness,
     UcitsEtfProfileV1,
     is_ucits_profile_fresh,
 )
-from quantmind.risk.returns import InsufficientDataError, annualized_vol, rolling_beta, simple_returns
+from quantmind.risk.returns import (
+    InsufficientDataError,
+    annualized_vol,
+    rolling_beta,
+    simple_returns,
+)
 
 router = APIRouter()
 
@@ -292,6 +298,7 @@ class InstrumentResponse(BaseModel):
     issuer_id: str | None
     ucits_profile_status: ProfileFreshness | None
     ucits_profile_reason: str | None
+    ucits_profile_last_successful_provenance: MetadataProvenanceV1 | None
     ucits_profile: UcitsEtfProfileV1 | None
     last_close: float | None
     high_52w: float | None
@@ -356,24 +363,51 @@ def instrument(request: Request, symbol: str) -> InstrumentResponse:
     profile_status = meta.get("ucits_profile_status")
     profile_reason = meta.get("ucits_profile_reason")
     profile_isin = meta.get("ucits_profile_isin")
+    raw_profile_provenance = meta.get("ucits_profile_last_successful_provenance")
+    profile_last_successful_provenance = (
+        MetadataProvenanceV1.model_validate(raw_profile_provenance, strict=False)
+        if raw_profile_provenance is not None
+        else None
+    )
     if profile_status == ProfileFreshness.FRESH.value and profile_isin:
         try:
             profile = store.read_ucits_profile(profile_isin)
         except ValueError:
             profile_status = ProfileFreshness.MISSING.value
             profile_reason = "cached UCITS profile is corrupt; run sync"
+            profile_last_successful_provenance = None
         if profile is None and profile_status == ProfileFreshness.FRESH.value:
             profile_status = ProfileFreshness.MISSING.value
             profile_reason = "cached UCITS profile is missing; run sync"
+            profile_last_successful_provenance = None
         elif profile is not None and not is_ucits_profile_fresh(
-            profile, now=datetime.now(timezone.utc)
+            profile, now=datetime.now(UTC)
         ):
+            profile_last_successful_provenance = profile.provenance
             profile = None
             profile_status = ProfileFreshness.STALE.value
             profile_reason = (
                 f"cached UCITS profile exceeds the {UCITS_PROFILE_MAX_AGE_DAYS:g}-day "
                 "freshness window; run sync"
             )
+        elif profile is not None:
+            profile_last_successful_provenance = profile.provenance
+    elif (
+        profile_status == ProfileFreshness.STALE.value
+        and profile_isin
+        and profile_last_successful_provenance is None
+    ):
+        try:
+            stale_profile = store.read_ucits_profile(profile_isin)
+        except ValueError:
+            stale_profile = None
+        if stale_profile is not None:
+            profile_last_successful_provenance = stale_profile.provenance
+    if profile_status not in {
+        ProfileFreshness.FRESH.value,
+        ProfileFreshness.STALE.value,
+    }:
+        profile_last_successful_provenance = None
 
     return InstrumentResponse(
         symbol=symbol,
@@ -394,6 +428,7 @@ def instrument(request: Request, symbol: str) -> InstrumentResponse:
         issuer_id=meta.get("issuer_id"),
         ucits_profile_status=profile_status,
         ucits_profile_reason=profile_reason,
+        ucits_profile_last_successful_provenance=profile_last_successful_provenance,
         ucits_profile=profile,
         last_close=last,
         high_52w=high_52w,

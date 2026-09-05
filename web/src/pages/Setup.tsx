@@ -32,7 +32,7 @@ const NEXT_ACTION: Record<SetupStatus["next_action"], { title: string; body: str
   },
   pin_book: {
     title: "Pin the current IBKR book",
-    body: "Create an immutable portfolio reference so Risk, What-If, and Hedge Lab analyse the same positions.",
+    body: "Create an immutable portfolio reference so Portfolio, What-If, and Hedge Lab analyse the same positions.",
   },
   resolve_currency: {
     title: "Resolve unknown currencies",

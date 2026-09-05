@@ -5,6 +5,8 @@ protection (ES reduction), never by cointegration. Serialization policy:
 UTC ISO timestamps, NaN -> null, unknown symbol/empty candidates/bounds ->
 structured 422, never a 500."""
 
+from datetime import date
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -228,13 +230,14 @@ def test_hedge_sizes_european_book_and_candidate_in_one_base_currency(tmp_path):
     for timestamp in spy.index:
         day = timestamp.date().isoformat()
         rows.extend([f"USD,{day},1.1000", f"GBP,{day},0.8800"])
+    rows.extend(["USD,2026-09-04,1.2000", "GBP,2026-09-04,0.9000"])
     sync_ecb_fx(
         store,
         EcbFxProvider(fetcher=lambda _url: "\n".join(rows)),
         {"USD", "EUR", "GBP"},
-        today=spy.index[-1].date(),
+        today=date(2026, 9, 4),
         years=5,
-        fetched_at="2026-07-24T17:00:00Z",
+        fetched_at="2026-09-04T17:00:00Z",
     )
     app = create_app(
         store=store,
@@ -261,6 +264,8 @@ def test_hedge_sizes_european_book_and_candidate_in_one_base_currency(tmp_path):
     assert body["fx"]["base_currency"] == "GBP"
     assert body["book_value"] == pytest.approx(10 * spy["close"].iloc[-1] * 0.88)
     assert body["fx"]["source"] == "ECB"
+    assert body["fx"]["as_of"] == "2026-07-24"
+    assert body["fx"]["fetched_at"] == "2026-09-04T17:00:00Z"
     assert body["candidates"][0]["hedge_notional"] is not None
 
 
@@ -413,11 +418,20 @@ def test_hedge_requested_candidate_without_currency_is_named_422(client):
     assert "QQQ: missing currency metadata" in response.json()["detail"]
 
 
-def test_hedge_rejects_candidate_metadata_for_a_different_contract(client):
-    _write_metadata(
-        client.app.state.store,
-        "QQQ", {"con_id": 999, "currency": "USD"}
-    )
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"con_id": 999, "currency": "USD"},
+        {"currency": "USD"},
+    ],
+    ids=["mismatched-con-id", "missing-con-id"],
+)
+def test_hedge_rejects_candidate_metadata_without_the_mapped_contract_identity(
+    client, metadata
+):
+    stored_metadata = client.app.state.store.read_all_instrument_metadata()
+    stored_metadata["QQQ"] = metadata
+    client.app.state.store.replace_instrument_metadata(stored_metadata)
 
     response = client.post(
         "/api/hedge",

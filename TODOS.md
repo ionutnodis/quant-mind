@@ -19,6 +19,12 @@
 - **Cons:** Adds snapshot payload/storage and migration rules for existing 0.4 books.
 - **Depends on:** 0.5 mixed-currency acceptance against a real European IBKR portfolio.
 
+## Portfolio-level factor risk decomposition
+- **What:** Add a `book_ref`-scoped factor model that aggregates normalized holding returns and option delta exposure, then reports book factor loadings, factor/specific variance, marginal and component risk, concentration, and effective independent bets.
+- **Why:** The current Risk screen is intentionally single-symbol. A portfolio manager still needs one reconciled view of which common drivers dominate the whole book without mistaking 50–500 line items for the same number of independent bets.
+- **Done when:** A pinned mixed-currency book has reproducible factor contributions that sum to total modeled variance, stable covariance/PCA diagnostics, explicit estimation uncertainty, and fixtures reconciling the decomposition to independent calculations.
+- **Depends on:** Snapshot-frozen FX evidence, portfolio/options identity acceptance, and a documented production factor universe.
+
 ## Cross-currency option Greeks and stress P&L
 - **What:** Convert each monetary option Greek and scenario P&L leg into the analysis base currency at the valuation timestamp, while leaving dimensionless delta separate.
 - **Why:** The current release correctly refuses aggregate non-base option risk rather than adding unlike currencies.

@@ -56,6 +56,7 @@ const INSTRUMENT = {
   issuer_id: null,
   ucits_profile_status: null,
   ucits_profile_reason: null,
+  ucits_profile_last_successful_provenance: null,
   ucits_profile: null,
   last_close: 42.5,
   high_52w: 45.0,
@@ -443,6 +444,11 @@ test("sheet explains a stale UCITS profile without rendering stale facts", async
         isin: "IE00B4L5Y983",
         ucits_profile_status: "STALE",
         ucits_profile_reason: "cached UCITS profile exceeds the 30-day freshness window; run sync",
+        ucits_profile_last_successful_provenance: {
+          source: "justetf",
+          source_url: "https://www.justetf.com/en/etf-profile.html?isin=IE00B4L5Y983",
+          fetched_at_utc: "2026-08-01T09:30:00Z",
+        },
         ucits_profile: null,
       })
     ),
@@ -457,6 +463,12 @@ test("sheet explains a stale UCITS profile without rendering stale facts", async
   expect(await screen.findByText("▲ Stale European ETF sourced profile")).toBeInTheDocument();
   expect(screen.getByText(/30-day freshness window/i)).toBeInTheDocument();
   expect(screen.queryByText("● Source cache fresh")).not.toBeInTheDocument();
+  expect(screen.getByText("last successful fetch 2026-08-01")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: /last successful justETF source/i })).toHaveAttribute(
+    "href",
+    "https://www.justetf.com/en/etf-profile.html?isin=IE00B4L5Y983",
+  );
+  expect(screen.queryByText("MSCI World")).not.toBeInTheDocument();
 });
 
 test("sheet withholds a non-finite TER instead of rendering NaN", async () => {

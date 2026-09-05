@@ -56,6 +56,7 @@ class FxEvidenceOut(BaseModel):
     status: Literal["identity", "converted", "incomplete"]
     base_currency: str
     source: str | None
+    # Weakest latest FX observation actually selected by the analysis.
     as_of: str | None
     fetched_at: str | None
     missing_currencies: list[str]
@@ -155,17 +156,7 @@ def resolve_symbol_currencies(
     resolved: dict[str, str] = {}
     missing: list[str] = []
     for symbol in dict.fromkeys(symbols):
-        master_fields = metadata.get(symbol) or {}
-        master_con_id = master_fields.get("con_id")
-        mapped_con_id = symbol_map.get(symbol)
-        if master_fields and master_con_id != mapped_con_id:
-            raise HTTPException(
-                422,
-                detail=(
-                    f"instrument metadata contract identity for {symbol!r} "
-                    "does not match the current symbol map; run sync"
-                ),
-            )
+        master_fields = mapped_instrument_metadata(metadata, symbol_map, symbol)
         master_value = master_fields.get("currency")
         master = str(master_value).strip().upper() if master_value else None
         asserted_value = asserted.get(symbol)
@@ -201,6 +192,35 @@ def read_instrument_metadata_map(store) -> dict[str, dict]:
             422,
             detail="instrument metadata cache is corrupt; run sync to rebuild it",
         ) from exc
+
+
+def mapped_instrument_metadata(
+    metadata: dict[str, dict],
+    symbol_map: dict[str, int],
+    symbol: str,
+) -> dict:
+    """Return metadata only when its contract identity matches a mapped symbol.
+
+    An absent record carries no assertion and is safe for callers with an
+    explicit fallback. A present record for a mapped symbol must carry the
+    exact mapped conId before any of its fields can be consumed.
+    """
+
+    fields = metadata.get(symbol) or {}
+    if symbol not in symbol_map:
+        return {}
+    if (
+        fields
+        and fields.get("con_id") != symbol_map[symbol]
+    ):
+        raise HTTPException(
+            422,
+            detail=(
+                f"instrument metadata contract identity for {symbol!r} "
+                "does not match the current symbol map; run sync"
+            ),
+        )
+    return fields
 
 
 def collect_currency_assertions(

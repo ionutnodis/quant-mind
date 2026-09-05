@@ -32,7 +32,11 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
-from quantmind.api.routers._shared import PositionIn, read_instrument_metadata_map
+from quantmind.api.routers._shared import (
+    PositionIn,
+    mapped_instrument_metadata,
+    read_instrument_metadata_map,
+)
 from quantmind.core.snapshot import BookSnapshot
 from quantmind.portfolio import Portfolio, Position, option_terms_complete
 
@@ -233,7 +237,8 @@ def validate_live_stock_identities(store, portfolio: Portfolio) -> None:
     changed = sorted(
         symbol
         for symbol, con_ids in identities.items()
-        if symbol_map.get(symbol) != next(iter(con_ids))
+        if symbol in symbol_map
+        and symbol_map[symbol] != next(iter(con_ids))
     )
     if changed:
         raise HTTPException(
@@ -485,15 +490,9 @@ def _portfolio_from_positions(store, positions: list[PositionIn], valuation_ts: 
     metadata_by_symbol = read_instrument_metadata_map(store) if positions else {}
     resolved_positions: list[Position] = []
     for p in positions:
-        metadata = metadata_by_symbol.get(p.symbol) or {}
-        if metadata and metadata.get("con_id") != symbol_map[p.symbol]:
-            raise HTTPException(
-                422,
-                detail=(
-                    f"instrument metadata contract identity for {p.symbol!r} "
-                    "does not match the current symbol map; run sync"
-                ),
-            )
+        metadata = mapped_instrument_metadata(
+            metadata_by_symbol, symbol_map, p.symbol
+        )
         authoritative_currency = str(metadata.get("currency") or "UNKNOWN")
         authoritative_exchange = str(metadata.get("exchange") or "").strip() or None
         if p.currency is not None and p.currency != authoritative_currency:

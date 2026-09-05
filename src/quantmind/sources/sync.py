@@ -286,6 +286,7 @@ async def sync_instrument_metadata(
                         "ucits_profile_isin": None,
                         "ucits_profile_status": None,
                         "ucits_profile_reason": None,
+                        "ucits_profile_last_successful_provenance": None,
                     }
                 )
             if not rebuild_corrupt_cache:

@@ -817,11 +817,15 @@ def test_setup_status_requires_the_exact_held_option_contract(tmp_path):
                     "iv": 0.35,
                     "delta": 0.4,
                     "multiplier": 100.0,
+                    "observed_at": now.isoformat().replace("+00:00", "Z"),
+                    "market_data_type": 1,
                 }
             ]
         ),
         OptionsSnapshotMeta(
-            as_of=now.date().isoformat(), spot=104.0, underlier_con_id=1
+            as_of=now.isoformat().replace("+00:00", "Z"),
+            spot=104.0,
+            underlier_con_id=1,
         ),
     )
 
@@ -844,16 +848,22 @@ def test_setup_status_requires_the_exact_held_option_contract(tmp_path):
                     "iv": 0.35,
                     "delta": 0.4,
                     "multiplier": 100.0,
+                    "observed_at": now.isoformat().replace("+00:00", "Z"),
+                    "market_data_type": 1,
                 }
             ]
         ),
         OptionsSnapshotMeta(
-            as_of=now.date().isoformat(), spot=104.0, underlier_con_id=99
+            as_of=now.isoformat().replace("+00:00", "Z"),
+            spot=104.0,
+            underlier_con_id=99,
         ),
     )
 
     remapped = client.get("/api/setup/status").json()
     assert remapped["options_data"]["status"] == "missing"
+    assert remapped["options_data"]["chain_as_of"] is None
+    assert remapped["options_data"]["chain_age_days"] is None
     assert remapped["next_action"] == "sync_option_data"
 
 

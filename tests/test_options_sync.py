@@ -7,7 +7,7 @@ ever runs). Tested with fakes only (pattern: tests/test_sync.py's FakeBroker).
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import numpy as np
@@ -66,9 +66,12 @@ def _fake_contract(symbol, expiry, strike, right, con_id):
 
 
 def _fake_ticker(contract):
+    observed_at = datetime(2026, 7, 24, 20, 30, tzinfo=timezone.utc)
     return SimpleNamespace(
         contract=contract, bid=1.0, ask=1.2, modelGreeks=_fake_greeks(), lastGreeks=None,
         bidGreeks=None, askGreeks=None, impliedVolatility=0.2,
+        time=observed_at, marketDataType=1, lastTimestamp=None,
+        delayedLastTimestamp=None,
     )
 
 
@@ -84,12 +87,44 @@ class FakeIb:
     async def qualifyContractsAsync(self, *contracts):
         out = []
         for c in contracts:
-            self._next_con_id += 1
-            out.append(_fake_contract(c.symbol, c.lastTradeDateOrContractMonth, c.strike, c.right, self._next_con_id))
+            con_id = getattr(c, "conId", 0)
+            if not con_id:
+                self._next_con_id += 1
+                con_id = self._next_con_id
+            out.append(
+                _fake_contract(
+                    c.symbol,
+                    c.lastTradeDateOrContractMonth,
+                    c.strike,
+                    c.right,
+                    con_id,
+                )
+            )
         return out
 
     async def reqTickersAsync(self, *contracts):
         return [_fake_ticker(c) for c in contracts]
+
+
+class EmptyTickerIb(FakeIb):
+    async def reqTickersAsync(self, *contracts):
+        return []
+
+
+class DelayedTickerIb(FakeIb):
+    async def reqTickersAsync(self, *contracts):
+        tickers = [_fake_ticker(contract) for contract in contracts]
+        for ticker in tickers:
+            ticker.marketDataType = 4
+            ticker.delayedLastTimestamp = datetime(
+                2026,
+                7,
+                23,
+                20,
+                15,
+                tzinfo=timezone.utc,
+            )
+        return tickers
 
 
 class FakeSleeper:
@@ -112,11 +147,64 @@ async def test_sync_writes_a_chain_per_underlier(bar_store, options_store):
 
     df, meta = options_store.read_chain("SPY")
     assert meta.spot == pytest.approx(452.0)
-    assert meta.as_of == "2026-07-24"
+    assert meta.as_of == "2026-07-24T20:30:00Z"
     assert meta.underlier_con_id == 756733
     # strikes within +/-15% of 452 (=[384.2, 519.8]) x 1 monthly expiry x {C,P}
     assert set(df["strike"]) <= {400.0, 420.0, 440.0, 452.0, 460.0, 480.0, 500.0}
     assert set(df["right"]) == {"C", "P"}
+    assert set(df["observed_at"]) == {"2026-07-24T20:30:00Z"}
+    assert set(df["market_data_type"]) == {1}
+
+
+async def test_zero_quote_refresh_preserves_prior_option_evidence(
+    bar_store,
+    options_store,
+):
+    await sync_options_chains(
+        options_store,
+        bar_store,
+        FakeIb(),
+        underliers=["SPY"],
+        as_of=date(2026, 7, 24),
+        sleep=FakeSleeper(),
+        pace_seconds=0.1,
+    )
+    prior_quotes, prior_meta = options_store.read_chain("SPY")
+
+    counts = await sync_options_chains(
+        options_store,
+        bar_store,
+        EmptyTickerIb(),
+        underliers=["SPY"],
+        as_of=date(2026, 7, 25),
+        sleep=FakeSleeper(),
+        pace_seconds=0.1,
+    )
+
+    assert counts == {"SPY": 0}
+    stored_quotes, stored_meta = options_store.read_chain("SPY")
+    pd.testing.assert_frame_equal(stored_quotes, prior_quotes)
+    assert stored_meta == prior_meta
+
+
+async def test_sync_snapshot_as_of_is_weakest_market_observation(
+    bar_store,
+    options_store,
+):
+    await sync_options_chains(
+        options_store,
+        bar_store,
+        DelayedTickerIb(),
+        underliers=["SPY"],
+        as_of=date(2026, 7, 24),
+        sleep=FakeSleeper(),
+        pace_seconds=0.1,
+    )
+
+    quotes, meta = options_store.read_chain("SPY")
+    assert meta.as_of == "2026-07-23T20:15:00Z"
+    assert set(quotes["observed_at"]) == {meta.as_of}
+    assert set(quotes["market_data_type"]) == {4}
 
 
 async def test_sync_uses_last_close_as_spot_not_a_live_call(bar_store, options_store):
