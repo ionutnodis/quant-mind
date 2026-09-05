@@ -115,7 +115,7 @@ def create_app(
     ucits_metadata_enabled: bool = False,
     world_config: WorldConfig | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="QuantMind API", version="0.5.0.0")
+    app = FastAPI(title="QuantMind API", version="0.6.0.0")
 
     @app.exception_handler(WorldStoreError)
     async def world_cache_error(_request: Request, error: WorldStoreError):
