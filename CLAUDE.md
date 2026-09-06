@@ -1,6 +1,6 @@
 # QuantMind
 
-Local-first quant workbench: Python core (`src/quantmind/`), FastAPI backend, and React frontend. IBKR remains behind a read-only broker interface; the cache uses DuckDB/Parquet. Product and responsive-design decisions live in [DESIGN.md](DESIGN.md); the committed API contract is [openapi.json](openapi.json).
+Local-first quant workbench: Python core (`src/quantmind/`), FastAPI backend, and React frontend. IBKR remains behind a read-only broker interface; analytical evidence uses DuckDB/Parquet, while World keeps a separate SQLite event cache. Product and responsive-design decisions live in [DESIGN.md](DESIGN.md); the committed API contract is [openapi.json](openapi.json).
 
 ## Testing
 - Backend: `uv run pytest`. E2E paper-Gateway tests are opt-in: `uv run pytest -m e2e --override-ini addopts=''` (needs IB Gateway on port 4002).

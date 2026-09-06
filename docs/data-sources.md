@@ -155,7 +155,9 @@ browser/Python disagreements about alternate localhost spellings. Unicode paths
 are supported. This is a syntactic link policy, not DNS-rebinding protection:
 QuantMind does not fetch arbitrary article links or resolve them for ingestion.
 
-The cache retains at most 30 days, 250 records per source and 5,000 globally.
+The view excludes events older than 30 days. Each successful refresh also prunes
+expired stored events and caps storage at 250 records per source and 5,000
+globally; without a successful refresh, older rows can remain on disk.
 The view reads at most 30 recent events per source, 500 overall, before local
 relevance ranking. These quotas stop a noisy feed monopolizing the desk.
 Refresh cooldowns and `Retry-After` prevent repeated clicks from hammering a
