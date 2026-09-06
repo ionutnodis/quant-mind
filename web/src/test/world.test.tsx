@@ -63,6 +63,56 @@ test("filters cached events and keeps explicit relevance reasons", async () => {
   expect(screen.getByText(/no events match/i)).toBeInTheDocument();
 });
 
+test("combines topic and source with search and My lens without widening other filters", async () => {
+  const ecb = { ...response.sources[0], id: "ecb", name: "ECB", homepage: "https://ecb.europa.eu" };
+  const items = [
+    ...response.items,
+    { ...response.items[0], id: "outside-lens", title: "Oil supply forecast", reasons: [], matched_symbols: [] },
+    { ...response.items[0], id: "outside-search", title: "Oil shipments reach Rotterdam", summary: "Port arrivals increased." },
+    { ...response.items[0], id: "outside-source", source_id: "ecb", source_name: "ECB", title: "ECB publishes energy outlook" },
+    { ...response.items[0], id: "outside-topic", title: "Oil infrastructure outlook", topics: ["Infrastructure"] },
+  ];
+  server.use(http.get("/api/world", () => HttpResponse.json({ ...response, items, sources: [...response.sources, ecb] })));
+  renderWorld();
+  await screen.findByText("Oil supply talks resume");
+  const stream = screen.getByRole("region", { name: "Event stream" });
+  const titles = () => within(stream).queryAllByRole("heading", { level: 3 }).map((heading) => heading.textContent);
+  const topic = screen.getByRole("combobox", { name: "Topic" });
+  const source = screen.getByRole("combobox", { name: "Source" });
+
+  fireEvent.change(topic, { target: { value: "Rates" } });
+  expect(titles()).toEqual(["ECB publishes rate decision"]);
+  fireEvent.change(topic, { target: { value: "all" } });
+  fireEvent.change(source, { target: { value: "ecb" } });
+  expect(titles()).toEqual(["ECB publishes rate decision", "ECB publishes energy outlook"]);
+  fireEvent.change(source, { target: { value: "all" } });
+
+  fireEvent.change(topic, { target: { value: "Energy" } });
+  fireEvent.change(source, { target: { value: "reuters" } });
+  expect(titles()).toEqual(["Oil supply talks resume", "Oil supply forecast", "Oil shipments reach Rotterdam"]);
+  fireEvent.change(screen.getByRole("searchbox"), { target: { value: "  VIENNA  " } });
+  expect(titles()).toEqual(["Oil supply talks resume", "Oil supply forecast"]);
+  fireEvent.click(screen.getByRole("button", { name: "My lens" }));
+  expect(titles()).toEqual(["Oil supply talks resume"]);
+  expect(within(stream).getByText("1 of 6")).toBeInTheDocument();
+
+  fireEvent.change(topic, { target: { value: "Rates" } });
+  expect(titles()).toEqual([]);
+  expect(within(stream).getByText(/no events match/i)).toBeInTheDocument();
+  expect(within(stream).getByText("0 of 6")).toBeInTheDocument();
+  fireEvent.change(topic, { target: { value: "all" } });
+  expect(titles()).toEqual(["Oil supply talks resume", "Oil infrastructure outlook"]);
+  fireEvent.change(source, { target: { value: "all" } });
+  expect(titles()).toEqual(["Oil supply talks resume", "ECB publishes energy outlook", "Oil infrastructure outlook"]);
+  fireEvent.change(screen.getByRole("searchbox"), { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: /^All$/ }));
+  expect(titles()).toEqual([
+    "Oil supply talks resume", "ECB publishes rate decision", "Oil supply forecast",
+    "Oil shipments reach Rotterdam", "ECB publishes energy outlook", "Oil infrastructure outlook",
+  ]);
+  expect(within(stream).getByText("6 of 6")).toBeInTheDocument();
+});
+
 test("saves the edited profile and renders the server-normalized response", async () => {
   let received: unknown;
   let reads = 0;
@@ -136,6 +186,63 @@ test("rejects an overlong profile value before saving", async () => {
   expect(screen.getByRole("alert")).toHaveTextContent(/100 characters or fewer/i);
 });
 
+test.each([
+  { label: "Watch symbols", count: 101 },
+  { label: "Interests", count: 21 },
+  { label: "Regions", count: 21 },
+])("rejects $count $label locally without sending a profile PUT", async ({ label, count }) => {
+  let puts = 0;
+  server.use(
+    http.get("/api/world", () => HttpResponse.json(response)),
+    http.put("/api/world/profile", () => { puts += 1; return HttpResponse.json(response.profile); }),
+  );
+  renderWorld();
+  const input = await screen.findByLabelText(label, { exact: true });
+  const draft = Array.from({ length: count }, (_, index) => `item${index}`).join(", ");
+  fireEvent.change(input, { target: { value: draft } });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save lens" })); });
+  expect(screen.getByRole("alert")).toHaveTextContent(/at most 100 watch symbols, 20 interests, and 20 regions/i);
+  expect(puts).toBe(0);
+  expect(input).toHaveValue(draft);
+  expect(input).toBeEnabled();
+  expect(screen.getByText("Oil supply talks resume")).toBeInTheDocument();
+});
+
+test("accepts exact profile limits after trimming blanks and deduplicating normalized symbols", async () => {
+  const profile = {
+    watch_symbols: Array.from({ length: 100 }, (_, index) => `SYM${index}`),
+    interests: Array.from({ length: 20 }, (_, index) => `theme ${index}`),
+    regions: Array.from({ length: 20 }, (_, index) => `Region ${index}`),
+  };
+  let received: unknown;
+  let saved = false;
+  server.use(
+    http.get("/api/world", () => HttpResponse.json(saved ? { ...response, profile } : response)),
+    http.put("/api/world/profile", async ({ request }) => {
+      received = await request.json();
+      saved = true;
+      return HttpResponse.json(profile);
+    }),
+  );
+  renderWorld();
+  fireEvent.change(await screen.findByLabelText("Watch symbols", { exact: true }), {
+    target: { value: ` sym0 , , ${profile.watch_symbols.slice(1).join(", ")}, SYM0, ` },
+  });
+  fireEvent.change(screen.getByLabelText("Interests", { exact: true }), {
+    target: { value: ` ${profile.interests.join(", ")}, , theme 0, ` },
+  });
+  fireEvent.change(screen.getByLabelText("Regions", { exact: true }), {
+    target: { value: ` ${profile.regions.join(", ")}, , Region 0, ` },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save lens" }));
+  expect(await screen.findByText(/lens saved/i)).toBeInTheDocument();
+  expect(received).toEqual(profile);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Watch symbols", { exact: true })).toHaveValue(profile.watch_symbols.join(", "));
+  expect(screen.getByLabelText("Interests", { exact: true })).toHaveValue(profile.interests.join(", "));
+  expect(screen.getByLabelText("Regions", { exact: true })).toHaveValue(profile.regions.join(", "));
+});
+
 test("a failed profile save keeps the edited lens and cached evidence usable", async () => {
   server.use(
     http.get("/api/world", () => HttpResponse.json(response)),
@@ -201,6 +308,34 @@ test("a bad pinned reference surfaces the API detail and can be cleared", async 
   expect(await screen.findByText("Oil supply talks resume")).toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(new URL(window.location.href).searchParams.has("book_ref")).toBe(false);
+});
+
+test("applying a valid manual book reference fetches its context while preserving the rest of the URL", async () => {
+  window.history.replaceState(null, "", "/world?view=compact#sources");
+  const requestedRefs: (string | null)[] = [];
+  server.use(http.get("/api/world", ({ request }) => {
+    const ref = new URL(request.url).searchParams.get("book_ref");
+    requestedRefs.push(ref);
+    return HttpResponse.json(ref === "abc123def456" ? {
+      ...response,
+      context: { book_ref: "abc123def456", symbols: ["ASML"], label: "Pinned book abc123def456" },
+      items: [{ ...response.items[0], id: "asml-book", title: "ASML capacity update", reasons: ["Holding ASML mentioned"], matched_symbols: ["ASML"] }],
+    } : response);
+  }));
+  renderWorld();
+  await screen.findByText("Oil supply talks resume");
+  fireEvent.change(screen.getByLabelText(/pinned book reference/i), { target: { value: "  abc123def456  " } });
+  expect(window.location.search).toBe("?view=compact");
+  expect(requestedRefs).toEqual([null]);
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  expect(await screen.findByText("Pinned book abc123def456 · ASML")).toBeInTheDocument();
+  expect(screen.getByText("ASML capacity update")).toBeInTheDocument();
+  expect(screen.getByText("Holding ASML mentioned")).toBeInTheDocument();
+  expect(screen.queryByText("Oil supply talks resume")).not.toBeInTheDocument();
+  expect(requestedRefs).toEqual([null, "abc123def456"]);
+  expect(window.location.pathname).toBe("/world");
+  expect(window.location.search).toBe("?view=compact&book_ref=abc123def456");
+  expect(window.location.hash).toBe("#sources");
 });
 
 test("labels observed timestamps and source access states without unsafe links", async () => {

@@ -13,7 +13,21 @@ test("World route saves a local lens against the real API and keeps pinned conte
   const pin = await page.request.post("/api/book/pin", { data: { positions: [{ symbol: "SPY", qty: 10 }] } });
   expect(pin.ok()).toBe(true);
   const { snapshot_id: ref } = await pin.json();
-  await page.goto(`/portfolio?book_ref=${ref}`);
+  const pinnedWorld = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === "/api/world" && url.searchParams.get("book_ref") === ref;
+  });
+  await page.getByLabel("Pinned book reference", { exact: true }).fill(ref);
+  await page.getByRole("button", { name: "Apply", exact: true }).click();
+  const pinnedResponse = await pinnedWorld;
+  expect(pinnedResponse.ok()).toBe(true);
+  expect((await pinnedResponse.json()).context).toEqual({
+    book_ref: ref, label: `Pinned book ${ref}`, symbols: ["SPY"],
+  });
+  await expect(page).toHaveURL(new RegExp(`/world\\?book_ref=${ref}`));
+  await expect(page.getByText(`Pinned book ${ref} · SPY`, { exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "Portfolio", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/portfolio\\?book_ref=${ref}`));
   await page.getByRole("link", { name: "World", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/world\\?book_ref=${ref}`));
   await expect(page.getByText(new RegExp(`Pinned book ${ref}`))).toBeVisible();

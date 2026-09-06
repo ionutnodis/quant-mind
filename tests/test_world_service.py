@@ -1,5 +1,6 @@
 """Network-boundary orchestration: isolation, privacy, cadence and single-flight."""
 import asyncio
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
@@ -255,3 +256,104 @@ async def test_persistence_failure_drains_sibling_before_releasing_lease(monkeyp
         await refresh
     assert cache.success_after_release is False
     assert cache.released
+
+
+async def test_shutdown_cancels_active_provider_and_releases_refresh_lease(tmp_path):
+    """Stopping the service must not leave HTTP work or a 180-second lease behind."""
+    from quantmind.world.service import WorldService
+    from quantmind.world.sources import SOURCES
+    from quantmind.world.store import WorldStore
+
+    entered, cancelled, unblock = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def handle(_request):
+        entered.set()
+        try:
+            await unblock.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return httpx.Response(200, content=FEED)
+
+    cache = WorldStore(tmp_path)
+    service = WorldService(cache, sources=SOURCES[:1], clock=lambda: NOW,
+                           transport=httpx.MockTransport(handle))
+    refresh = asyncio.create_task(service.refresh())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        assert cache.refreshing(NOW)
+
+        await asyncio.wait_for(service.shutdown(), timeout=5)
+
+        assert cancelled.is_set()
+        with pytest.raises(asyncio.CancelledError):
+            await refresh
+        assert cache.items(NOW) == []
+        assert cache.states() == {}  # Cancellation is not a provider failure.
+        assert not cache.refreshing(NOW)
+        successor = WorldStore(tmp_path).acquire_lease(NOW)
+        assert successor is not None
+        cache.release_lease(successor)
+    finally:
+        unblock.set()
+        await service.shutdown()
+        await asyncio.gather(refresh, return_exceptions=True)
+
+
+async def test_shutdown_drains_threaded_write_before_releasing_refresh_lease(tmp_path, monkeypatch):
+    """A cancelled refresh must retain its lease until its real SQLite write ends."""
+    from quantmind.world.service import WorldService
+    from quantmind.world.sources import SOURCES
+    from quantmind.world.store import WorldStore
+
+    cache = WorldStore(tmp_path)
+    original_success = cache.record_success
+    loop = asyncio.get_running_loop()
+    write_started = asyncio.Event()
+    unblock_write = threading.Event()
+    lease_held_during_write = []
+
+    def blocked_success(*args):
+        loop.call_soon_threadsafe(write_started.set)
+        if not unblock_write.wait(timeout=5):
+            raise AssertionError("test did not release the persistence gate")
+        lease_held_during_write.append(cache.refreshing(NOW))
+        original_success(*args)
+
+    monkeypatch.setattr(cache, "record_success", blocked_success)
+    service = WorldService(cache, sources=SOURCES[:1], clock=lambda: NOW,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=FEED)))
+
+    refresh = asyncio.create_task(service.refresh())
+    stop = None
+    try:
+        await asyncio.wait_for(write_started.wait(), timeout=5)
+        stop = asyncio.create_task(service.shutdown())
+        # Observe shutdown itself while persistence is held, not merely an
+        # event set before cancellation has propagated. Shield keeps this
+        # observation timeout from sending a second cancellation into drain.
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(stop), timeout=0.1)
+
+        # Another real store connection cannot start a refresh while the old
+        # worker is still live, even though its async caller was cancelled.
+        assert await asyncio.to_thread(WorldStore(tmp_path).acquire_lease, NOW) is None
+        assert not stop.done()
+        assert cache.items(NOW) == []
+
+        unblock_write.set()
+        await asyncio.wait_for(stop, timeout=5)
+        with pytest.raises(asyncio.CancelledError):
+            await refresh
+        assert lease_held_during_write == [True]
+        assert [item.title for item in cache.items(NOW)] == ["Nvidia market update"]
+        assert cache.states()["fed"]["state"] == "ok"
+        assert not cache.refreshing(NOW)
+        successor = WorldStore(tmp_path).acquire_lease(NOW)
+        assert successor is not None
+        cache.release_lease(successor)
+    finally:
+        unblock_write.set()
+        if stop is None:
+            await service.shutdown()
+        await asyncio.gather(refresh, *([stop] if stop is not None else []), return_exceptions=True)

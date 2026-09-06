@@ -258,7 +258,9 @@ async def _reddit_token(client: httpx.AsyncClient, config: WorldConfig) -> str:
         body = await _bounded_response(client, "POST", "https://www.reddit.com/api/v1/access_token", data={"grant_type": "refresh_token", "refresh_token": config.reddit_refresh_token.get_secret_value()}, auth=(config.reddit_client_id, config.reddit_client_secret.get_secret_value()), headers={"User-Agent": config.reddit_user_agent})
         payload = json.loads(body)
         token = payload.get("access_token", "") if isinstance(payload, dict) else ""
-        if not token:
+        # RFC 6750 section 2.1: validate the upstream credential before it can
+        # become a header. Never stringify malformed JSON or echo it in errors.
+        if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", token):
             raise ProviderError("Reddit authorization response was invalid")
         return token
     except ProviderError:

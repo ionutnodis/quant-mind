@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import gzip
+from base64 import b64decode
 from datetime import UTC, datetime
 from email.utils import format_datetime
+from urllib.parse import parse_qs
 
 import httpx
 import pytest
@@ -315,3 +317,145 @@ async def test_fetch_rejects_redirect_instead_of_following_it() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False) as client:
         with pytest.raises(ProviderError, match="redirect"):
             await fetch_source(source(), client, WorldConfig(), NOW)
+
+
+async def test_enabled_x_fetch_uses_explicit_query_and_bearer_without_losing_publication_time() -> None:
+    """Wrong auth/query/fields must fail the outbound contract, not look like empty news."""
+    x = next(item for item in SOURCES if item.id == "x")
+    config = WorldConfig(x_enabled=True, x_bearer_token="synthetic-x-token",
+                         x_query="  (from:example_news OR semiconductor) -is:retweet  ")
+    requests = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "GET"
+        assert request.url.host == "api.x.com"
+        assert request.url.path == "/2/tweets/search/recent"
+        assert request.headers["Authorization"] == "Bearer synthetic-x-token"
+        assert request.headers["Accept"] == "application/json"
+        assert request.headers["Accept-Encoding"] == "identity"
+        assert dict(request.url.params) == {
+            "query": "(from:example_news OR semiconductor) -is:retweet",
+            "max_results": "100",
+            "tweet.fields": "created_at",
+        }
+        return httpx.Response(200, json={
+            "data": [{"id": "123456789", "text": "Semiconductor capacity update",
+                      "created_at": "2026-09-05T10:00:00Z"}],
+            "meta": {"result_count": 1, "newest_id": "123456789", "oldest_id": "123456789"},
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        events = await fetch_source(x, client, config, NOW)
+
+    assert len(requests) == 1
+    assert [(event.source_id, event.title, event.url, event.published_at, event.time_kind)
+            for event in events] == [
+        ("x", "Semiconductor capacity update", "https://x.com/i/web/status/123456789",
+         "2026-09-05T10:00:00Z", "published"),
+    ]
+    assert "synthetic-x-token" not in str(events)
+
+
+@pytest.mark.parametrize("access_token", ["synthetic-access", "aZ09-._~+/=="])
+async def test_enabled_reddit_fetch_exchanges_refresh_grant_then_reads_configured_subreddits(access_token: str) -> None:
+    """OAuth credentials belong on the token POST; only the issued bearer goes to listings."""
+    reddit = next(item for item in SOURCES if item.id == "reddit")
+    config = WorldConfig(
+        reddit_enabled=True, reddit_client_id="synthetic-client",
+        reddit_client_secret="synthetic-secret", reddit_refresh_token="synthetic-refresh",
+        reddit_user_agent="QuantMind-test/1.0 (synthetic fixture)",
+        reddit_subreddits=" investing , stocks,investing,Economics ",
+    )
+    requests = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.headers["User-Agent"] == "QuantMind-test/1.0 (synthetic fixture)"
+        if len(requests) == 1:
+            assert request.method == "POST"
+            assert str(request.url) == "https://www.reddit.com/api/v1/access_token"
+            scheme, encoded = request.headers["Authorization"].split(" ", 1)
+            assert scheme == "Basic"
+            assert b64decode(encoded).decode() == "synthetic-client:synthetic-secret"
+            assert request.headers["Content-Type"] == "application/x-www-form-urlencoded"
+            assert parse_qs(request.content.decode()) == {
+                "grant_type": ["refresh_token"], "refresh_token": ["synthetic-refresh"],
+            }
+            return httpx.Response(200, json={
+                "access_token": access_token, "token_type": "bearer",
+                "expires_in": 3600, "scope": "read",
+            })
+        assert len(requests) == 2
+        assert request.method == "GET"
+        assert str(request.url) == "https://oauth.reddit.com/r/investing+stocks+Economics/new"
+        assert request.headers["Authorization"] == f"Bearer {access_token}"
+        assert request.headers["Accept"] == "application/json"
+        assert request.headers["Accept-Encoding"] == "identity"
+        assert request.content == b""
+        return httpx.Response(200, json={"kind": "Listing", "data": {
+            "after": None, "before": None, "dist": 1,
+            "children": [{"kind": "t3", "data": {
+                "id": "abc123", "title": "Market discussion", "selftext": "Rates and growth",
+                "permalink": "/r/investing/comments/abc123/market_discussion/",
+                "created_utc": 1788602400,
+            }}],
+        }})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        events = await fetch_source(reddit, client, config, NOW)
+
+    assert len(requests) == 2
+    assert [(event.source_id, event.title, event.summary, event.url,
+             event.published_at, event.time_kind) for event in events] == [
+        ("reddit", "Market discussion", "Rates and growth",
+         "https://www.reddit.com/r/investing/comments/abc123/market_discussion/",
+         "2026-09-05T10:00:00Z", "published"),
+    ]
+    assert "synthetic-" not in str(events)
+    assert access_token not in str(events)
+
+
+@pytest.mark.parametrize("body", [
+    pytest.param(b"{}", id="missing-token"),
+    pytest.param(b"not-json", id="invalid-json"),
+    pytest.param(b'{"access_token":{"private":"not-a-token"}}', id="non-string-token"),
+    pytest.param(b'{"access_token":123}', id="numeric-token"),
+    pytest.param(b'{"access_token":["private"]}', id="array-token"),
+    pytest.param(b'{"access_token":""}', id="empty-token"),
+    pytest.param(b'{"access_token":"   "}', id="blank-token"),
+    pytest.param(b'{"access_token":"private token"}', id="space-in-token"),
+    pytest.param(b'{"access_token":"private\\r\\nheader"}', id="control-in-token"),
+    pytest.param(b'{"access_token":"private\\u00e9"}', id="non-ascii-token"),
+])
+async def test_malformed_reddit_oauth_stops_before_listing_without_exposing_response(body: bytes) -> None:
+    """Malformed authorization must fail closed instead of becoming a listing credential."""
+    reddit = next(item for item in SOURCES if item.id == "reddit")
+    config = WorldConfig(
+        reddit_enabled=True, reddit_client_id="synthetic-client",
+        reddit_client_secret="synthetic-secret", reddit_refresh_token="synthetic-refresh",
+        reddit_user_agent="QuantMind-test/1.0",
+    )
+    requests = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v1/access_token":
+            return httpx.Response(200, content=body)
+        return httpx.Response(200, json={"kind": "Listing", "data": {"children": []}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(ProviderError, match="Reddit authorization") as caught:
+            await fetch_source(reddit, client, config, NOW)
+
+    assert len(requests) == 1
+    assert "private" not in str(caught.value)
+    assert "synthetic" not in str(caught.value)
+
+
+def test_reddit_subreddit_config_rejects_empty_or_unsafe_listing_paths() -> None:
+    """Configured names cannot inject a new path/query or evade the ten-community bound."""
+    for names in (" , ", "investing/../../private", "investing?limit=100", "investing+stocks",
+                  "x" * 22, ",".join(f"community{i}" for i in range(11))):
+        with pytest.raises(ValidationError, match="subreddit"):
+            WorldConfig(reddit_subreddits=names)
