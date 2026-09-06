@@ -27,6 +27,7 @@ All notable changes to QuantMind are documented in this file.
 - Lens save feedback reflects actual persistence, pending saves cannot discard newer edits, and invalid saved preferences can be repaired from the page.
 - Saved lenses survive failed or older pending cache reads. Invalid symbols show readable field errors, and uppercase pinned references are normalized before loading their book.
 - Malformed individual stories no longer discard valid neighbors. Nonempty feeds with no valid records retain an error and the last-good timestamp; genuinely empty feeds can still succeed. XML complexity and text limits prevent pathological parsing from monopolizing the dashboard.
+- Feed marked-section validation now behaves consistently across Python 3.12 patch versions, rejecting unsupported or Unicode-lookalike declarations without discarding valid neighboring stories. Recognized declarations remain supported.
 - Article links require unambiguous DNS-hosted HTTP(S) origins in both cached events and the browser. Numeric IP origins, encoded authorities and credentials are excluded; original publisher evidence links remain intact.
 - Sentence-ending ticker mentions such as `$BP.` are recognized without confusing distinct listing suffixes. World headline and source links now have measured 44-pixel touch targets on phones and tablets.
 - Long headlines, summaries, and saved lens values wrap within narrow screens instead of forcing horizontal scrolling. World also reuses date-formatting setup when filtering events.

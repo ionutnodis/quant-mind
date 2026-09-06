@@ -103,8 +103,9 @@ No order-placement endpoint or broker permission was added.
 
 ## Verification and review
 
-Latest local release-candidate checks: **1,728 backend tests passed** (8
-intentionally unshipped T3 tests skipped, 1 live-IBKR test deselected), **156
+Latest local release-candidate checks: **1,756 backend tests passed on each of
+Python 3.12.4 and 3.12.14** (8 intentionally unshipped T3 tests skipped, 1
+live-IBKR test deselected), **156
 frontend tests passed**, **36 Chromium/WebKit browser tests passed**, and **5
 bundle-budget checks passed**. Locked installs, generated-type drift checks,
 frontend lint, TypeScript and the production build passed. Six existing lint
@@ -115,7 +116,7 @@ gzip**; pages and charts load on demand. Plotly's deferred runtime remains about
 1.37 MB raw and still emits Vite's large-chunk advisory. It is not downloaded
 when opening an empty Today, World or Setup view.
 
-The follow-up fixes added **117 backend cases, 14 frontend cases and 6 browser
+The follow-up fixes added **145 backend cases, 14 frontend cases and 6 browser
 cases** over the preceding verification. Regressions cover unsafe cached article
 links, malformed feeds, all-invalid source health, cancellation, ticker boundaries,
 saved-lens races and actual 44px link boxes on touch-enabled phones and tablets.
@@ -135,6 +136,14 @@ The first CI run exposed a prior-version literal in the Setup response test
 after the release bump. The test now reads `VERSION`, and a new regression checks
 the API, Python package, lockfile and web package against that manifest. The full
 backend suite was rerun after the fix; no application behavior was weakened.
+
+A subsequent Linux CI run exposed a Python patch-version difference: 3.12.14's
+HTML parser tolerates unknown marked sections that 3.12.4 rejects. An explicit,
+ASCII-keyword declaration policy now isolates those records consistently while
+preserving recognized sections and valid neighboring stories. Regressions also
+cover Unicode keyword lookalikes and record-local parser exceptions independently
+of the standard library's grammar. Both actual Python versions are tested; CI
+continues to use the latest available 3.12 patch rather than pinning an older one.
 
 Tests cover parsers, API authentication and book scope, profile persistence,
 source outages, retention, cache corruption, single-flight refresh, CLI exit

@@ -156,27 +156,64 @@ def test_misplaced_xml_records_do_not_discard_valid_direct_siblings(kind, root, 
 
 @pytest.mark.parametrize("kind", ["rss", "gdelt"])
 @pytest.mark.parametrize("field", ["title", "summary"])
-def test_malformed_html_in_one_record_does_not_discard_valid_neighbors(kind, field) -> None:
-    """HTMLParser assertions in untrusted text are confined to that record."""
+@pytest.mark.parametrize("markup", [
+    "<![broken]>", "<![broken]>Visible text",
+    "<![İF IE]>Visible text", "<![ıf IE]>Visible text", "<![İNCLUDE[metadata]]>Visible text",
+])
+def test_malformed_html_in_one_record_does_not_discard_valid_neighbors(kind, field, markup) -> None:
+    """Unknown marked sections reject only their record across Python patch versions."""
+    events = _parse_markup_batch(kind, field, markup)
+    assert [event.title for event in events] == ["Before", "After"]
+
+
+def _parse_markup_batch(kind, field, markup):
     if kind == "rss":
         tag = "description" if field == "summary" else "title"
         bad_title = "<title>Bad</title>" if field == "summary" else ""
         body = (
             "<rss><channel><item><title>Before</title><link>https://example.gov/before</link></item>"
-            f"<item>{bad_title}<{tag}><![CDATA[<![broken]>]]></{tag}>"
+            f"<item>{bad_title}<{tag}><![CDATA[{markup.replace(']]>', ']]]]><![CDATA[>')}]]></{tag}>"
             "<link>https://example.gov/bad</link></item>"
             "<item><title>After</title><link>https://example.gov/after</link></item></channel></rss>"
         ).encode()
-        events = parse_xml(source(), body, NOW)
-    else:
-        bad = {"title": "Bad", "url": "https://example.gov/bad"}
-        bad["domain" if field == "summary" else "title"] = "<![broken]>"
-        body = json.dumps({"articles": [
-            {"title": "Before", "url": "https://example.gov/before"}, bad,
-            {"title": "After", "url": "https://example.gov/after"},
-        ]}).encode()
-        events = parse_json(source(kind=kind), body, NOW)
+        return parse_xml(source(), body, NOW)
+    bad = {"title": "Bad", "url": "https://example.gov/bad"}
+    bad["domain" if field == "summary" else "title"] = markup
+    body = json.dumps({"articles": [
+        {"title": "Before", "url": "https://example.gov/before"}, bad,
+        {"title": "After", "url": "https://example.gov/after"},
+    ]}).encode()
+    return parse_json(source(kind=kind), body, NOW)
+
+
+@pytest.mark.parametrize("kind", ["rss", "gdelt"])
+@pytest.mark.parametrize("field", ["title", "summary"])
+@pytest.mark.parametrize("error_type", [AssertionError, ValueError])
+def test_parser_errors_are_isolated_per_record_independently_of_stdlib_tolerance(monkeypatch, kind, field, error_type) -> None:
+    """Removing the record-level catch must fail even when HTMLParser changes its grammar."""
+    from html.parser import HTMLParser
+
+    original_feed = HTMLParser.feed
+
+    def feed_with_one_error(self, data):
+        if data == "synthetic-parser-error":
+            raise error_type("private parser detail")
+        return original_feed(self, data)
+
+    monkeypatch.setattr(HTMLParser, "feed", feed_with_one_error)
+    events = _parse_markup_batch(kind, field, "synthetic-parser-error")
     assert [event.title for event in events] == ["Before", "After"]
+
+
+@pytest.mark.parametrize("kind", ["rss", "gdelt"])
+@pytest.mark.parametrize("markup", [
+    "<!-- comment --><!DOCTYPE html><![CDATA[metadata]]><p>Visible text</p>",
+    "<![if IE]>Visible text<![endif]>",
+])
+def test_recognized_declarations_do_not_reject_an_otherwise_valid_record(kind, markup) -> None:
+    events = _parse_markup_batch(kind, "summary", markup)
+    assert [event.title for event in events] == ["Before", "Bad", "After"]
+    assert events[1].summary == "Visible text"
 
 
 @pytest.mark.parametrize("kind,body", [

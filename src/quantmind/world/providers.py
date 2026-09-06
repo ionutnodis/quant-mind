@@ -73,6 +73,16 @@ class _TextExtractor(HTMLParser):
         if not self.hidden:
             self.parts.append(data)
 
+    def unknown_decl(self, data: str) -> None:
+        # Python patch releases differ in whether unknown marked sections
+        # raise or reach this callback. Keep one record-validation contract,
+        # preserving recognized CDATA/SGML and legacy conditional sections.
+        if not re.match(
+            r"(?:temp|cdata|ignore|include|rcdata|if|else|endif)(?:\s|\[|$)",
+            data, re.IGNORECASE | re.ASCII,
+        ):
+            raise ValueError("Invalid feed marked section")
+
 
 def _plain(value: str | None, limit: int) -> str:
     if value is not None and len(value) > MAX_FIELD_TEXT:
