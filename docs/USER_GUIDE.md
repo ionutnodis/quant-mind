@@ -90,6 +90,13 @@ Setup is the control plane for that sequence. Read the **Next action** first, th
 4. For actual holding matches, open a pinned Portfolio and choose **World**. Navigation carries `book_ref` with you. You can also paste a 12-character pinned reference and click **Apply**. Without a selected book, watchlist matches are not represented as holdings.
 5. Read **Why it matches** beside each event, then follow the headline to its original source. Amber identifies a direct book mention; steel identifies a watchlist, topic or regional interest. These are attention rules, not causal risk estimates or trading signals.
 
+**Saving and recovery:** uppercase hexadecimal book references are accepted and
+normalized. A rejected lens shows a readable field error and keeps your draft.
+Once the server confirms a save, an older or failed news-cache read cannot replace
+that saved lens. If refresh fails, check the source-health panel: last-good events
+remain available, but their timestamps do not advance. A genuinely empty feed is
+different from a nonempty feed whose records were all invalid.
+
 ![World monitor showing a synthetic technology-investor lens, event explanations and independent source health](screenshots/world-desktop.png)
 
 *World screenshots use explicitly illustrative news and a synthetic watchlist, not live investment information.* The same semantic layout reflows on phones, iPads and ultrawide monitors. Phones can browse and filter; editing and refreshing require the full workspace. [See the ultrawide layout](screenshots/world-wide.png). The isolated demo can be reproduced with [scripts/world_demo.py](../scripts/world_demo.py).

@@ -49,6 +49,8 @@ Source statuses distinguish **never**, **ok**, **error** and **disabled**.
 30 minutes) without success. An error preserves the previous successful cache
 and timestamp. Empty, valid source responses can be successful: earthquakes
 and infrequent releases need not produce a new event every refresh.
+A nonempty batch with no valid records is an error, not a successful refresh.
+One malformed story is skipped without losing valid neighbors in that batch.
 
 The source timestamp is when retrieval succeeded. Each article is separately
 dated. Missing publication time becomes first **Observed** time; later polls
@@ -132,12 +134,26 @@ context; they are not issuer statements or trading signals.
 Transactions preserve last-good feeds; a leased database lock prevents
 overlapping API/CLI ingestion across processes. An interrupted process's
 lease expires in three minutes. Four feeds run concurrently, with an 8-second
-HTTP timeout, 12-second total provider deadline and 2 MiB response bound.
+HTTP timeout, 12-second provider deadline and 2 MiB response bound. Parsing runs
+off the API event loop. A deadline or shutdown waits for its bounded worker to
+finish before releasing concurrency capacity, so cleanup can extend the deadline.
+XML is limited to 32 nesting levels and 10,000 nodes; at most 200 direct
+RSS items or Atom entries are considered. Individual title/summary sanitizer
+inputs are limited to 16,384 characters. Excessive structure fails the feed; excessive or
+malformed text rejects that record. Unusually deep or verbose feeds may therefore
+be rejected rather than partially trusted.
 HTTP redirects and non-identity content encodings are refused before reading
 the response, preventing decompression from bypassing the memory cap.
 XML entities/DTDs, malformed envelopes, unsafe
 links and HTML scripts are rejected or stripped. Errors do not expose tokens
 or upstream response bodies.
+
+Article links require fully qualified ASCII DNS names (punycode is supported),
+HTTP(S), valid ports and no credentials, encoded authorities or raw backslashes.
+All numeric IP origins are excluded, including public addresses, to avoid
+browser/Python disagreements about alternate localhost spellings. Unicode paths
+are supported. This is a syntactic link policy, not DNS-rebinding protection:
+QuantMind does not fetch arbitrary article links or resolve them for ingestion.
 
 The cache retains at most 30 days, 250 records per source and 5,000 globally.
 The view reads at most 30 recent events per source, 500 overall, before local

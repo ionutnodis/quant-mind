@@ -1,6 +1,6 @@
 # Personal World desk: engineering brief
 
-Release: **0.6.0.0** · 5 September 2026
+Release candidate: **0.6.0.0** · verified 6 September 2026
 
 QuantMind now has a working, portfolio-aware world-monitoring workspace. It
 answers “what deserves my attention, and why?” alongside the existing price,
@@ -82,6 +82,11 @@ No order-placement endpoint or broker permission was added.
   price, FX or option evidence. Source errors preserve last-good data and dates.
 - Provider requests have bounded time, response size and concurrency. Refresh
   cooldowns, Retry-After and a cross-process lease control repeated requests.
+- Parsing runs off-loop with XML depth/node limits and bounded text inputs.
+  Cancellation drains its worker before releasing capacity. One malformed
+  record does not discard valid neighbors; a nonempty all-invalid batch records
+  an error without advancing the last-good timestamp. Genuine empty feeds remain
+  valid. [Exact ingestion limits and link policy](data-sources.md#cache-resilience-and-privacy).
 - Invalid XML, malformed records, unsafe URLs, future or timezone-less supplied
   dates and corrupt cache rows are rejected. Missing dates are explicitly
   labeled **Observed**, and repeated retrieval does not manufacture recency.
@@ -91,14 +96,40 @@ No order-placement endpoint or broker permission was added.
   outside-world color. No match score claims an expected return or risk impact.
 - The layout works from 320px to 3440px in the browser tests. Phones and short
   landscape windows remain read-only; controls require at least 768 × 600.
+- Confirmed lens saves update cached profile state before editing is unlocked;
+  older pending reads are cancelled. Failed reads cannot restore a superseded
+  lens. Validation errors remain readable without serializing raw input/context,
+  and uppercase book references are normalized before API requests.
 
 ## Verification and review
 
-Final local release checks: **1,595 backend tests passed** (8 skipped,
-1 deselected), **133 frontend tests passed**, and **18 Chromium/WebKit browser
-tests passed**. Frontend lint and the production build passed; existing
-deprecation/runtime-fixture warnings and the large JavaScript chunk warning
-remain. Provider tests were rerun after a test-only placeholder cleanup.
+Latest local release-candidate checks: **1,728 backend tests passed** (8
+intentionally unshipped T3 tests skipped, 1 live-IBKR test deselected), **156
+frontend tests passed**, **36 Chromium/WebKit browser tests passed**, and **5
+bundle-budget checks passed**. Locked installs, generated-type drift checks,
+frontend lint, TypeScript and the production build passed. Six existing lint
+warnings and five backend deprecation/runtime-fixture warnings remain.
+
+The initial JavaScript dependency graph is **363,320 bytes raw / 114,036 bytes
+gzip**; pages and charts load on demand. Plotly's deferred runtime remains about
+1.37 MB raw and still emits Vite's large-chunk advisory. It is not downloaded
+when opening an empty Today, World or Setup view.
+
+The follow-up fixes added **117 backend cases, 14 frontend cases and 6 browser
+cases** over the preceding verification. Regressions cover unsafe cached article
+links, malformed feeds, all-invalid source health, cancellation, ticker boundaries,
+saved-lens races and actual 44px link boxes on touch-enabled phones and tablets.
+These are passing test counts, not a claim of complete line/branch coverage.
+
+The original roughly 1 MB hostile XML fixture now fails with a safe complexity
+error in **0.003 seconds**, versus **15.37 seconds** before; an unrelated 50ms
+callback remained responsive. On the same bounded 420-event, 100-watch-symbol,
+20-interest, 20-region and 10-holding synthetic fixture, median ranking CPU time
+fell from **1.284 seconds to 0.325 seconds** across three runs (~3.95× faster).
+This is a diagnostic CPU benchmark, not an HTTP latency or typical-user promise.
+Run `uv run python scripts/world_ranking_benchmark.py --runs 3` to reproduce the
+fixture. CI guards regex-operation counts and literal behavior, not wall-clock
+ranking thresholds; the optimization adds no persisted or process-global result cache.
 
 The first CI run exposed a prior-version literal in the Setup response test
 after the release bump. The test now reads `VERSION`, and a new regression checks
@@ -115,6 +146,12 @@ data, multiple display widths, and a short landscape viewport. Unit tests use
 fixed fixtures and mocked network access; CI does not depend on feed uptime.
 The [README screenshots](../README.md#make-world-your-own) were captured
 from the running UI using the explicitly illustrative demo, not real portfolios.
+
+These checks do not certify live brokerage connectivity or every provider's
+current availability. The original World implementation's historical test-first
+chronology remains unverified; the follow-up fixes recorded failing regressions
+before their implementation. No order entry or main-branch merge is implied by
+this release-candidate brief.
 
 The initial read-only live probe parsed 13 public feeds. A final repeat parsed
 11: BLS returned HTTP 403, BIS returned a non-feed XML response, and GDELT timed

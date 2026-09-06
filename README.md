@@ -134,6 +134,8 @@ World can run without an IBKR connection. On your normal local server:
 
 Matches are attention filters, not estimates of an event's impact on your portfolio. Failed sources leave existing cached events available; public feeds are not guaranteed real-time or complete.
 
+**If something fails:** correct any field error shown when saving your lens. A saved lens stays saved even if the next news-cache read fails. In source health, an error preserves the last-good stories and timestamp; an empty feed can still be healthy. [Understand source status and limits →](docs/data-sources.md#first-use)
+
 For background refreshes, run this in a second terminal:
 
 ```bash

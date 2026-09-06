@@ -2,7 +2,7 @@
 
 All notable changes to QuantMind are documented in this file.
 
-## [0.6.0.0] - 2026-09-05
+## [0.6.0.0] - 2026-09-06
 
 ### Added
 
@@ -17,6 +17,7 @@ All notable changes to QuantMind are documented in this file.
 - Source failures retain last-good events and provenance. Independent status, stale warnings and bounded refreshes keep failures visible without overwriting portfolio or market evidence.
 - World scales from narrow phones to ultrawide displays, with read-only companion controls below 768 × 600 and recoverable lens editing in the full workspace.
 - Pages and charts load on demand. Initial static JavaScript is about 363 kB raw / 114 kB gzip, down from 1.87 MB / 593 kB; the shared Plotly runtime downloads only when needed. Production bundle budgets and browser tests guard loading and recovery behavior.
+- Large watchlists require less ranking work: a bounded 420-event synthetic benchmark runs about four times faster, while preserving match reasons, scores and ordering.
 
 ### Fixed
 
@@ -24,6 +25,10 @@ All notable changes to QuantMind are documented in this file.
 - Malformed social identities, ticker-prefix matches, unsafe cached links and compressed-response expansion are rejected before they can create misleading evidence or exceed the ingestion memory boundary.
 - Reddit rejects malformed OAuth tokens before making a listing request. Regression checks now exercise enabled social request contracts, active-refresh shutdown, combined World filters and portfolio selection; sync tests retain real process workers with explicit cleanup and controlled release gates.
 - Lens save feedback reflects actual persistence, pending saves cannot discard newer edits, and invalid saved preferences can be repaired from the page.
+- Saved lenses survive failed or older pending cache reads. Invalid symbols show readable field errors, and uppercase pinned references are normalized before loading their book.
+- Malformed individual stories no longer discard valid neighbors. Nonempty feeds with no valid records retain an error and the last-good timestamp; genuinely empty feeds can still succeed. XML complexity and text limits prevent pathological parsing from monopolizing the dashboard.
+- Article links require unambiguous DNS-hosted HTTP(S) origins in both cached events and the browser. Numeric IP origins, encoded authorities and credentials are excluded; original publisher evidence links remain intact.
+- Sentence-ending ticker mentions such as `$BP.` are recognized without confusing distinct listing suffixes. World headline and source links now have measured 44-pixel touch targets on phones and tablets.
 - Long headlines, summaries, and saved lens values wrap within narrow screens instead of forcing horizontal scrolling. World also reuses date-formatting setup when filtering events.
 - Release checks detect mismatches between the API, Python package, lockfile and web package versions; Setup tests no longer depend on a prior release's version literal.
 
