@@ -30,7 +30,9 @@ export default defineConfig({
       timeout: 30_000,
     },
     {
-      command: "bun run dev -- --host localhost --port 4173 --strictPort",
+      // Exercise production chunks and their failure paths, not Vite's dev
+      // module graph. The backend/cache is still entirely synthetic.
+      command: "bun run build && bun run preview -- --host localhost --port 4173 --strictPort",
       cwd: WEB_DIR,
       env: { QM_API_PROXY_TARGET: "http://127.0.0.1:8765" },
       url: "http://localhost:4173",

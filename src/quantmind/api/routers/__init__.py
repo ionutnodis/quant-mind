@@ -14,5 +14,6 @@ from quantmind.api.routers.options import router as options_router
 from quantmind.api.routers.news import router as news_router
 from quantmind.api.routers.rotation import router as rotation_router
 from quantmind.api.routers.setup import router as setup_router
+from quantmind.api.routers.world import router as world_router
 
-ROUTERS = [portfolio_router, risk_router, lab_router, macro_router, whatif_router, hedge_router, sync_router, book_router, instruments_router, options_router, news_router, rotation_router, setup_router]
+ROUTERS = [portfolio_router, risk_router, lab_router, macro_router, whatif_router, hedge_router, sync_router, book_router, instruments_router, options_router, news_router, rotation_router, setup_router, world_router]

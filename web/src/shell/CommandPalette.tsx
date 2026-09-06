@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Command } from "cmdk";
 import { useNavigate } from "@tanstack/react-router";
 import { PAGES } from "./Shell";
+import { readActiveBookRef } from "../lib/book";
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
@@ -44,7 +45,8 @@ export function CommandPalette() {
                 value={p.label}
                 onSelect={() => {
                   setOpen(false);
-                  navigate({ to: p.path });
+                  const bookRef = readActiveBookRef();
+                  navigate({ to: p.path, search: () => bookRef ? { book_ref: bookRef } : {} });
                 }}
                 className="px-4 py-2 text-[13px] text-ink data-[selected=true]:bg-elevated data-[selected=true]:text-ink cursor-pointer"
               >

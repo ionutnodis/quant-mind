@@ -1,6 +1,6 @@
 # QuantMind
 
-Local-first quant workbench: Python core (`src/quantmind/`), FastAPI backend, and React frontend. IBKR remains behind a read-only broker interface; the cache uses DuckDB/Parquet. Product and responsive-design decisions live in [DESIGN.md](DESIGN.md); the committed API contract is [openapi.json](openapi.json).
+Local-first quant workbench: Python core (`src/quantmind/`), FastAPI backend, and React frontend. IBKR remains behind a read-only broker interface; analytical evidence uses DuckDB/Parquet, while World keeps a separate SQLite event cache. Product and responsive-design decisions live in [DESIGN.md](DESIGN.md); the committed API contract is [openapi.json](openapi.json).
 
 ## Testing
 - Backend: `uv run pytest`. E2E paper-Gateway tests are opt-in: `uv run pytest -m e2e --override-ini addopts=''` (needs IB Gateway on port 4002).
@@ -8,7 +8,7 @@ Local-first quant workbench: Python core (`src/quantmind/`), FastAPI backend, an
 - TDD is the law here: no production code without a failing test first. Risk-math modules test against hand-computed/golden values.
 
 ## Engineering constraints
-- Pure core: `risk/`, `analytics/`, and `hedge/` remain calculation-focused and picklable; I/O belongs in `broker/`, `sources/`, `datastore/`, and the provider boundary in `fx.py`.
+- Pure core: `risk/`, `analytics/`, and `hedge/` remain calculation-focused and picklable; I/O belongs in `broker/`, `sources/`, `datastore/`, `world/providers.py`, `world/store.py`, and the provider boundary in `fx.py`.
 - Risk math uses ADJUSTED_LAST bars keyed by conId; adjusted history is refreshable, never append-only.
 - Parquet is the source of truth; exactly one writer process; DuckDB readers open read-only.
 - Alpha is Jensen's alpha (CAPM excess-return regression); raw-return alpha is never shown.

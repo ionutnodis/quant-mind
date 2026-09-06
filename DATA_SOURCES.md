@@ -9,6 +9,7 @@ QuantMind keeps source identity beside cached observations and does not silently
 | justETF | Optional UCITS ETF share-class profile: name, issuer, domicile, TER, distribution, replication, and benchmark | Disabled by default with `QM_UCITS_METADATA_ENABLED=false`; supported European-domicile ISIN requests only; responses capped at 5 MiB; 30-day local cache | Typed profile with source URL and UTC fetch timestamp, kept separate from price provenance |
 | FRED | US rates and liquidity macro series | Public keyless graph CSV endpoint | Named series and watermark |
 | yfinance | Explicitly allowlisted adjusted-bar fallback | Opt-in per symbol; never overwrites a positive IBKR conId; sync fails closed without a valid quote unit | Deterministic pseudo-conId, provider tag, validated ISO currency, original quote unit, and applied price scale |
+| [World Monitor catalog](docs/data-sources.md) | Central-bank, economic, energy, geopolitical and disaster events for the local attention desk | 14 public routes plus contact-gated SEC and explicitly enabled X/Reddit; separate from analytical price evidence | Bounded plain-text event metadata, original links, published/observed time and independent source health in `world.sqlite3` |
 
 ## UCITS roadmap boundary
 

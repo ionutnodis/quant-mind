@@ -4,6 +4,7 @@ import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { CommandPalette } from "./CommandPalette";
+import { readActiveBookRef } from "../lib/book";
 
 export const PAGES = [
   { path: "/", label: "Today", navigation: true },
@@ -12,6 +13,7 @@ export const PAGES = [
   { path: "/hedge", label: "Hedge Lab", navigation: true },
   { path: "/whatif", label: "What-If", navigation: true },
   { path: "/macro", label: "Macro", navigation: true },
+  { path: "/world", label: "World", navigation: true },
   { path: "/lab", label: "Lab", navigation: true },
   { path: "/book/setup", label: "Setup", navigation: false },
 ] as const;
@@ -32,6 +34,10 @@ export function Shell() {
             <Link
               key={p.path}
               to={p.path}
+              search={() => {
+                const bookRef = readActiveBookRef();
+                return bookRef ? { book_ref: bookRef } : {};
+              }}
               className={`qm-target block shrink-0 whitespace-nowrap border-b-2 px-3 py-2 text-[12px] md:border-b-0 md:border-l-2 md:px-4 md:py-1.5 md:text-[13px] ${
                 pathname === p.path
                   ? "border-you bg-surface text-you"

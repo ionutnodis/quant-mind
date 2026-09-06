@@ -13,6 +13,15 @@ export default defineConfig({
   server: {
     proxy: { "/api": apiProxyTarget },
   },
+  build: {
+    modulePreload: {
+      // Keep initial HTML preloads, but let dynamic JS use native import().
+      // WebKit can retain failed modulepreloads across reloads (bug 270357).
+      // Vite still loads a dynamic page's associated CSS before rendering it.
+      resolveDependencies: (_filename, dependencies, { hostType }) =>
+        hostType === "html" ? dependencies : [],
+    },
+  },
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],

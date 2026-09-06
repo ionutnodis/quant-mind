@@ -57,6 +57,7 @@ jobs:
           bun run lint
           bunx vitest run
           bun run build
+          bun run test:bundle
       - name: Install Playwright browsers
         working-directory: web
         run: bunx playwright install --with-deps chromium webkit
