@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { request } from "../lib/api";
 import type { components } from "../lib/api-types";
 import { readActiveBookRef, writeActiveBookRef } from "../lib/book";
+import { safeWorldUrl } from "../lib/world-url";
 import "./world.css";
 
 // FastAPI includes model defaults in responses; OpenAPI marks them optional
@@ -17,17 +18,24 @@ type RefreshResult = components["schemas"]["WorldRefreshResult"];
 const csv = (value: string, upper = false) => [...new Set(value.split(",").map((v) => v.trim()).filter(Boolean).map((v) => upper ? v.toUpperCase() : v))];
 const dateFormatter = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 const dateTime = (value: string | null) => { if (!value) return "Never"; const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? "Invalid time" : dateFormatter.format(parsed); };
-const safeUrl = (value: string) => { try { const url = new URL(value); return url.protocol === "http:" || url.protocol === "https:" ? value : null; } catch { return null; } };
 
-function getWorld(bookRef: string | null) {
+function getWorld(bookRef: string | null, signal: AbortSignal) {
   const suffix = bookRef ? `?book_ref=${encodeURIComponent(bookRef)}` : "";
-  return request<WorldResponse>(`/api/world${suffix}`);
+  return request<WorldResponse>(`/api/world${suffix}`, { signal });
+}
+
+function initialBookRef() {
+  const value = readActiveBookRef();
+  return value && /^[0-9a-fA-F]{12}$/.test(value) ? value.toLowerCase() : value;
 }
 
 export function World() {
   const queryClient = useQueryClient();
-  const [bookRef, setBookRef] = useState(() => readActiveBookRef());
-  const [bookDraft, setBookDraft] = useState(() => readActiveBookRef() ?? "");
+  const [bookRef, setBookRef] = useState(initialBookRef);
+  const [bookDraft, setBookDraft] = useState(() => initialBookRef() ?? "");
+  useEffect(() => {
+    if (bookRef && /^[0-9a-f]{12}$/.test(bookRef) && readActiveBookRef() !== bookRef) writeActiveBookRef(bookRef);
+  }, [bookRef]);
   const [search, setSearch] = useState("");
   const [lensOnly, setLensOnly] = useState(false);
   const [topic, setTopic] = useState("all");
@@ -37,12 +45,22 @@ export function World() {
   const [saved, setSaved] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
 
-  const world = useQuery({ queryKey: ["world", bookRef], queryFn: () => getWorld(bookRef), retry: false, refetchInterval: (query) => query.state.data?.refreshing ? 2000 : 30_000 });
+  const world = useQuery({ queryKey: ["world", bookRef], queryFn: ({ signal }) => getWorld(bookRef, signal), retry: false, refetchInterval: (query) => query.state.data?.refreshing ? 2000 : 30_000 });
   useEffect(() => { if (world.data && !draftDirty) setDraft({ watch_symbols: world.data.profile.watch_symbols.join(", "), interests: world.data.profile.interests.join(", "), regions: world.data.profile.regions.join(", ") }); }, [world.data, draftDirty]);
 
   const save = useMutation({
     mutationFn: (profile: Profile) => request<Profile>("/api/world/profile", { method: "PUT", body: JSON.stringify(profile) }),
-    onSuccess: async (profile) => { setDraft({ watch_symbols: profile.watch_symbols.join(", "), interests: profile.interests.join(", "), regions: profile.regions.join(", ") }); setDraftDirty(false); setSaved(true); await queryClient.invalidateQueries({ queryKey: ["world"] }); },
+    onSuccess: async (profile) => {
+      // A read begun before this write cannot supersede its acknowledgement.
+      // The lens is installation-wide, so update every cached book context
+      // before clearing the dirty guard, even if the next read fails.
+      await queryClient.cancelQueries({ queryKey: ["world"] });
+      queryClient.setQueriesData<WorldResponse>({ queryKey: ["world"] }, (cached) => cached ? { ...cached, profile } : cached);
+      setDraft({ watch_symbols: profile.watch_symbols.join(", "), interests: profile.interests.join(", "), regions: profile.regions.join(", ") });
+      setDraftDirty(false);
+      setSaved(true);
+      await queryClient.invalidateQueries({ queryKey: ["world"] });
+    },
     onMutate: () => setSaved(false),
   });
   const refresh = useMutation({ mutationFn: () => request<RefreshResult>("/api/world/refresh", { method: "POST" }), onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ["world"] }); } });
@@ -55,11 +73,12 @@ export function World() {
   }), [world.data, search, lensOnly, topic, source]);
 
   const applyBook = () => {
-    const next = bookDraft.trim() || null;
-    if (next && !/^[0-9a-fA-F]{12}$/.test(next)) { setValidationError("Pinned book reference must be exactly 12 hexadecimal characters."); return; }
+    const next = bookDraft.trim().toLowerCase() || null;
+    if (next && !/^[0-9a-f]{12}$/.test(next)) { setValidationError("Pinned book reference must be exactly 12 hexadecimal characters."); return; }
     setValidationError(null);
     writeActiveBookRef(next);
     setBookRef(next);
+    setBookDraft(next ?? "");
   };
   const saveLens = () => {
     const profile = { watch_symbols: csv(draft.watch_symbols, true), interests: csv(draft.interests), regions: csv(draft.regions) };
@@ -128,7 +147,7 @@ export function World() {
           {filtered.map((item) => <article className="world-event" key={item.id}>
             <div className="world-event-main">
               <div className="world-event-meta"><span>{item.source_name}</span><time dateTime={item.published_at}>{item.time_kind === "observed" ? "Observed" : "Published"} {dateTime(item.published_at)}</time></div>
-              <h3>{safeUrl(item.url) ? <a href={safeUrl(item.url)!} target="_blank" rel="noopener noreferrer">{item.title}</a> : item.title}</h3>
+              <h3>{safeWorldUrl(item.url) ? <a href={safeWorldUrl(item.url)!} target="_blank" rel="noopener noreferrer">{item.title}</a> : item.title}</h3>
               {item.summary && <p>{item.summary}</p>}
               <div className="world-tags">{item.topics.map((value) => <span key={value}>{value}</span>)}{item.regions.map((value) => <span key={value}>{value}</span>)}</div>
             </div>
@@ -148,7 +167,7 @@ export function World() {
           <section className="world-rail-section">
             <div className="world-section-head"><h2>Source status</h2><span>{world.data.sources.length}</span></div>
             <p className="world-source-note">This view checks the local cache every 30 seconds. New ingestion starts only from the manual button or CLI. <a href="https://github.com/ionutnodis/quant-mind/blob/main/docs/data-sources.md" target="_blank" rel="noopener noreferrer">Source setup</a></p>
-            <div className="world-sources" role="region" aria-label="Source feed health" tabIndex={0}>{world.data.sources.map((item) => { const homepage = safeUrl(item.homepage); return <div className="world-source" data-testid={`source-${item.id}`} key={item.id}>
+            <div className="world-sources" role="region" aria-label="Source feed health" tabIndex={0}>{world.data.sources.map((item) => { const homepage = safeWorldUrl(item.homepage); return <div className="world-source" data-testid={`source-${item.id}`} key={item.id}>
               <div><strong>{homepage ? <a href={homepage} target="_blank" rel="noopener noreferrer">{item.name}</a> : item.name}</strong><span className="world-source-states"><span className={`world-state state-${item.state}`}>{item.state === "ok" ? "●" : item.state === "error" ? "×" : item.state === "disabled" ? "◇" : "▲"} {item.state}</span>{item.stale && <span className="world-state state-stale">▲ stale</span>}</span></div>
               <p>{item.description}</p><dl><div><dt>Access</dt><dd>{item.access}</dd></div><div><dt>Cached</dt><dd>{item.item_count} items</dd></div><div><dt>Last success</dt><dd>{dateTime(item.last_success)}</dd></div></dl>
               {item.error && <p className="world-error">{item.error}</p>}

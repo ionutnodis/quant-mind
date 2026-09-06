@@ -28,8 +28,7 @@ const response = {
   refreshing: false,
 };
 
-function renderWorld() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+function renderWorld(client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })) {
   return render(<QueryClientProvider client={client}><World /></QueryClientProvider>);
 }
 
@@ -145,6 +144,56 @@ test("keeps raw comma-separated input intact while typing a second symbol", asyn
     fireEvent.input(input, { target: { value: `${(input as HTMLInputElement).value}${character}` } });
   }
   expect(input).toHaveValue("NVDA, ASML");
+});
+
+test("keeps the acknowledged profile when the post-save cache read fails", async () => {
+  let reads = 0;
+  const profile = { watch_symbols: ["NVDA"], interests: ["chips"], regions: ["US"] };
+  server.use(
+    http.get("/api/world", () => reads++ === 0 ? HttpResponse.json(response) : HttpResponse.json({ detail: "Cache read unavailable" }, { status: 503 })),
+    http.put("/api/world/profile", () => HttpResponse.json(profile)),
+  );
+  renderWorld();
+  fireEvent.change(await screen.findByLabelText("Watch symbols", { exact: true }), { target: { value: "NVDA" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save lens" }));
+  expect(await screen.findByText("Lens saved.", { exact: true })).toBeInTheDocument();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Cache read unavailable");
+  expect(screen.getByLabelText("Watch symbols", { exact: true })).toHaveValue("NVDA");
+  expect(screen.getByLabelText("Interests", { exact: true })).toHaveValue("chips");
+  expect(screen.getByLabelText("Regions", { exact: true })).toHaveValue("US");
+});
+
+test("an older pending cache read cannot overwrite a newly acknowledged profile", async () => {
+  let reads = 0;
+  let releaseOld!: () => void;
+  let markOldStarted!: () => void;
+  const pendingOld = new Promise<void>((resolve) => { releaseOld = resolve; });
+  const oldStarted = new Promise<void>((resolve) => { markOldStarted = resolve; });
+  const profile = { watch_symbols: ["NVDA"], interests: ["chips"], regions: ["US"] };
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  server.use(
+    http.get("/api/world", async () => {
+      reads += 1;
+      if (reads === 2) { markOldStarted(); await pendingOld; return HttpResponse.json(response); }
+      return reads === 1 ? HttpResponse.json(response) : HttpResponse.json({ detail: "Cache read unavailable" }, { status: 503 });
+    }),
+    http.put("/api/world/profile", () => HttpResponse.json(profile)),
+  );
+  renderWorld(client);
+  fireEvent.change(await screen.findByLabelText("Watch symbols", { exact: true }), { target: { value: "NVDA" } });
+  const oldRead = client.refetchQueries({ queryKey: ["world"] });
+  await oldStarted;
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Save lens" }));
+    expect(await screen.findByText("Lens saved.", { exact: true })).toBeInTheDocument();
+    await act(async () => { releaseOld(); await oldRead; });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Cache read unavailable");
+    expect(screen.getByLabelText("Watch symbols", { exact: true })).toHaveValue("NVDA");
+    expect(client.getQueryData<typeof response>(["world", null])?.profile).toEqual(profile);
+  } finally {
+    releaseOld();
+    await oldRead;
+  }
 });
 
 test("keeps lens fields locked while the submitted profile is being saved", async () => {
@@ -335,6 +384,37 @@ test("applying a valid manual book reference fetches its context while preservin
   expect(requestedRefs).toEqual([null, "abc123def456"]);
   expect(window.location.pathname).toBe("/world");
   expect(window.location.search).toBe("?view=compact&book_ref=abc123def456");
+  expect(window.location.hash).toBe("#sources");
+});
+
+test("normalizes an uppercase hexadecimal book reference before requesting and saving its URL", async () => {
+  const requestedRefs: (string | null)[] = [];
+  server.use(http.get("/api/world", ({ request }) => {
+    const ref = new URL(request.url).searchParams.get("book_ref");
+    requestedRefs.push(ref);
+    return ref === "abc123def456" ? HttpResponse.json({ ...response, context: { book_ref: ref, symbols: ["ASML"], label: `Pinned book ${ref}` } }) : ref ? HttpResponse.json({ detail: "Pinned book not found" }, { status: 422 }) : HttpResponse.json(response);
+  }));
+  renderWorld();
+  fireEvent.change(await screen.findByLabelText("Pinned book reference", { exact: true }), { target: { value: " ABC123DEF456 " } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  expect(await screen.findByText("Pinned book abc123def456 · ASML")).toBeInTheDocument();
+  expect(requestedRefs).toEqual([null, "abc123def456"]);
+  expect(window.location.search).toBe("?book_ref=abc123def456");
+  expect(screen.getByLabelText("Pinned book reference", { exact: true })).toHaveValue("abc123def456");
+});
+
+test("opens an uppercase shared book reference using its canonical lowercase identifier", async () => {
+  window.history.replaceState(null, "", "/world?book_ref=ABC123DEF456&view=compact#sources");
+  const refs: (string | null)[] = [];
+  server.use(http.get("/api/world", ({ request }) => {
+    const ref = new URL(request.url).searchParams.get("book_ref");
+    refs.push(ref);
+    return HttpResponse.json({ ...response, context: { book_ref: ref, symbols: ["ASML"], label: `Pinned book ${ref}` } });
+  }));
+  renderWorld();
+  expect(await screen.findByText("Pinned book abc123def456 · ASML")).toBeInTheDocument();
+  expect(refs).toEqual(["abc123def456"]);
+  expect(window.location.search).toBe("?book_ref=abc123def456&view=compact");
   expect(window.location.hash).toBe("#sources");
 });
 

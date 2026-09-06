@@ -71,5 +71,10 @@
 @media (max-width:900px) { .world-grid { grid-template-columns:1fr; }.world-rail { grid-template-columns:1fr 1fr; }.world-event { grid-template-columns:minmax(0,1fr) minmax(180px,32%); } }
 @media (max-width:620px) { .world { font-size:16px; }.world-head { align-items:flex-start; flex-direction:column; }.world-asof { text-align:left; }.world-event { grid-template-columns:1fr; }.world-event-main>p,.world-reasons { font-size:16px; }.world-reasons { border-left:0; border-top:1px solid var(--color-hairline); }.world-reasons.is-lens { box-shadow:inset 0 2px var(--color-market); }.world-reasons.is-book { box-shadow:inset 0 2px var(--color-you); }.world-rail { grid-template-columns:1fr; }.world-toolbar label { flex:1 1 120px; }.world-toolbar select { width:100%; }.world input,.world select,.world button { font-size:16px; } }
 @media (max-width:767px),(max-height:599px) { .world,.world-event-main>p,.world-reasons,.world input,.world select,.world button { font-size:16px; } }
-@media (pointer:coarse),(any-pointer:coarse) { .world :where(a[href],button,input,select) { min-block-size:44px; min-inline-size:44px; } }
+@media (pointer:coarse),(any-pointer:coarse) {
+  .world :where(a[href],button,input,select) { min-block-size:44px; min-inline-size:44px; }
+  /* Inline text ignores minimum dimensions; retain wrapping inside a real
+     link box so phone and tablet taps reach the full 44px target. */
+  .world a[href] { display:inline-block; max-inline-size:100%; vertical-align:middle; }
+}
 @media (min-width:1800px) { .world-grid { grid-template-columns:minmax(0,3fr) minmax(320px,1fr); }.world-event { grid-template-columns:minmax(0,1fr) 300px; } }

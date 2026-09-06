@@ -19,6 +19,25 @@ export interface Brief {
 
 const TOKEN = import.meta.env.VITE_QM_TOKEN as string | undefined;
 
+function errorDetail(value: unknown): string | undefined {
+  if (typeof value === "string") return value.trim() || undefined;
+  if (!Array.isArray(value)) return undefined;
+  // FastAPI validation evidence also carries `input` and `ctx`, which can
+  // contain credentials. Only use its explicit field location and message.
+  const messages = value.slice(0, 8).flatMap((issue: unknown) => {
+    if (!issue || typeof issue !== "object") return [];
+    const { loc, msg } = issue as { loc?: unknown; msg?: unknown };
+    if (typeof msg !== "string" || !msg.trim()) return [];
+    const field = Array.isArray(loc) ? loc.slice(0, 8).reduce<string>((name, part) => {
+      if (typeof part === "number" && Number.isSafeInteger(part) && part >= 0) return `${name}[${part}]`;
+      if (typeof part !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(part) || ["body", "query", "path", "header"].includes(part)) return name;
+      return name ? `${name}.${part}` : part;
+    }, "") : "";
+    return [`${field ? `${field}: ` : ""}${msg.trim().slice(0, 300)}`];
+  });
+  return messages.length ? [...new Set(messages)].join("; ") : undefined;
+}
+
 // Shared fetch wrapper: attaches the bearer token + JSON content type, and —
 // unlike a bare fetch() — parses a structured `{ detail }` error body (the
 // shape every backend 422 uses) into the thrown Error's message so callers
@@ -35,8 +54,8 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
   if (!res.ok) {
     let detail = `${path} → ${res.status}`;
     try {
-      const body = (await res.json()) as { detail?: string };
-      if (body?.detail) detail = body.detail;
+      const body = (await res.json()) as { detail?: unknown };
+      detail = errorDetail(body?.detail) ?? detail;
     } catch {
       // non-JSON error body — fall back to the status line above
     }

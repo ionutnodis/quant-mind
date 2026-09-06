@@ -36,6 +36,19 @@ test("World route saves a local lens against the real API and keeps pinned conte
   await expect(page).toHaveURL(new RegExp(`/macro\\?book_ref=${ref}`));
 });
 
+test("World presents the real API's validation details without losing the edited lens", async ({ page }) => {
+  await page.goto("/world");
+  const symbols = page.getByLabel("Watch symbols", { exact: true });
+  await symbols.fill("NOT A SYMBOL");
+  const validation = page.waitForResponse((response) => response.url().endsWith("/api/world/profile") && response.request().method() === "PUT");
+  await page.getByRole("button", { name: "Save lens" }).click();
+  expect((await validation).status()).toBe(422);
+  await expect(page.getByRole("alert")).toContainText(/watch_symbols:.*ticker identifiers/i);
+  await expect(page.getByRole("alert")).not.toContainText("[object Object]");
+  await expect(symbols).toHaveValue("NOT A SYMBOL");
+  await expect(symbols).toBeEnabled();
+});
+
 test("World reflows from phone through ultrawide without horizontal scrolling", async ({ page }) => {
   for (const width of [320, 390, 640, 768, 1440, 2560, 3440]) {
     await page.setViewportSize({ width, height: 900 });
@@ -79,5 +92,43 @@ test("long event text and saved lens values wrap inside narrow viewports", async
     await page.goto("/world");
     await expect(page.getByRole("heading", { name: title })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
+});
+
+test.describe("World coarse-pointer targets", () => {
+  test.use({ hasTouch: true });
+
+  for (const viewport of [{ width: 390, height: 844 }, { width: 834, height: 1112 }]) {
+    test(`event and source links have real 44px touch boxes at ${viewport.width}px`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.route("**/api/world", async (route) => {
+        const upstream = await route.fetch();
+        const snapshot = await upstream.json();
+        await route.fulfill({ json: {
+          ...snapshot,
+          items: ["Policy update", "W".repeat(300)].map((title, index) => ({
+            id: `touch-${index}`, source_id: "fed", source_name: "Federal Reserve",
+            title, summary: "A cached policy event.", url: `https://example.org/touch-${index}`,
+            published_at: "2026-09-05T08:00:00Z", time_kind: "published",
+            topics: [], regions: [], relevance: 0, reasons: [], matched_symbols: [],
+          })),
+        } });
+      });
+      await page.goto("/world");
+      await expect(page.getByRole("link", { name: "Policy update", exact: true })).toBeVisible();
+      expect(await page.evaluate(() => matchMedia("(any-pointer: coarse)").matches)).toBe(true);
+      const links = await page.locator(".world a[href]").evaluateAll((anchors) => anchors.map((anchor) => {
+        const box = anchor.getBoundingClientRect();
+        return { text: anchor.textContent, width: box.width, height: box.height };
+      }));
+      expect(links.length).toBeGreaterThan(3);
+      for (const link of links) {
+        expect(link.width, `${link.text} width`).toBeGreaterThanOrEqual(44);
+        expect(link.height, `${link.text} height`).toBeGreaterThanOrEqual(44);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      if (viewport.width < 768) await expect(page.getByRole("button", { name: "Save lens" })).toBeHidden();
+      else await expect(page.getByRole("button", { name: "Save lens" })).toBeVisible();
+    });
   }
 });
