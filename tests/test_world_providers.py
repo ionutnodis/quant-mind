@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 from base64 import b64decode
 from datetime import UTC, datetime
 from email.utils import format_datetime
@@ -104,7 +105,93 @@ def test_atom_parser_accepts_namespaces_and_rejects_bad_future_date_and_unsafe_u
 
 def test_timezone_less_supplied_date_is_rejected() -> None:
     xml = b"<rss><channel><item><title>Ambiguous</title><link>https://example.gov/a</link><pubDate>2026-09-05T10:00:00</pubDate></item></channel></rss>"
-    assert parse_xml(source(), xml, NOW) == []
+    with pytest.raises(ProviderError, match="valid records"):
+        parse_xml(source(), xml, NOW)
+
+
+@pytest.mark.parametrize("kind,root,container,entry", [
+    ("rss", "rss", "channel", "item"), ("atom", "feed", None, "entry"),
+])
+def test_xml_fields_and_entries_are_only_read_at_their_feed_defined_level(kind, root, container, entry) -> None:
+    """Descendant metadata cannot replace fields or become a separate feed event."""
+    item = (
+        f"<{entry}><metadata><title>Injected</title><link>https://example.gov/injected</link>"
+        f"<updated>not-a-date</updated><{entry}><title>Nested</title>"
+        f"<link>https://example.gov/nested</link></{entry}></metadata>"
+        f"<title>Direct</title><link>https://example.gov/direct</link></{entry}>"
+    )
+    wrapper = f"<{container}>{item}</{container}>" if container else item
+    events = parse_xml(source(kind=kind), f"<{root}>{wrapper}</{root}>".encode(), NOW)
+    assert [(event.title, event.url) for event in events] == [("Direct", "https://example.gov/direct")]
+
+
+@pytest.mark.parametrize("kind,template", [
+    pytest.param("rss", "<rss><channel><wrapper><item>{fields}</item></wrapper></channel></rss>", id="nested-rss"),
+    pytest.param("atom", "<feed xmlns='http://www.w3.org/2005/Atom'><wrapper><entry>{fields}</entry></wrapper></feed>", id="nested-atom"),
+    pytest.param("rss", "<rss><channel/><item>{fields}</item></rss>", id="outside-channel"),
+    pytest.param("rss", "<rss><channel><entry>{fields}</entry></channel></rss>", id="wrong-type-rss"),
+    pytest.param("atom", "<feed><item>{fields}</item></feed>", id="wrong-type-atom"),
+])
+def test_misplaced_xml_records_are_a_failed_batch_not_a_healthy_empty_feed(kind, template) -> None:
+    """Valid-looking fields in a misplaced record must not advance source health."""
+    fields = "<title>private-headline</title><link>https://example.gov/misplaced</link>"
+    with pytest.raises(ProviderError, match="valid records") as caught:
+        parse_xml(source(kind=kind), template.format(fields=fields).encode(), NOW)
+    assert "private-headline" not in str(caught.value)
+
+
+@pytest.mark.parametrize("kind,root,container,entry", [
+    ("rss", "rss", "channel", "item"), ("atom", "feed", None, "entry"),
+])
+def test_misplaced_xml_records_do_not_discard_valid_direct_siblings(kind, root, container, entry) -> None:
+    """Misplaced records are rejected individually when the batch has real entries."""
+    records = (
+        f"<wrapper><{entry}><title>Misplaced</title><link>https://example.gov/misplaced</link></{entry}></wrapper>"
+        f"<{entry}><title>Direct</title><link>https://example.gov/direct</link></{entry}>"
+    )
+    content = f"<{container}>{records}</{container}>" if container else records
+    events = parse_xml(source(kind=kind), f"<{root}>{content}</{root}>".encode(), NOW)
+    assert [(event.title, event.url) for event in events] == [("Direct", "https://example.gov/direct")]
+
+
+@pytest.mark.parametrize("kind", ["rss", "gdelt"])
+@pytest.mark.parametrize("field", ["title", "summary"])
+def test_malformed_html_in_one_record_does_not_discard_valid_neighbors(kind, field) -> None:
+    """HTMLParser assertions in untrusted text are confined to that record."""
+    if kind == "rss":
+        tag = "description" if field == "summary" else "title"
+        bad_title = "<title>Bad</title>" if field == "summary" else ""
+        body = (
+            "<rss><channel><item><title>Before</title><link>https://example.gov/before</link></item>"
+            f"<item>{bad_title}<{tag}><![CDATA[<![broken]>]]></{tag}>"
+            "<link>https://example.gov/bad</link></item>"
+            "<item><title>After</title><link>https://example.gov/after</link></item></channel></rss>"
+        ).encode()
+        events = parse_xml(source(), body, NOW)
+    else:
+        bad = {"title": "Bad", "url": "https://example.gov/bad"}
+        bad["domain" if field == "summary" else "title"] = "<![broken]>"
+        body = json.dumps({"articles": [
+            {"title": "Before", "url": "https://example.gov/before"}, bad,
+            {"title": "After", "url": "https://example.gov/after"},
+        ]}).encode()
+        events = parse_json(source(kind=kind), body, NOW)
+    assert [event.title for event in events] == ["Before", "After"]
+
+
+@pytest.mark.parametrize("kind,body", [
+    ("rss", b"<rss><channel><item><title>private-headline</title></item></channel></rss>"),
+    ("atom", b"<feed><entry><title>private-headline</title></entry></feed>"),
+    ("usgs_geojson", b'{"features":[null,{"properties":{"title":"private-headline"}}]}'),
+    ("gdelt", b'{"articles":[null,{"title":"private-headline"}]}'),
+    ("x", b'{"data":[{"id":"invalid","text":"private-headline"}],"meta":{"result_count":1}}'),
+    ("reddit", b'{"data":{"children":[{"data":{"title":"private-headline"}}]}}'),
+])
+def test_nonempty_all_invalid_batch_is_a_safe_provider_failure(kind, body) -> None:
+    parser = parse_xml if kind in {"rss", "atom"} else parse_json
+    with pytest.raises(ProviderError, match="valid records") as caught:
+        parser(source(kind=kind), body, NOW)
+    assert "private-headline" not in str(caught.value)
 
 
 @pytest.mark.parametrize("xml", [b"<html><body>blocked</body></html>", b"<something/>"])

@@ -110,6 +110,38 @@ async def test_unexpected_provider_failure_is_redacted_and_releases_lease(tmp_pa
     assert not result["refreshing"]
 
 
+@pytest.mark.parametrize("kind,body", [
+    ("rss", b"<rss><channel><item><title>Bad date</title><link>https://example.org/new</link><pubDate>private-invalid-date</pubDate></item></channel></rss>"),
+    ("gdelt", b'{"articles":[{"title":"Bad date","url":"https://example.org/new","seendate":"private-invalid-date"}]}'),
+    pytest.param("rss", b"<rss><channel><wrapper><item><title>private-invalid-date</title><link>https://example.org/new</link></item></wrapper></channel></rss>", id="nested-rss"),
+    pytest.param("atom", b"<feed><wrapper><entry><title>private-invalid-date</title><link href='https://example.org/new'/></entry></wrapper></feed>", id="nested-atom"),
+])
+async def test_all_invalid_refresh_retains_cached_items_and_old_success_timestamp(tmp_path, kind, body):
+    """Rejected nonempty batches must not make stale cached content appear newly healthy."""
+    from quantmind.world.providers import parse_xml
+    from quantmind.world.service import WorldService
+    from quantmind.world.sources import SOURCES
+    from quantmind.world.store import WorldStore
+
+    source = replace(SOURCES[0], kind=kind)
+    old_success = NOW - timedelta(hours=2)
+    cache = WorldStore(tmp_path)
+    cache.record_success(source.id, parse_xml(source, FEED, NOW), old_success, source.interval_seconds)
+    service = WorldService(cache, sources=(source,), clock=lambda: NOW,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=body)))
+
+    assert await service.refresh() == {"updated": 0, "failed": 1, "skipped": 0}
+    snapshot = service.snapshot([], None)
+    status = snapshot["sources"][0]
+    assert status["state"] == "error"
+    assert status["last_success"] == old_success.isoformat()
+    assert status["last_attempt"] == NOW.isoformat()
+    assert status["stale"]
+    assert snapshot["as_of"] == old_success.isoformat()
+    assert [item.title for item in snapshot["items"]] == ["Nvidia market update"]
+    assert "private-invalid-date" not in str(snapshot)
+
+
 async def test_state_load_failure_after_acquiring_lease_releases_it(tmp_path, monkeypatch):
     from quantmind.world.service import WorldService
     from quantmind.world.sources import SOURCES

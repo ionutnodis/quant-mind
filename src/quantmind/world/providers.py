@@ -8,6 +8,7 @@ import re
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
+from xml.etree.ElementTree import TreeBuilder
 
 import httpx
 from defusedxml import ElementTree
@@ -18,6 +19,9 @@ from .urls import canonicalize_public_http_url
 
 MAX_BODY = 2 * 1024 * 1024
 MAX_EVENTS = 200
+MAX_XML_DEPTH = 32
+MAX_XML_NODES = 10_000
+MAX_FIELD_TEXT = 16 * 1024
 WHOLE_REQUEST_TIMEOUT = 12.0
 
 
@@ -25,6 +29,30 @@ class ProviderError(RuntimeError):
     def __init__(self, message: str, *, retry_after: int | None = None) -> None:
         super().__init__(message)
         self.retry_after = retry_after
+
+
+class _BoundedTreeBuilder(TreeBuilder):
+    """Reject pathological structure while building, before allocating its full tree."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.depth = 0
+        self.nodes = 0
+        self.has_records = False
+
+    def start(self, tag, attrs):
+        self.depth += 1
+        self.nodes += 1
+        if self.depth > MAX_XML_DEPTH or self.nodes > MAX_XML_NODES:
+            raise ProviderError("XML feed was too complex")
+        if tag[tag.rfind("}") + 1:].lower() in {"item", "entry"}:
+            self.has_records = True
+        return super().start(tag, attrs)
+
+    def end(self, tag):
+        node = super().end(tag)
+        self.depth -= 1
+        return node
 
 
 class _TextExtractor(HTMLParser):
@@ -47,6 +75,8 @@ class _TextExtractor(HTMLParser):
 
 
 def _plain(value: str | None, limit: int) -> str:
+    if value is not None and len(value) > MAX_FIELD_TEXT:
+        raise ValueError("Feed text was too large")
     parser = _TextExtractor()
     parser.feed(html.unescape(value or ""))
     return re.sub(r"\s+", " ", " ".join(parser.parts)).strip()[:limit]
@@ -83,21 +113,27 @@ def _iso(value: datetime) -> str:
 
 
 def _event(source: Source, *, title: object, url: object, summary: object, supplied_date: object, now: datetime, observed: bool = False, milliseconds: bool = False) -> WorldEvent | None:
-    clean_title = _plain(str(title or ""), 300)
-    clean_url = _safe_url(str(url or ""))
-    if not clean_title or not clean_url:
+    # The sanitizer and model validation process one untrusted record. A bad
+    # headline/summary must never discard valid siblings or expose its contents.
+    try:
+        clean_title = _plain(str(title or ""), 300)
+        clean_url = _safe_url(str(url or ""))
+        if not clean_title or not clean_url:
+            return None
+        timestamp = _date(supplied_date, now, milliseconds=milliseconds)
+        if supplied_date not in (None, "") and timestamp is None:
+            return None
+        time_kind = "observed" if observed or timestamp is None else "published"
+        timestamp = timestamp or now
+        event_id = hashlib.sha256(f"{source.id}\0{clean_url}".encode()).hexdigest()[:32]
+        return WorldEvent(id=event_id, source_id=source.id, source_name=source.name, title=clean_title, url=clean_url, summary=_plain(str(summary or ""), 500), published_at=_iso(timestamp), time_kind=time_kind, topics=list(source.topics), regions=list(source.regions))
+    except (AssertionError, ValueError, TypeError, RecursionError):
         return None
-    timestamp = _date(supplied_date, now, milliseconds=milliseconds)
-    if supplied_date not in (None, "") and timestamp is None:
-        return None
-    time_kind = "observed" if observed or timestamp is None else "published"
-    timestamp = timestamp or now
-    event_id = hashlib.sha256(f"{source.id}\0{clean_url}".encode()).hexdigest()[:32]
-    return WorldEvent(id=event_id, source_id=source.id, source_name=source.name, title=clean_title, url=clean_url, summary=_plain(str(summary or ""), 500), published_at=_iso(timestamp), time_kind=time_kind, topics=list(source.topics), regions=list(source.regions))
 
 
 def _child_text(node: ElementTree.Element, names: tuple[str, ...]) -> str | None:
-    for child in node.iter():
+    # RSS/Atom fields belong directly to an item/entry, not its descendants.
+    for child in node:
         if child.tag.rsplit("}", 1)[-1].lower() in names and child.text:
             return child.text
     return None
@@ -116,16 +152,29 @@ def _valid_reddit_permalink(value: object) -> str | None:
 
 
 def parse_xml(source: Source, body: bytes, now: datetime) -> list[WorldEvent]:
+    """Parse bounded RSS channel/items or Atom feed/entries, never nested records."""
+    if len(body) > MAX_BODY:
+        raise ProviderError("Source response was too large")
     try:
-        root = ElementTree.fromstring(body)
+        builder = _BoundedTreeBuilder()
+        parser = ElementTree.DefusedXMLParser(target=builder, forbid_dtd=True)
+        parser.feed(body)
+        root = parser.close()
+    except ProviderError:
+        raise
     except Exception:
         raise ProviderError("Invalid XML feed") from None
     root_name = root.tag.rsplit("}", 1)[-1].lower()
     if root_name not in {"rss", "feed"}:
         raise ProviderError("Invalid XML feed")
-    if root_name == "rss" and not any(node.tag.rsplit("}", 1)[-1].lower() == "channel" for node in root):
-        raise ProviderError("Invalid XML feed")
-    entries = [node for node in root.iter() if node.tag.rsplit("}", 1)[-1].lower() in {"item", "entry"}]
+    if root_name == "rss":
+        channels = [node for node in root if node.tag.rsplit("}", 1)[-1].lower() == "channel"]
+        if len(channels) != 1:
+            raise ProviderError("Invalid XML feed")
+        container, entry_name = channels[0], "item"
+    else:
+        container, entry_name = root, "entry"
+    entries = [node for node in container if node.tag.rsplit("}", 1)[-1].lower() == entry_name]
     events: list[WorldEvent] = []
     for node in entries[:MAX_EVENTS]:
         link = _child_text(node, ("link",)) or _child_text(node, ("guid",))
@@ -137,15 +186,22 @@ def parse_xml(source: Source, body: bytes, now: datetime) -> list[WorldEvent]:
         event = _event(source, title=_child_text(node, ("title",)), url=link, summary=_child_text(node, ("description", "summary", "content")), supplied_date=date_value, now=now)
         if event:
             events.append(event)
+    # Misplaced records are not admitted, but cannot make a malformed batch
+    # appear successfully empty. Track their presence during the bounded build.
+    if builder.has_records and not events:
+        raise ProviderError("Source feed contained no valid records")
     return events
 
 
 def parse_json(source: Source, body: bytes, now: datetime) -> list[WorldEvent]:
+    if len(body) > MAX_BODY:
+        raise ProviderError("Source response was too large")
     try:
         payload = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (ValueError, RecursionError):
         raise ProviderError("Invalid JSON feed") from None
     events: list[WorldEvent] = []
+    records: list[object] = []
     if source.kind == "usgs_geojson":
         if not isinstance(payload, dict) or not isinstance(payload.get("features"), list):
             raise ProviderError("Invalid JSON feed")
@@ -211,6 +267,8 @@ def parse_json(source: Source, body: bytes, now: datetime) -> list[WorldEvent]:
             event = _event(source, title=record.get("title"), url=f"https://www.reddit.com{permalink}", summary=record.get("selftext"), supplied_date=supplied, now=now)
             if event:
                 events.append(event)
+    if records and not events:
+        raise ProviderError("Source feed contained no valid records")
     return events
 
 
@@ -292,9 +350,23 @@ async def _fetch_source(source: Source, client: httpx.AsyncClient, config: World
     if source.kind != "reddit":
         request_url = source.url
     body = await _bounded_response(client, "GET", request_url, headers=headers, params=params)
-    if source.kind in {"usgs_geojson", "gdelt", "x", "reddit"}:
-        return parse_json(source, body, now)
-    return parse_xml(source, body, now)
+    parser = parse_json if source.kind in {"usgs_geojson", "gdelt", "x", "reddit"} else parse_xml
+    # Body, XML structure, record count and sanitizer input are bounded before
+    # expensive work. Keep it off-loop, but retain the caller's concurrency slot
+    # until the worker finishes: cancelling to_thread cannot stop its thread.
+    task = asyncio.create_task(asyncio.to_thread(parser, source, body, now))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue  # Repeated shutdown/deadline cancellation cannot abandon work.
+            except Exception:
+                break
+        await asyncio.gather(task, return_exceptions=True)
+        raise
 
 
 async def fetch_source(source: Source, client: httpx.AsyncClient, config: WorldConfig, now: datetime) -> list[WorldEvent]:
