@@ -54,6 +54,9 @@ REGION_ALIASES = {
     "asia": "asia",
 }
 TICKER_CHARACTER = r"[A-Za-z0-9.^_=/+\-]"
+# A period only extends an identifier when another ticker character follows:
+# NVDA.AS is distinct from NVDA, while sentence-ending NVDA. is still NVDA.
+TICKER_CONTINUATION = rf"(?:[A-Za-z0-9^_=/+\-]|\.{TICKER_CHARACTER})"
 
 
 class RankedEvent(WorldEvent):
@@ -69,8 +72,13 @@ def _contains(text: str, phrase: str, *, ignore_case: bool = True) -> bool:
 
 def _contains_ticker(text: str, ticker: str, *, cashtag: bool = False) -> bool:
     token = f"${ticker}" if cashtag else ticker
+    # Ticker matching is deliberately case-sensitive. A native literal scan
+    # can rule out absent watch symbols before running the more expensive
+    # boundary regex; company aliases still use their Unicode-aware search.
+    if token not in text:
+        return False
     return bool(re.search(
-        rf"(?<!{TICKER_CHARACTER}){re.escape(token)}(?!{TICKER_CHARACTER})",
+        rf"(?<!{TICKER_CHARACTER}){re.escape(token)}(?!{TICKER_CONTINUATION})",
         text,
     ))
 
@@ -106,35 +114,36 @@ def rank_events(events: list[WorldEvent], symbols: list[str], profile: WorldProf
                 now: datetime) -> list[RankedEvent]:
     holdings = set(symbols)
     watch = set(profile.watch_symbols) - holdings
+    candidates = (("Holding", sorted(holdings), 70), ("Watchlist", sorted(watch), 45))
+    interests = [(interest, TOPIC_WORDS.get(interest.casefold(), (interest,)))
+                 for interest in profile.interests]
+    regions = []
+    for region in profile.regions:
+        key = REGION_ALIASES.get(region.casefold(), region.casefold())
+        regions.append((region, key, REGION_WORDS.get(key, (region,))))
     ranked = []
     for event in events:
         text = f"{event.title} {event.summary}"
         reasons, matched = [], []
         score = 0
-        for label, candidates, weight in (("Holding", holdings, 70), ("Watchlist", watch, 45)):
-            for symbol in sorted(candidates):
+        for label, group, weight in candidates:
+            for symbol in group:
                 mention = _mention(text, symbol)
                 if mention:
                     reasons.append(f"{label} {symbol}: {mention}")
                     matched.append(symbol)
                     score += weight
         topic_text = text + " " + " ".join(event.topics)
-        for interest in profile.interests:
-            if any(_contains(topic_text, word) for word in TOPIC_WORDS.get(interest.casefold(), (interest,))):
+        for interest, words in interests:
+            if any(_contains(topic_text, word) for word in words):
                 reasons.append(f"Interest: {interest}")
                 score += 15
         event_regions = {
             REGION_ALIASES.get(value.casefold(), value.casefold())
             for value in event.regions
         }
-        for region in profile.regions:
-            region_key = REGION_ALIASES.get(region.casefold(), region.casefold())
-            metadata_match = region_key in event_regions
-            text_match = any(
-                _contains(text, word)
-                for word in REGION_WORDS.get(region_key, (region,))
-            )
-            if metadata_match or text_match:
+        for region, region_key, words in regions:
+            if region_key in event_regions or any(_contains(text, word) for word in words):
                 reasons.append(f"Region: {region}")
                 score += 5
         ranked.append(RankedEvent(**event.model_dump(), relevance=min(score, 100),
