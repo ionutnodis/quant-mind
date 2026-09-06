@@ -26,7 +26,7 @@ test("unsafe cached article and source URLs remain readable without clickable li
     "http://%31%32%37.0.0.1/a", "http://2130706433/a", "http://[::1]/a",
     "http://[::ffff:127.0.0.1]/a", "http://192.168.1.1/a", "http://8.8.8.8/a",
     "http://[2606:4700:4700::1111]/a", "http://news.localhost./a", "http://news.local/a",
-    "https://@example.org/a", "https://user:password@example.org/a",
+    "https://@example.org/a", "https://TEST_USER:TEST_SECRET@example.org/a",
     "https://example.org\\@127.0.0.1/a", "https://bad_label.example.org/a",
     "http://１２７。０。０。１/a", "https://example.org/\narticle", "javascript:alert(1)",
   ];

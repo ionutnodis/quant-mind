@@ -24,7 +24,7 @@ UNSAFE_LINKS = [
     "http://news.local/a",
     "http://intranet/a",
     "https://@example.org/a",
-    "https://user:password@example.org/a",
+    "https://TEST_USER:TEST_SECRET@example.org/a",
     "https://example.org\\@127.0.0.1/a",
     "https://example.org:99999/a",
     "https://bad_label.example.org/a",
